@@ -71,15 +71,15 @@ export class VideoCertService {
   constructor(private readonly config: ConfigService) {
     // On GCE: Application Default Credentials (ADC) — no key file needed
     // Local dev: set GOOGLE_APPLICATION_CREDENTIALS env var
-    const projectId = config.get<string>('GCP_PROJECT_ID');
-    const keyFile = config.get<string>('GCP_KEY_FILE');   // undefined in prod — ADC used
+    const projectId = config.get<string>('app.gcp.projectId');
+    const keyFile = config.get<string>('app.gcp.keyFile');   // undefined in prod — ADC used
 
     this.storage = new Storage({
       ...(projectId ? { projectId } : {}),
       ...(keyFile ? { keyFilename: keyFile } : {}),
     });
 
-    const bucketName = config.getOrThrow<string>('GCS_BUCKET_VIDEO_CERTS');
+    const bucketName = config.getOrThrow<string>('app.gcs.bucketVideoCerts');
     this.bucket = this.storage.bucket(bucketName);
   }
 

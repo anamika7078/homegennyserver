@@ -5,11 +5,11 @@ import { DataSource } from 'typeorm';
 // Used by TypeOrmModule.forRootAsync() in app.module.ts
 export const typeOrmConfig = (config: ConfigService): TypeOrmModuleOptions => ({
   type:             'postgres',
-  url:              config.get<string>('DATABASE_URL'),
+  url:              config.get<string>('database.url'),
   autoLoadEntities: true,
-  synchronize:      config.get('NODE_ENV') === 'development',   // NEVER true in prod
-  logging:          config.get('NODE_ENV') === 'development' ? ['query', 'error'] : ['error'],
-  ssl:              config.get('NODE_ENV') === 'production' ? { rejectUnauthorized: false } : false,
+  synchronize:      config.get('app.env') === 'development',   // NEVER true in prod
+  logging:          config.get('app.env') === 'development' ? ['query', 'error'] : ['error'],
+  ssl:              config.get('app.env') === 'production' ? { rejectUnauthorized: false } : false,
   extra: {
     max:                   20,
     min:                    2,

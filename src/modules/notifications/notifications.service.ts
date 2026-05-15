@@ -40,17 +40,17 @@ export class NotificationsService {
     // ── Firebase Admin (GCP ADC — no key file on GCE) ──────────────────────
     if (!admin.apps.length) {
       admin.initializeApp({
-        projectId: configService.get<string>('GCP_PROJECT_ID'),
+        projectId: configService.get<string>('app.gcp.projectId'),
       });
     }
 
     // ── SendGrid SMTP ───────────────────────────────────────────────────────
     this.mailer = nodemailer.createTransport({
-      host: configService.get('SMTP_HOST', 'smtp.sendgrid.net'),
-      port: configService.get<number>('SMTP_PORT', 587),
+      host: configService.get('app.smtp.host', 'smtp.sendgrid.net'),
+      port: configService.get<number>('app.smtp.port', 587),
       auth: {
-        user: configService.get('SMTP_USER', 'apikey'),
-        pass: configService.get('SMTP_PASS'),
+        user: configService.get('app.smtp.user', 'apikey'),
+        pass: configService.get('app.smtp.pass'),
       },
     });
   }
@@ -120,7 +120,7 @@ export class NotificationsService {
   async sendEmail(to: string, subject: string, text: string): Promise<void> {
     try {
       await this.mailer.sendMail({
-        from: this.configService.get('EMAIL_FROM', 'noreply@homegenny.com'),
+        from: this.configService.get('app.smtp.from', 'noreply@homegenny.com'),
         to,
         subject: `HomeGenny — ${subject.replace(/_/g, ' ')}`,
         text,

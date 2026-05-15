@@ -74,14 +74,10 @@ export class AuthService {
 
     const accessToken = this.jwtService.sign(payload);
 
-    const refreshSecret =
-      this.config.get<string>('JWT_REFRESH_SECRET');
-    const refreshExpiry =
-      this.config.get<string>('JWT_REFRESH_EXPIRES_IN')
-      ?? this.config.get<string>('JWT_REFRESH_EXPIRY')
-      ?? '7d';
+    const refreshSecret = this.config.get<string>('app.jwt.refreshSecret');
+    const refreshExpiry = this.config.get<string>('app.jwt.refreshExpiresIn') ?? '7d';
     if (!refreshSecret) {
-      throw new Error('[HomeGenny] JWT_REFRESH_SECRET is not set in .env.production');
+      throw new Error('[HomeGenny] app.jwt.refreshSecret is not set in environment.');
     }
     const refreshToken = this.jwtService.sign(
       { sub: user.id },

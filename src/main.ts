@@ -15,8 +15,8 @@ async function bootstrap() {
   });
 
   const configService = app.get(ConfigService);
-  const port    = configService.get<number>('PORT', 3001);
-  const nodeEnv = configService.get<string>('NODE_ENV', 'development');
+  const port    = configService.get<number>('app.port', 3001);
+  const nodeEnv = configService.get<string>('app.env', 'development');
 
   // Security headers via helmet (require-style for CJS compat)
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -27,7 +27,7 @@ async function bootstrap() {
   app.use(compression());
 
   // CORS
-  const corsOrigins = configService.get<string>('CORS_ORIGINS', 'http://localhost:3000').split(',');
+  const corsOrigins = configService.get<string[]>('app.corsOrigins') ?? ['http://localhost:3000'];
   app.enableCors({
     origin:      corsOrigins,
     credentials: true,

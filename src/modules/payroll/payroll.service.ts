@@ -51,12 +51,12 @@ export class PayrollService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private getRazorpay(): any {
     if (!this._razorpay) {
-      const keyId = this.config.get<string>('RAZORPAY_KEY_ID', '');
-      const keySecret = this.config.get<string>('RAZORPAY_KEY_SECRET', '');
+      const keyId = this.config.get<string>('app.razorpay.keyId', '');
+      const keySecret = this.config.get<string>('app.razorpay.keySecret', '');
       if (!keyId || keyId.startsWith('YOUR_') || !keySecret || keySecret.startsWith('YOUR_')) {
         throw new Error(
           'Razorpay credentials are not configured. ' +
-          'Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in your .env file.',
+          'Check your environment variables for app.razorpay.keyId and app.razorpay.keySecret.',
         );
       }
       // Razorpay uses CommonJS exports — require() avoids the default-import interop issue

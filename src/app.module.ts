@@ -48,17 +48,17 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         type: 'postgres' as const,
-        url: config.get<string>('DATABASE_URL'),
+        url: config.get<string>('database.url'),
         autoLoadEntities: true,
-        synchronize: config.get('NODE_ENV') === 'development',
-        logging: config.get('NODE_ENV') === 'development',
-        ssl: config.get('NODE_ENV') === 'production' ? { rejectUnauthorized: false } : false,
+        synchronize: config.get('app.env') === 'development',
+        logging: config.get('app.env') === 'development',
+        ssl: config.get('app.env') === 'production' ? { rejectUnauthorized: false } : false,
       }),
     }),
     BullModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
-        const redisUrl = config.get<string>('REDIS_URL') ?? 'redis://127.0.0.1:6379';
+        const redisUrl = config.get<string>('app.redis.url') ?? 'redis://127.0.0.1:6379';
         const redis = parseRedisUrl(redisUrl);
         return { redis };
       },

@@ -15,11 +15,11 @@ interface JwtPayload {
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(private readonly config: ConfigService) {
-    const secret = config.get<string>('JWT_SECRET');
+    const secret = config.get<string>('app.jwt.secret');
     if (!secret) {
       throw new Error(
-        '[HomeGenny] JWT_SECRET environment variable is not set. ' +
-        'Add JWT_SECRET to your .env.production file and restart.',
+        '[HomeGenny] app.jwt.secret configuration is not set. ' +
+        'Check your environment variables.',
       );
     }
     super({
