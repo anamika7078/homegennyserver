@@ -20,6 +20,7 @@ export enum PipelineStage {
   S4_AGREEMENTS = 'S4_AGREEMENTS',
   S5_DEPLOY = 'S5_DEPLOY',
   TERMINAL = 'TERMINAL',
+  DEFERRED = 'DEFERRED',
 }
 
 export enum TerminalOutcome {
@@ -57,11 +58,14 @@ export class StaffApplicant {
   @Column({ unique: true, length: 30 })
   staff_code: string; // HG-DR-20250601-0047
 
+  @Column({ nullable: true })
+  user_id: string;
+
   @Column({ type: 'enum', enum: Series })
   series: Series;
 
-  @Column({ type: 'simple-array', nullable: true })
-  role_types: string[]; // ['NS','BP'] for UC; ['H4','SUV'] for DR
+  @Column({ type: 'text', array: true, default: '{}' })
+  role_types: string[]; 
 
   @Column({ type: 'enum', enum: LanguageTier, nullable: true })
   language_tier: LanguageTier; // DR series only
@@ -112,6 +116,23 @@ export class StaffApplicant {
 
   @Column({ type: 'enum', enum: PvStatus, default: PvStatus.NOT_INITIATED })
   pv_status: PvStatus;
+
+  // Financials
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  deposit_amount: number;
+
+  @Column({ default: false })
+  deposit_paid: boolean;
+
+  // Timeline
+  @Column({ type: 'date', nullable: true })
+  training_start_date: Date;
+
+  @Column({ type: 'date', nullable: true })
+  training_end_date: Date;
+
+  @Column({ type: 'date', nullable: true })
+  deployment_ready_date: Date;
 
   // Restrictions (for Conditional outcomes)
   @Column({ type: 'jsonb', default: '{}' })
