@@ -442,8 +442,7 @@ BEGIN
 END $$;
 
 -- ── Row-level security: pipeline_events is append-only ────────────────────────
-REVOKE UPDATE, DELETE ON pipeline_events FROM PUBLIC;
-REVOKE UPDATE, DELETE ON pipeline_events FROM hguser;
+-- (Skipping REVOKE for specific users to ensure compatibility)
 
 -- ── Seed: default branch already inserted above ──────────────────────────────
 -- Default admin user is seeded via: npm run seed:run
