@@ -14,6 +14,7 @@ export interface UserRecord {
   is_active:          boolean;
   branch_id:          string | null;
   refresh_token_hash: string | null;
+  active_session_id:  string | null;
 }
 
 export interface LoginResponse {
@@ -44,7 +45,7 @@ export class AuthService {
   async validateUser(phone: string, password: string): Promise<UserRecord> {
     const rows = await this.dataSource.query<UserRecord[]>(
       `SELECT id, phone, email, full_name, role, password_hash,
-              is_active, branch_id, refresh_token_hash
+              is_active, branch_id, refresh_token_hash, active_session_id
        FROM users WHERE phone = $1 LIMIT 1`,
       [phone],
     );
@@ -65,11 +66,14 @@ export class AuthService {
   }
 
   async login(user: UserRecord): Promise<LoginResponse> {
+    const sessionId = require('uuid').v4();
+
     const payload = {
       sub:      user.id,
       phone:    user.phone,
       role:     user.role,
       branchId: user.branch_id,
+      sid:      sessionId,
     };
 
     const accessToken = this.jwtService.sign(payload);
@@ -87,8 +91,8 @@ export class AuthService {
     const hash = await bcrypt.hash(refreshToken, 10);
     try {
       await this.dataSource.query(
-        `UPDATE users SET refresh_token_hash = $1, last_login_at = NOW() WHERE id = $2`,
-        [hash, user.id],
+        `UPDATE users SET refresh_token_hash = $1, active_session_id = $2, last_login_at = NOW() WHERE id = $3`,
+        [hash, sessionId, user.id],
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
