@@ -61,6 +61,7 @@ const VALID_TRANSITIONS: Record<PipelineStage, PipelineStage[]> = {
   [PipelineStage.S4_AGREEMENTS]: [PipelineStage.S5_DEPLOY, PipelineStage.TERMINAL],
   [PipelineStage.S5_DEPLOY]: [PipelineStage.TERMINAL],
   [PipelineStage.TERMINAL]: [],
+  [PipelineStage.DEFERRED]: [PipelineStage.TERMINAL],
 };
 
 // ── Outcomes that require BM approval ────────────────────────────────────────
