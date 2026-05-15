@@ -146,9 +146,14 @@ CREATE TABLE IF NOT EXISTS staff_applicants (
   deployment_ready_date   DATE,
   mobile                  VARCHAR(20),    -- staff mobile (may differ from user.phone)
   full_name               VARCHAR(200),   -- staff name (may differ from user.full_name)
+  date_of_birth           DATE,
+  address                 TEXT,
+  emergency_contact_name   VARCHAR(200),
+  emergency_contact_mobile VARCHAR(20),
   metadata                JSONB           NOT NULL DEFAULT '{}',
   created_at              TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
-  updated_at              TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+  updated_at              TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+  deleted_at              TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_staff_stage     ON staff_applicants(pipeline_stage);

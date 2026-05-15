@@ -181,7 +181,7 @@ export class PipelineService {
 
       // Update staff record
       staff.pipeline_stage = toStage;
-      staff.current_scenario = newScenario;
+      staff.current_scenario_code = newScenario;
       await manager.save(staff);
 
       // Append-only event log
@@ -232,11 +232,11 @@ export class PipelineService {
       const fromStage = staff.pipeline_stage;
       staff.pipeline_stage = PipelineStage.TERMINAL;
       staff.terminal_outcome = outcome;
-      staff.current_scenario = scenarioCode;
+      staff.current_scenario_code = scenarioCode;
 
       // Auto-blacklist on fraud/NEVER categories
       if (['DR-12', 'DR-13', 'SC-10', 'SC-11', 'SC-12', 'UC-10', 'UC-11', 'UC-12', 'M3X-09', 'M3X-10'].includes(scenarioCode)) {
-        staff.restricted_list = true;
+        staff.restricted_list_flag = true;
         staff.metadata = {
           ...staff.metadata,
           blacklist_reason: `${scenarioCode}: ${reason}`,

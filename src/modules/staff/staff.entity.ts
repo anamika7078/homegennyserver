@@ -70,8 +70,8 @@ export class StaffApplicant {
   @Index()
   pipeline_stage: PipelineStage;
 
-  @Column({ nullable: true, length: 20 })
-  current_scenario: string; // DR-07, SC-12, M3X-05 etc
+  @Column({ name: 'current_scenario_code', nullable: true, length: 20 })
+  current_scenario_code: string; // DR-07, SC-12, M3X-05 etc
 
   @Column({ type: 'enum', enum: TerminalOutcome, nullable: true })
   terminal_outcome: TerminalOutcome;
@@ -124,9 +124,9 @@ export class StaffApplicant {
   };
 
   // Security flags
-  @Column({ default: false })
+  @Column({ name: 'restricted_list_flag', default: false })
   @Index()
-  restricted_list: boolean; // BM-only write
+  restricted_list_flag: boolean; // BM-only write
 
   // Relationships
   @Column({ nullable: true })
