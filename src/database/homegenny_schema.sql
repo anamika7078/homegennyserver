@@ -24,27 +24,25 @@ CREATE EXTENSION IF NOT EXISTS "pg_trgm";     -- trigram text search
 -- ── Enums ────────────────────────────────────────────────────────────────────
 DO $$ BEGIN
 
-  CREATE TYPE staff_series AS ENUM ('MAID', 'SC', 'UC', 'DR');
+  -- ENUMS aligned with Entities
+  CREATE TYPE staff_series AS ENUM ('MAID', 'SKILLED_CARE', 'UNSKILLED_CARE', 'DRIVER', 'SC', 'UC', 'DR');
 
   CREATE TYPE pipeline_stage AS ENUM (
-    'S1_INTAKE',
-    'S2_VERIFY',
-    'S2_5_ASSESS',   -- SC series only: care skills assessment
-    'S3_TRAIN',
-    'S4_AGREEMENTS',
-    'S5_DEPLOY',
-    'DEFERRED',
-    'TERMINAL'
+    'S1_INTAKE', 'S2_VERIFY', 'S2_5_ASSESS', 'S3_TRAIN',
+    'S4_AGREEMENTS', 'S5_DEPLOY', 'TERMINAL', 'DEFERRED'
   );
 
   CREATE TYPE terminal_outcome AS ENUM (
-    'PLACED', 'REJECTED', 'ABANDONED', 'RESTRICTED',
-    'DEFERRED', 'CANCELLED', 'LATE_EXIT'
+    'ENROLLED', 'CONDITIONAL', 'DEFERRED', 'DENIED', 'ABANDONED', 'LATE_EXIT',
+    'PLACED', 'REJECTED', 'RESTRICTED', 'CANCELLED'
   );
 
   CREATE TYPE language_tier AS ENUM ('T1', 'T2', 'T3', 'T4');
 
-  CREATE TYPE pv_status AS ENUM ('CLEAR', 'PENDING', 'FAILED', 'EXEMPT');
+  CREATE TYPE pv_status AS ENUM (
+    'NOT_INITIATED', 'IN_PROGRESS', 'CLEAR', 'ADVERSE', 'EXPIRED',
+    'PENDING', 'FAILED', 'EXEMPT'
+  );
 
   CREATE TYPE placement_status AS ENUM (
     'TRIAL', 'CONFIRMED', 'EXITED', 'TERMINATED'
@@ -55,16 +53,18 @@ DO $$ BEGIN
   );
 
   CREATE TYPE agreement_type AS ENUM (
-    'A1_EOR',          -- Employer-on-Record
-    'A2_SOW',          -- Scope of Work
-    'A3_INDEMNITY',    -- Indemnity
-    'A4_MED_ADDENDUM', -- SC series: Medical Care Addendum
-    'A5_MED_EXCLUSION' -- UC series: Medical Exclusion Clause
+    'A1', 'A2', 'A3', 'A4', 'A5',
+    'A1_EOR', 'A2_SOW', 'A3_INDEMNITY', 'A4_MED_ADDENDUM', 'A5_MED_EXCLUSION'
   );
 
   CREATE TYPE agreement_status AS ENUM (
-    'DRAFT', 'SENT', 'SIGNED', 'REJECTED', 'EXPIRED'
+    'PENDING', 'SIGNED', 'VOID', 'EXPIRED',
+    'DRAFT', 'SENT', 'REJECTED'
   );
+
+  CREATE TYPE alarm_status AS ENUM ('OPEN', 'ACKNOWLEDGED', 'RESOLVED');
+  CREATE TYPE alarm_severity AS ENUM ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW');
+  CREATE TYPE client_status AS ENUM ('PROSPECT', 'ACTIVE', 'INACTIVE', 'BLACKLISTED');
 
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
@@ -119,33 +119,30 @@ CREATE INDEX IF NOT EXISTS idx_users_branch   ON users(branch_id);
 -- ── 3. STAFF APPLICANTS ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS staff_applicants (
   id                      UUID            PRIMARY KEY DEFAULT uuid_generate_v4(),
-  staff_code              VARCHAR(20)     UNIQUE NOT NULL,
-  -- Staff code format: DR-ST-00001, SC-ST-00001, UC-ST-00001, M3-ST-00001
+  staff_code              VARCHAR(30)     UNIQUE NOT NULL,
   user_id                 UUID            REFERENCES users(id),
   branch_id               UUID            NOT NULL REFERENCES branches(id),
   assigned_rm_id          UUID            REFERENCES users(id),
   series                  staff_series    NOT NULL,
   role_types              TEXT[]          NOT NULL DEFAULT '{}',
-  language_tier           language_tier   NOT NULL DEFAULT 'T3',
+  language_tier           language_tier,
   pipeline_stage          pipeline_stage  NOT NULL DEFAULT 'S1_INTAKE',
   current_scenario_code   VARCHAR(20),
-  -- Scenario codes: DR-01 to DR-20, SC-01 to SC-20, UC-01 to UC-15, M3-01 to M3-12
   terminal_outcome        terminal_outcome,
   terminal_reason         TEXT,
   restrictions            JSONB           NOT NULL DEFAULT '{}',
-  -- Example: {"restriction_type":"UPGRADE_PATH","restriction_until":"2027-01-01"}
   verified_docs           JSONB           NOT NULL DEFAULT '{}',
-  -- Stores: dl_number, dl_valid_to, aadhaar_last4, pv_date, echallan_count etc.
-  pv_status               pv_status       NOT NULL DEFAULT 'PENDING',
+  pv_status               pv_status       NOT NULL DEFAULT 'NOT_INITIATED',
   restricted_list_flag    BOOLEAN         NOT NULL DEFAULT false,
-  video_cert_id           UUID,           -- FK set after video_certs insert
+  video_cert_id           UUID,
   deposit_amount          DECIMAL(10,2)   NOT NULL DEFAULT 0,
   deposit_paid            BOOLEAN         NOT NULL DEFAULT false,
   training_start_date     DATE,
   training_end_date       DATE,
   deployment_ready_date   DATE,
-  mobile                  VARCHAR(20),    -- staff mobile (may differ from user.phone)
-  full_name               VARCHAR(200),   -- staff name (may differ from user.full_name)
+  mobile                  VARCHAR(20),
+  email                   VARCHAR(200),
+  full_name               VARCHAR(200),
   date_of_birth           DATE,
   address                 TEXT,
   emergency_contact_name   VARCHAR(200),
@@ -161,28 +158,24 @@ CREATE INDEX IF NOT EXISTS idx_staff_branch    ON staff_applicants(branch_id);
 CREATE INDEX IF NOT EXISTS idx_staff_rm        ON staff_applicants(assigned_rm_id);
 CREATE INDEX IF NOT EXISTS idx_staff_series    ON staff_applicants(series);
 CREATE INDEX IF NOT EXISTS idx_staff_code      ON staff_applicants(staff_code);
-CREATE INDEX IF NOT EXISTS idx_staff_flag
-  ON staff_applicants(restricted_list_flag)
-  WHERE restricted_list_flag = true;
 
--- ── 4. PIPELINE EVENTS (append-only audit log) ───────────────────────────────
+-- ── 4. PIPELINE EVENTS ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS pipeline_events (
   id              UUID            PRIMARY KEY DEFAULT uuid_generate_v4(),
   staff_id        UUID            NOT NULL REFERENCES staff_applicants(id),
   event_type      VARCHAR(100)    NOT NULL,
-  from_stage      pipeline_stage,
-  to_stage        pipeline_stage,
-  actor_id        UUID            REFERENCES users(id),
+  from_stage      VARCHAR(30),
+  to_stage        VARCHAR(30),
+  actor_id        UUID,
   scenario_code   VARCHAR(20),
-  reason_code     VARCHAR(50),
+  reason_code     VARCHAR(80),
   payload         JSONB           NOT NULL DEFAULT '{}',
+  notes           TEXT,
   occurred_at     TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
 
--- Pipeline events are append-only: no UPDATE, no DELETE allowed
 CREATE INDEX IF NOT EXISTS idx_pe_staff  ON pipeline_events(staff_id);
 CREATE INDEX IF NOT EXISTS idx_pe_time   ON pipeline_events(occurred_at DESC);
-CREATE INDEX IF NOT EXISTS idx_pe_type   ON pipeline_events(event_type);
 
 -- ── 5. VIDEO CERTIFICATIONS ───────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS video_certs (
@@ -192,114 +185,73 @@ CREATE TABLE IF NOT EXISTS video_certs (
   prompt_set_version  VARCHAR(20)     NOT NULL DEFAULT 'v1',
   prompt_count        INT             NOT NULL,
   duration_seconds    INT,
-  storage_url         TEXT            NOT NULL,   -- GCS signed URL (short-lived)
-  storage_key         TEXT            NOT NULL,   -- gs://homegenny-video-certs-prod/...
-  sha256_hash         VARCHAR(64)     NOT NULL UNIQUE,  -- integrity proof
+  storage_url         TEXT            NOT NULL,
+  storage_key         TEXT            NOT NULL,
+  sha256_hash         VARCHAR(64)     NOT NULL UNIQUE,
   rm_signed_off       BOOLEAN         NOT NULL DEFAULT false,
-  rm_id               UUID            REFERENCES users(id),
+  rm_id               UUID,
   rm_signed_at        TIMESTAMPTZ,
   never_delete        BOOLEAN         NOT NULL DEFAULT false,
-  retention_until     DATE,           -- EXIT_DATE + 7 years
+  retention_until     DATE,
   attempt_number      INT             NOT NULL DEFAULT 1,
   created_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_vc_staff  ON video_certs(staff_id);
-CREATE INDEX IF NOT EXISTS idx_vc_hash   ON video_certs(sha256_hash);
-CREATE INDEX IF NOT EXISTS idx_vc_never
-  ON video_certs(never_delete)
-  WHERE never_delete = true;
-
--- ── 6. AGREEMENTS (eSign) ────────────────────────────────────────────────────
+-- ── 6. AGREEMENTS ────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS agreements (
   id                  UUID              PRIMARY KEY DEFAULT uuid_generate_v4(),
-  staff_id            UUID              NOT NULL REFERENCES staff_applicants(id),
-  client_id           UUID              NOT NULL REFERENCES users(id),
-  placement_id        UUID,             -- set when placement is created
-  agreement_type      agreement_type    NOT NULL,
-  status              agreement_status  NOT NULL DEFAULT 'DRAFT',
-  -- Sequential lock: A2 cannot be generated until A1 is SIGNED
-  -- A3 cannot be generated until A2 is SIGNED
-  version             INT               NOT NULL DEFAULT 1,
-  content_hash        VARCHAR(64),      -- SHA-256 of document at signing time
-  storage_key         TEXT,             -- GCS key for signed PDF
-  otp_verified_at     TIMESTAMPTZ,
-  signed_by           UUID              REFERENCES users(id),
-  signed_at           TIMESTAMPTZ,
-  rejection_reason    TEXT,
-  rejected_by         UUID              REFERENCES users(id),
-  rejected_at         TIMESTAMPTZ,
-  escalated_to_bm     BOOLEAN           NOT NULL DEFAULT false,
-  bm_reviewed_at      TIMESTAMPTZ,
-  bm_id               UUID              REFERENCES users(id),
-  metadata            JSONB             NOT NULL DEFAULT '{}',
+  staff_id            UUID              REFERENCES staff_applicants(id),
+  client_id           UUID              NOT NULL,
+  placement_id        UUID,
+  type                agreement_type    NOT NULL,
+  status              agreement_status  NOT NULL DEFAULT 'PENDING',
+  signatures          JSONB             NOT NULL DEFAULT '[]',
   created_at          TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
   updated_at          TIMESTAMPTZ       NOT NULL DEFAULT NOW()
 );
-
-CREATE INDEX IF NOT EXISTS idx_agr_staff    ON agreements(staff_id);
-CREATE INDEX IF NOT EXISTS idx_agr_client   ON agreements(client_id);
-CREATE INDEX IF NOT EXISTS idx_agr_type     ON agreements(agreement_type);
-CREATE INDEX IF NOT EXISTS idx_agr_status   ON agreements(status);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_agr_unique
-  ON agreements(staff_id, client_id, agreement_type, version);
 
 -- ── 7. PLACEMENTS ────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS placements (
   id                          UUID              PRIMARY KEY DEFAULT uuid_generate_v4(),
   staff_id                    UUID              NOT NULL REFERENCES staff_applicants(id),
-  client_id                   UUID              NOT NULL REFERENCES users(id),
+  client_id                   UUID              NOT NULL,
   branch_id                   UUID              NOT NULL REFERENCES branches(id),
-  rm_id                       UUID              REFERENCES users(id),
+  rm_id                       UUID,
   status                      placement_status  NOT NULL DEFAULT 'TRIAL',
   exit_scenario_code          VARCHAR(20),
   scope_of_work               JSONB             NOT NULL DEFAULT '{}',
-  -- Stores: duties[], working_hours, location, special_instructions
   trial_start_date            DATE,
   trial_end_date              DATE,
   billing_start_date          DATE,
   exit_date                   DATE,
-  staff_salary                DECIMAL(10,2)     NOT NULL DEFAULT 0,
-  management_fee              DECIMAL(10,2)     NOT NULL DEFAULT 12,
-  -- management_fee stored as percentage e.g. 12 = 12%
+  staff_salary                DECIMAL(10,2),
+  management_fee              DECIMAL(10,2),
   replacement_count           INT               NOT NULL DEFAULT 0,
   metadata                    JSONB             NOT NULL DEFAULT '{}',
   created_at                  TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
   updated_at                  TIMESTAMPTZ       NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_pl_staff   ON placements(staff_id);
-CREATE INDEX IF NOT EXISTS idx_pl_client  ON placements(client_id);
-CREATE INDEX IF NOT EXISTS idx_pl_status  ON placements(status);
-CREATE INDEX IF NOT EXISTS idx_pl_trial
-  ON placements(trial_end_date)
-  WHERE status = 'TRIAL';
-
 -- ── 8. PAYROLL RECORDS ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS payroll_records (
   id                  UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
   placement_id        UUID        NOT NULL REFERENCES placements(id),
   staff_id            UUID        NOT NULL REFERENCES staff_applicants(id),
-  period_month        INT         NOT NULL CHECK (period_month BETWEEN 1 AND 12),
-  period_year         INT         NOT NULL CHECK (period_year >= 2024),
+  period_month        INT         NOT NULL,
+  period_year         INT         NOT NULL,
   shift_days          INT         NOT NULL DEFAULT 0,
   gross_salary        DECIMAL(10,2) NOT NULL,
   deductions          JSONB       NOT NULL DEFAULT '{}',
-  -- {"esic": 135.00, "pf": 1800.00}
   net_salary          DECIMAL(10,2) NOT NULL,
   esic_employer       DECIMAL(10,2) NOT NULL DEFAULT 0,
   esic_employee       DECIMAL(10,2) NOT NULL DEFAULT 0,
   pf_employer         DECIMAL(10,2) NOT NULL DEFAULT 0,
   pf_employee         DECIMAL(10,2) NOT NULL DEFAULT 0,
   disbursed_at        TIMESTAMPTZ,
-  disbursement_ref    VARCHAR(100),   -- Razorpay payout ID
+  disbursement_ref    VARCHAR(100),
   client_invoice_id   UUID,
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (placement_id, period_month, period_year)
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-CREATE INDEX IF NOT EXISTS idx_pr_period  ON payroll_records(period_year, period_month);
-CREATE INDEX IF NOT EXISTS idx_pr_staff   ON payroll_records(staff_id);
 
 -- ── 9. SHIFT LOGS ────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS shift_logs (
@@ -311,61 +263,109 @@ CREATE TABLE IF NOT EXISTS shift_logs (
   check_out         TIMESTAMPTZ,
   hours_worked      DECIMAL(4,2),
   status            VARCHAR(20) NOT NULL DEFAULT 'PRESENT',
-  -- PRESENT, ABSENT, HALF_DAY, HOLIDAY, LEAVE
   notes             TEXT,
   client_confirmed  BOOLEAN     NOT NULL DEFAULT false,
-  gps_lat           DECIMAL(10,7),
-  gps_lng           DECIMAL(10,7),
-  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (placement_id, log_date)
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-CREATE INDEX IF NOT EXISTS idx_sl_placement ON shift_logs(placement_id);
-CREATE INDEX IF NOT EXISTS idx_sl_date      ON shift_logs(log_date);
-CREATE INDEX IF NOT EXISTS idx_sl_staff     ON shift_logs(staff_id);
 
 -- ── 10. CLIENT INVOICES ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS client_invoices (
   id                        UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
   placement_id              UUID        NOT NULL REFERENCES placements(id),
-  client_id                 UUID        NOT NULL REFERENCES users(id),
+  client_id                 UUID        NOT NULL,
   invoice_number            VARCHAR(50) UNIQUE NOT NULL,
-  -- Format: INV-YYYYMM-XXXXXX
-  period_month              INT         NOT NULL CHECK (period_month BETWEEN 1 AND 12),
-  period_year               INT         NOT NULL CHECK (period_year >= 2024),
+  period_month              INT         NOT NULL,
+  period_year               INT         NOT NULL,
   staff_salary_component    DECIMAL(10,2) NOT NULL,
   management_fee            DECIMAL(10,2) NOT NULL,
   gst_amount                DECIMAL(10,2) NOT NULL,
-  -- GST is ONLY on management_fee, NEVER on salary
   total_amount              DECIMAL(10,2) NOT NULL,
   due_date                  DATE        NOT NULL,
   paid_at                   TIMESTAMPTZ,
   payment_ref               VARCHAR(100),
   razorpay_order_id         VARCHAR(100),
   status                    VARCHAR(20) NOT NULL DEFAULT 'PENDING',
-  -- PENDING, PAID, OVERDUE, CANCELLED
-  pdf_storage_key           TEXT,       -- GCS key for invoice PDF
   created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-CREATE INDEX IF NOT EXISTS idx_ci_client  ON client_invoices(client_id);
-CREATE INDEX IF NOT EXISTS idx_ci_status  ON client_invoices(status);
-CREATE INDEX IF NOT EXISTS idx_ci_due
-  ON client_invoices(due_date)
-  WHERE status = 'PENDING';
 
 -- ── 11. RESTRICTED LIST ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS restricted_list (
   id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
   staff_id      UUID        REFERENCES staff_applicants(id),
-  aadhaar_hash  VARCHAR(64),   -- SHA-256 of full Aadhaar number (never store raw)
-  phone_hash    VARCHAR(64),   -- SHA-256 of mobile number
+  aadhaar_hash  VARCHAR(64),
+  phone_hash    VARCHAR(64),
   name          VARCHAR(200),
   reason        VARCHAR(100)   NOT NULL,
-  -- THEFT, MISCONDUCT, VIOLENCE, FRAUD, ABANDONMENT, CLIENT_REQUEST, OTHER
-  added_by      UUID        REFERENCES users(id),
+  added_by      UUID,
   notes         TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ── 12. ALARMS ───────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS alarms (
+  id                  UUID              PRIMARY KEY DEFAULT uuid_generate_v4(),
+  ref_code            VARCHAR(32)       UNIQUE NOT NULL,
+  title               VARCHAR(255)      NOT NULL,
+  description         TEXT,
+  status              alarm_status      NOT NULL DEFAULT 'OPEN',
+  severity            alarm_severity    NOT NULL,
+  category            VARCHAR(32)       NOT NULL,
+  list_meta           TEXT              NOT NULL,
+  list_footer         TEXT              NOT NULL,
+  assigned_to         VARCHAR(120)      NOT NULL,
+  detail_meta         TEXT,
+  recommended_action  TEXT,
+  is_read             BOOLEAN           NOT NULL DEFAULT false,
+  bm_note             TEXT,
+  bm_action_status    VARCHAR(40),
+  bm_action_at        TIMESTAMPTZ,
+  bm_action_by        UUID,
+  resolved_by         UUID,
+  resolved_at         TIMESTAMPTZ,
+  created_at          TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ       NOT NULL DEFAULT NOW()
+);
+
+-- ── 13. CLIENTS ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS clients (
+  id            UUID              PRIMARY KEY DEFAULT uuid_generate_v4(),
+  full_name     VARCHAR(255)      NOT NULL,
+  phone         VARCHAR(20)       UNIQUE NOT NULL,
+  email         VARCHAR(255),
+  address       TEXT,
+  city          VARCHAR(100),
+  status        client_status     NOT NULL DEFAULT 'PROSPECT',
+  kyc_verified  BOOLEAN           NOT NULL DEFAULT false,
+  metadata      JSONB             NOT NULL DEFAULT '{}',
+  created_at    TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ       NOT NULL DEFAULT NOW()
+);
+
+-- ── 14. NOTIFICATION LOGS ────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS notification_logs (
+  id          UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+  recipient   VARCHAR(200) NOT NULL,
+  channel     VARCHAR(20)  NOT NULL,
+  template    VARCHAR(100) NOT NULL,
+  payload     JSONB        NOT NULL DEFAULT '{}',
+  status      VARCHAR(20)  NOT NULL DEFAULT 'PENDING',
+  error       TEXT,
+  sent_at     TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- ── 15. UPGRADE PATHS ────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS upgrade_paths (
+  id                UUID            PRIMARY KEY DEFAULT uuid_generate_v4(),
+  staff_id          UUID            NOT NULL REFERENCES staff_applicants(id),
+  from_series       staff_series    NOT NULL,
+  to_series         staff_series    NOT NULL,
+  eligibility_date  DATE,
+  triggered_at      TIMESTAMPTZ,
+  completed_at      TIMESTAMPTZ,
+  status            VARCHAR(20)     NOT NULL DEFAULT 'ELIGIBLE',
+  notes             TEXT,
+  UNIQUE (staff_id, from_series, to_series)
 );
 
 CREATE INDEX IF NOT EXISTS idx_rl_aadhaar ON restricted_list(aadhaar_hash);
