@@ -1,5 +1,6 @@
 # ─── Stage 1: Dependencies ────────────────────────────────────
 FROM node:20-alpine AS deps
+RUN apk add --no-cache openssl
 WORKDIR /app
 COPY package*.json ./
 COPY prisma ./prisma
@@ -15,6 +16,7 @@ RUN npm run build
 
 # ─── Stage 3: Development ────────────────────────────────────
 FROM node:20-alpine AS development
+RUN apk add --no-cache openssl
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
@@ -24,6 +26,7 @@ CMD ["npm", "run", "start:dev"]
 
 # ─── Stage 4: Production ─────────────────────────────────────
 FROM node:20-alpine AS production
+RUN apk add --no-cache openssl
 RUN addgroup -g 1001 -S nodejs && adduser -S nestjs -u 1001
 WORKDIR /app
 COPY --from=deps /tmp/prod_modules ./node_modules
