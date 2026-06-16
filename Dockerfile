@@ -2,8 +2,9 @@
 FROM node:20-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --only=production && cp -r node_modules /tmp/prod_modules
-RUN npm ci
+COPY prisma ./prisma
+RUN npm ci --only=production && npx prisma generate && cp -r node_modules /tmp/prod_modules
+RUN npm ci && npx prisma generate
 
 # ─── Stage 2: Build ──────────────────────────────────────────
 FROM node:20-alpine AS builder
