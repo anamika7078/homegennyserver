@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AppController } from './app.controller';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bull';
@@ -125,5 +126,6 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     ComplianceModule,
     SystemHealthModule,
   ],
+  controllers: [AppController],
 })
 export class AppModule { }
