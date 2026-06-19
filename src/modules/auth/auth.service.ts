@@ -88,12 +88,16 @@ export class AuthService {
     phone: string,
     meta?: { ip?: string; userAgent?: string; failReason?: string },
   ): Promise<void> {
-    const rows = await this.dataSource.query<{ id: string }[]>(
-      `SELECT id FROM users WHERE phone = $1 LIMIT 1`,
-      [phone],
-    );
-    if (rows[0]?.id) {
-      await this.logLoginAttempt(rows[0].id, false, meta);
+    try {
+      const rows = await this.dataSource.query<{ id: string }[]>(
+        `SELECT id FROM users WHERE phone = $1 LIMIT 1`,
+        [phone],
+      );
+      if (rows[0]?.id) {
+        await this.logLoginAttempt(rows[0].id, false, meta);
+      }
+    } catch (err) {
+      this.logger.warn(`Failed-login audit write failed: ${err}`);
     }
   }
 
@@ -242,7 +246,8 @@ export class AuthService {
     const refreshSecret = this.config.get<string>('app.jwt.refreshSecret');
     const refreshExpiry = this.config.get<string>('app.jwt.refreshExpiresIn') ?? '7d';
     if (!refreshSecret) {
-      throw new Error('[HomeGenny] app.jwt.refreshSecret is not set in environment.');
+      this.logger.error('[HomeGenny] app.jwt.refreshSecret is not set in environment.');
+      throw new UnauthorizedException('Authentication service misconfigured. Contact support.');
     }
     const refreshToken = this.jwtService.sign(
       { sub: user.id, loginAt },                  // loginAt carried in refresh token too

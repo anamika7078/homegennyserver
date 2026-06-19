@@ -32,8 +32,13 @@ WORKDIR /app
 COPY --from=deps /tmp/prod_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json ./
+# Copy prisma schema so `prisma migrate deploy` can run at startup
+COPY --from=builder /app/prisma ./prisma
+# Re-copy generated Prisma client (already in prod_modules, but needed for schema awareness)
+COPY --from=deps /app/node_modules/.prisma ./node_modules/.prisma
 USER nestjs
 EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s \
   CMD wget -qO- http://localhost:3001/api/v1/health || exit 1
-CMD ["node", "dist/main"]
+# Run pending migrations then start the app
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main"]
