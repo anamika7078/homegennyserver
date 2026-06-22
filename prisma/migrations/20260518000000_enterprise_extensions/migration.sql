@@ -2,6 +2,12 @@
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- Create user_role enum if it doesn't exist
+DO $$ BEGIN
+  CREATE TYPE user_role AS ENUM ('STAFF', 'CLIENT', 'RM', 'BM', 'FINANCE', 'ADMIN');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
 -- Extend user_role enum (idempotent)
 DO $$ BEGIN
   ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'TRAINER';
