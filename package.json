@@ -15,7 +15,8 @@
     "seed:run": "ts-node src/database/seeds/admin.seed.ts",
     "seed:users": "node scratch/seed_users_now.js",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate deploy",
+    "prisma:fix": "prisma migrate resolve --rolled-back 20260518000000_enterprise_extensions || exit 0",
+    "prisma:migrate": "npm run prisma:fix && prisma migrate deploy",
     "prisma:seed": "ts-node prisma/seed.ts",
     "prisma:studio": "prisma studio"
   },
