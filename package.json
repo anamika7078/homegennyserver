@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "description": "HomeGenny Domestic Staffing Platform — NestJS Backend (Google Cloud Edition)",
   "scripts": {
-    "build": "nest build",
+    "build": "npm run prisma:fix && nest build",
     "start": "node dist/main",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
