@@ -53,7 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
 CREATE TABLE IF NOT EXISTS scenario_definitions (
   id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   code            VARCHAR(20) UNIQUE NOT NULL,
-  series          staff_series NOT NULL,
+  series          staff_applicants_series_enum NOT NULL,
   title           VARCHAR(200) NOT NULL,
   description     TEXT,
   severity        VARCHAR(20) NOT NULL DEFAULT 'NORMAL',
