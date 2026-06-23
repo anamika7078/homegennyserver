@@ -3,7 +3,9 @@ import { registerAs } from '@nestjs/config';
 export default registerAs('app', () => ({
   port: parseInt(process.env.PORT || '3001', 10),
   env: process.env.NODE_ENV || 'development',
-  corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:3000').split(','),
+  corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:3000')
+    .split(',')
+    .map((origin) => origin.trim().replace(/\/$/, '')),
 
   // Google Cloud
   gcp: {
