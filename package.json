@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "description": "HomeGenny Domestic Staffing Platform — NestJS Backend (Google Cloud Edition)",
   "scripts": {
-    "build": "npm run prisma:fix && nest build",
+    "build": "nest build",
     "start": "node dist/main",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
@@ -15,10 +15,11 @@
     "seed:run": "ts-node src/database/seeds/admin.seed.ts",
     "seed:users": "node scratch/seed_users_now.js",
     "prisma:generate": "prisma generate",
-    "prisma:fix": "prisma migrate resolve --rolled-back 20260518000000_enterprise_extensions || exit 0",
+    "prisma:fix": "prisma migrate resolve --rolled-back 20260518000000_enterprise_extensions || true",
     "prisma:migrate": "npm run prisma:fix && prisma migrate deploy",
     "prisma:seed": "ts-node prisma/seed.ts",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "render:start": "npx prisma migrate resolve --rolled-back 20260518000000_enterprise_extensions; npx prisma migrate deploy && node dist/main"
   },
   "dependencies": {
     "@google-cloud/logging": "^11.0.0",

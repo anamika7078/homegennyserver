@@ -40,5 +40,5 @@ USER nestjs
 EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s \
   CMD wget -qO- http://localhost:3001/api/v1/health || exit 1
-# Fix any failed migrations first, then run pending migrations, then start the app
-CMD ["sh", "-c", "npx prisma migrate resolve --rolled-back 20260518000000_enterprise_extensions; npx prisma migrate deploy && node dist/main"]
+# Resolve any failed migrations (safe to run even if already resolved), deploy pending, then start
+CMD ["sh", "-c", "npx prisma migrate resolve --rolled-back 20260518000000_enterprise_extensions || true; npx prisma migrate deploy && node dist/main"]
