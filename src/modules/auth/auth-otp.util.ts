@@ -76,8 +76,8 @@ export function generateTotpSecret(): string {
  * Build the otpauth:// URI for QR code display.
  * The secret in the URI must be base32-encoded — this function ensures that.
  */
-export function buildOtpauthUrl(secret: string, phone: string): string {
-  const label   = encodeURIComponent(`HomeGenny:${phone}`);
+export function buildOtpauthUrl(secret: string, phone: string, accountLabel?: string): string {
+  const label   = encodeURIComponent(accountLabel ?? `HomeGenny:${phone}`);
   const issuer  = encodeURIComponent('HomeGenny');
   return `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`;
 }

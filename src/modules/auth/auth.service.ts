@@ -191,7 +191,7 @@ export class AuthService {
           requires_totp_setup: true,
           user_id:       user.id,
           totp_secret:   secret,
-          otpauth_url:   buildOtpauthUrl(secret, user.phone),
+          otpauth_url:   buildOtpauthUrl(secret, user.phone, `HomeGenny Admin:${user.phone}`),
         };
       }
 
@@ -203,7 +203,7 @@ export class AuthService {
             requires_totp_setup: true,
             user_id:     user.id,
             totp_secret: secret,
-            otpauth_url: buildOtpauthUrl(secret, user.phone),
+            otpauth_url: buildOtpauthUrl(secret, user.phone, `HomeGenny Admin:${user.phone}`),
           };
         }
         return { requires_2fa: true, user_id: user.id };
@@ -452,6 +452,34 @@ export class AuthService {
   // ────────────────────────────────────────────────────────────────────────────
   // TOTP management
   // ────────────────────────────────────────────────────────────────────────────
+
+  /** Admin-only: issue a fresh TOTP secret (e.g. wrong authenticator entry scanned). */
+  async resetAdmin2faSetup(phone: string, password: string): Promise<TotpSetupRequired> {
+    const user = await this.validateUser(phone, password);
+    if (user.role !== 'ADMIN') {
+      throw new ForbiddenException('Only Admin accounts use this setup flow');
+    }
+
+    const secret = generateTotpSecret();
+    const rows = await this.dataSource.query<{ metadata: unknown }[]>(
+      `SELECT metadata FROM users WHERE id = $1`,
+      [user.id],
+    );
+    const metadata = parseUserMetadata(rows[0]?.metadata);
+    const newMeta = { ...metadata, totp_secret: secret, totp_enabled: false };
+    await this.dataSource.query(
+      `UPDATE users SET metadata = $1::jsonb WHERE id = $2`,
+      [JSON.stringify(newMeta), user.id],
+    );
+    this.logger.warn(`[ADMIN-2FA] Reset TOTP secret for Admin ${user.phone}`);
+
+    return {
+      requires_totp_setup: true,
+      user_id:       user.id,
+      totp_secret:   secret,
+      otpauth_url:   buildOtpauthUrl(secret, user.phone, `HomeGenny Admin:${user.phone}`),
+    };
+  }
 
   async setup2fa(userId: string): Promise<{ secret: string; otpauth_url: string }> {
     const secret = generateTotpSecret();

@@ -28,4 +28,13 @@ export class TrainerController {
   ) {
     return this.trainerService.updateAssessment(req.user.id, traineeId, data);
   }
+
+  @Put('video-certifications/:id/review')
+  async reviewVideoCert(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body() body: { status: 'APPROVED' | 'REJECTED'; notes?: string },
+  ) {
+    return this.trainerService.reviewVideoCert(req.user.id, id, body);
+  }
 }

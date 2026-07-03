@@ -1,5 +1,6 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { VideoCertService } from '../video-cert/video-cert.service';
 import { AuthUser } from '../../common/guards/branch-scope.util';
 import { SchemaBootstrapService } from '../health/schema-bootstrap.service';
 
@@ -11,6 +12,7 @@ export class TrainerService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly schemaBootstrap: SchemaBootstrapService,
+    private readonly videoCertService: VideoCertService,
   ) {}
 
   private async ensureTables(): Promise<void> {
@@ -29,59 +31,124 @@ export class TrainerService {
     }
   }
 
+  private branchClause(user: AuthUser): string {
+    return user.branchId ? `AND b.branch_id = '${user.branchId}'::uuid` : '';
+  }
+
+  private staffBranchClause(user: AuthUser): string {
+    return user.branchId ? `AND sa.branch_id = '${user.branchId}'::uuid` : '';
+  }
+
+  async getVideoCerts(user: AuthUser) {
+    await this.ensureTables();
+    const branchClause = this.staffBranchClause(user);
+    try {
+      return await this.prisma.$queryRawUnsafe<
+        Array<{
+          id: string;
+          staffId: string;
+          staffName: string;
+          staffCode: string;
+          series: string;
+          promptKey: string;
+          videoUrl: string;
+          reviewStatus: string;
+          attemptNumber: number;
+          reviewNotes: string | null;
+          createdAt: Date;
+        }>
+      >(`
+        SELECT
+          vc.id,
+          vc.staff_id::text AS "staffId",
+          sa.full_name AS "staffName",
+          sa.staff_code AS "staffCode",
+          sa.series::text AS series,
+          vc.prompt_key AS "promptKey",
+          vc.video_url AS "videoUrl",
+          vc.review_status AS "reviewStatus",
+          vc.attempt_number AS "attemptNumber",
+          vc.review_notes AS "reviewNotes",
+          vc.created_at AS "createdAt"
+        FROM video_certifications vc
+        JOIN staff_applicants sa ON sa.id = vc.staff_id
+        WHERE sa.deleted_at IS NULL ${branchClause}
+        ORDER BY vc.created_at DESC
+        LIMIT 100
+      `);
+    } catch {
+      return [];
+    }
+  }
+
   async getDashboardStats(user: AuthUser) {
     await this.ensureTables();
-    const branchClause = user.branchId ? `AND b.branch_id = '${user.branchId}'::uuid` : '';
+    const branchClause = this.branchClause(user);
+    const staffBranchClause = this.staffBranchClause(user);
 
     try {
-      // Total Trainees
-      const trainees = await this.prisma.$queryRawUnsafe<any[]>(`
+      const trainees = await this.prisma.$queryRawUnsafe<{ total: bigint }[]>(`
         SELECT COUNT(*) as total FROM batch_enrollments e
         JOIN training_batches b ON b.id = e.batch_id
         WHERE 1=1 ${branchClause}
       `);
 
-    // Sessions Today (Placeholder for now, assuming starting today)
-    const sessionsToday = await this.prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as total FROM training_batches b
-      WHERE DATE(b.start_date) = CURRENT_DATE ${branchClause}
-    `);
+      const sessionsToday = await this.prisma.$queryRawUnsafe<{ total: bigint }[]>(`
+        SELECT COUNT(*) as total FROM training_batches b
+        WHERE DATE(b.start_date) = CURRENT_DATE ${branchClause}
+      `);
 
-    // Video Certs pending review
-    const videoCertsRows = await this.prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as total FROM video_cert_submissions
-      WHERE status = 'PENDING'
-    `).catch(() => [{ total: 0 }]);
+      const videoCertsRows = await this.prisma.$queryRawUnsafe<{ total: bigint }[]>(`
+        SELECT COUNT(*) as total FROM video_certifications vc
+        JOIN staff_applicants sa ON sa.id = vc.staff_id
+        WHERE vc.review_status = 'PENDING'
+          AND sa.deleted_at IS NULL ${staffBranchClause}
+      `).catch(() => [{ total: BigInt(0) }]);
 
-    // Attendance pending — active batches with at least one enrolled trainee
-    const attendancePendingRows = await this.prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(DISTINCT e.staff_id) as total
-      FROM batch_enrollments e
-      JOIN training_batches b ON b.id = e.batch_id
-      WHERE b.status = 'ACTIVE'
-        ${branchClause}
-    `).catch(() => [{ total: 0 }]);
+      const attendancePendingRows = await this.prisma.$queryRawUnsafe<{ total: bigint }[]>(`
+        SELECT COUNT(DISTINCT e.staff_id) as total
+        FROM batch_enrollments e
+        JOIN training_batches b ON b.id = e.batch_id
+        WHERE b.status = 'ACTIVE'
+          ${branchClause}
+      `).catch(() => [{ total: BigInt(0) }]);
 
-    // Average assessment score for S3 batch (this week)
-    const avgScoreRows = await this.prisma.$queryRawUnsafe<any[]>(`
-      SELECT 0 as avg_score
-    `).catch(() => [{ avg_score: 0 }]);
+      const avgScoreRows = await this.prisma.$queryRawUnsafe<{ avg_score: number }[]>(`
+        SELECT COALESCE(AVG(
+          (a.skill_scores->>'communication')::float +
+          (a.skill_scores->>'technical')::float +
+          (a.skill_scores->>'empathy')::float +
+          (a.skill_scores->>'driving')::float +
+          (a.skill_scores->>'safety')::float
+        ) / NULLIF(
+          CASE WHEN a.skill_scores ? 'communication' THEN 1 ELSE 0 END +
+          CASE WHEN a.skill_scores ? 'technical' THEN 1 ELSE 0 END +
+          CASE WHEN a.skill_scores ? 'empathy' THEN 1 ELSE 0 END +
+          CASE WHEN a.skill_scores ? 'driving' THEN 1 ELSE 0 END +
+          CASE WHEN a.skill_scores ? 'safety' THEN 1 ELSE 0 END, 0
+        ), 0) AS avg_score
+        FROM assessments a
+        JOIN staff_applicants sa ON sa.id = a.staff_id
+        WHERE a.status = 'COMPLETED' ${staffBranchClause}
+      `).catch(() => [{ avg_score: 0 }]);
 
-    // Retry count (assessments with attempt_number > 1 this week)
-    const retriesRows = await this.prisma.$queryRawUnsafe<any[]>(`
-      SELECT COUNT(*) as total FROM assessments
-      WHERE attempt_number > 1
-        AND created_at >= date_trunc('week', CURRENT_DATE)
-    `).catch(() => [{ total: 0 }]);
+      const retriesRows = await this.prisma.$queryRawUnsafe<{ total: bigint }[]>(`
+        SELECT COUNT(*) as total FROM assessments
+        WHERE attempt_number > 1
+          AND created_at >= date_trunc('week', CURRENT_DATE)
+      `).catch(() => [{ total: BigInt(0) }]);
 
-    return {
-      activeTrainees: Number(trainees[0]?.total ?? 0),
-      sessionsToday: Number(sessionsToday[0]?.total ?? 0),
-      videoCertsPending: Number(videoCertsRows[0]?.total ?? 0),
-      attendancePending: Number(attendancePendingRows[0]?.total ?? 0),
-      avgScore: Math.round(Number(avgScoreRows[0]?.avg_score ?? 0)),
-      retries: Number(retriesRows[0]?.total ?? 0),
-    };
+      const videoCerts = await this.getVideoCerts(user);
+
+      return {
+        activeTrainees: Number(trainees[0]?.total ?? 0),
+        sessionsToday: Number(sessionsToday[0]?.total ?? 0),
+        videoCertsPending: Number(videoCertsRows[0]?.total ?? 0),
+        attendancePending: Number(attendancePendingRows[0]?.total ?? 0),
+        avgScore: Math.round(Number(avgScoreRows[0]?.avg_score ?? 0)),
+        retries: Number(retriesRows[0]?.total ?? 0),
+        videoCerts,
+      };
     } catch {
       return {
         activeTrainees: 0,
@@ -90,13 +157,14 @@ export class TrainerService {
         attendancePending: 0,
         avgScore: 0,
         retries: 0,
+        videoCerts: [],
       };
     }
   }
 
   async getAssignedBatches(user: AuthUser) {
     await this.ensureTables();
-    const branchClause = user.branchId ? `AND b.branch_id = '${user.branchId}'::uuid` : '';
+    const branchClause = this.branchClause(user);
     try {
     const rows = await this.prisma.$queryRawUnsafe<any[]>(`
       SELECT
@@ -141,8 +209,20 @@ export class TrainerService {
     }
   }
 
+  async reviewVideoCert(
+    reviewerId: string,
+    certId: string,
+    body: { status: 'APPROVED' | 'REJECTED'; notes?: string },
+  ) {
+    return this.videoCertService.reviewCertification(
+      certId,
+      reviewerId,
+      body.status,
+      body.notes,
+    );
+  }
+
   async updateAssessment(trainerId: string, traineeId: string, data: any) {
-    // Basic logic for updating assessment
     return { success: true, traineeId, status: 'ASSESSED' };
   }
 }

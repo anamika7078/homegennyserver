@@ -51,6 +51,23 @@ export class AuthController {
     return this.authService.resetPassword(body.phone, body.otp, body.new_password);
   }
 
+  @Post('2fa/reset-setup')
+  @ApiOperation({ summary: 'Admin: generate a new TOTP secret during login setup (phone + password)' })
+  async reset2faSetup(
+    @Body() body: { phone: string; password: string },
+    @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> },
+  ) {
+    try {
+      return this.authService.resetAdmin2faSetup(body.phone, body.password);
+    } catch (e) {
+      await this.authService.recordFailedLogin(body.phone, {
+        ...this.clientMeta(req),
+        failReason: 'INVALID_CREDENTIALS',
+      });
+      throw e;
+    }
+  }
+
   @Post('2fa/setup')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
