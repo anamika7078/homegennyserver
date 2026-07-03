@@ -71,8 +71,8 @@ export const ROLE_PERMISSION_MAP: Record<string, PermissionCode[]> = {
   BM: [
     'bm.rms.manage', 'bm.escalations.approve', 'bm.denials.review', 'bm.scenario.override',
     'bm.agreements.approve', 'bm.training.review', 'bm.analytics', 'bm.deployments.assign',
-    'bm.high_risk', 'system.restricted_list', 'system.reports', 'rm.intake', 'rm.verification',
-    'rm.deployments', 'rm.escalations', 'support.alerts',
+    'bm.high_risk', 'system.restricted_list', 'system.reports', 'system.cron.monitor',
+    'rm.intake', 'rm.verification', 'rm.deployments', 'rm.escalations', 'support.alerts',
   ],
   RM: [
     'rm.intake', 'rm.verification', 'rm.training', 'rm.agreements', 'rm.deployments',

@@ -14,7 +14,7 @@ export class MonitoringController {
 
   /** Returns all 7 cron job definitions with their status/schedule */
   @Get('cron-jobs')
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.BM, UserRole.ADMIN)
   @ApiOperation({ summary: 'List all cron job definitions and their current status' })
   async getCronJobs() {
     return this.monitoringService.getCronJobDefinitions();
@@ -22,7 +22,7 @@ export class MonitoringController {
 
   /** Returns today's cron execution activity log */
   @Get('activity-log')
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.BM, UserRole.ADMIN)
   @ApiOperation({ summary: "Get today's cron activity log" })
   async getActivityLog() {
     return this.monitoringService.getTodayActivityLog();

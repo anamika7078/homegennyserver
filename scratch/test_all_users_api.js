@@ -22,6 +22,8 @@ const USERS = [
         label: 'Payroll calculator preview',
         body: { gross_salary: 27500, management_fee_percent: 12 },
       },
+      { method: 'GET', path: '/monitoring/cron-jobs', label: 'Monitoring cron jobs' },
+      { method: 'GET', path: '/monitoring/activity-log', label: 'Monitoring activity log' },
       { method: 'GET', path: '/auth/me', label: 'Profile' },
     ],
   },
