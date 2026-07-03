@@ -6,12 +6,29 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { MonitoringService } from '../monitoring/monitoring.service';
+import { VideoCertService } from '../video-cert/video-cert.service';
 import { ApprovalStatus, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 
+const PIPELINE_STAGES = [
+  'S1_INTAKE',
+  'S2_VERIFY',
+  'S2_5_ASSESS',
+  'S3_TRAIN',
+  'S4_AGREEMENTS',
+  'S5_DEPLOY',
+  'DEFERRED',
+  'TERMINAL',
+] as const;
+
 @Injectable()
 export class AdminService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly monitoringService: MonitoringService,
+    private readonly videoCertService: VideoCertService,
+  ) {}
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Auth helpers (kept for legacy admin.controller login/logout endpoints)
@@ -284,7 +301,15 @@ export class AdminService {
   }
 
   async getQueueStatus() {
-    return { pending: 0, active: 0, completed: 100, failed: 0 };
+    return this.monitoringService.getQueueCounts();
+  }
+
+  async getFailedQueueJobs(limit = 20) {
+    return this.monitoringService.getFailedJobs(limit);
+  }
+
+  async retryFailedQueueJobs() {
+    return this.monitoringService.retryFailedJobs();
   }
 
   async getCronStatus() {
@@ -300,7 +325,96 @@ export class AdminService {
   }
 
   async getPipelineAnalytics() {
-    return { intake: 50, verifying: 30, assessing: 20, training: 10, deployed: 100 };
+    const stages = await this.prisma.staffApplicant.groupBy({
+      by: ['pipelineStage'],
+      where: { deletedAt: null },
+      _count: true,
+    });
+    const map = Object.fromEntries(stages.map((s) => [s.pipelineStage, s._count]));
+    return {
+      intake: map.S1_INTAKE ?? 0,
+      verifying: map.S2_VERIFY ?? 0,
+      assessing: map.S2_5_ASSESS ?? 0,
+      training: map.S3_TRAIN ?? 0,
+      agreements: map.S4_AGREEMENTS ?? 0,
+      deployed: map.S5_DEPLOY ?? 0,
+      deferred: map.DEFERRED ?? 0,
+      terminal: map.TERMINAL ?? 0,
+    };
+  }
+
+  async getPipelineOverview() {
+    const baseWhere: Prisma.StaffApplicantWhereInput = { deletedAt: null };
+
+    const [stageCounts, seriesDist, recentEvents, kpis] = await Promise.all([
+      this.prisma.staffApplicant.groupBy({
+        by: ['pipelineStage'],
+        where: baseWhere,
+        _count: true,
+      }),
+      this.prisma.staffApplicant.groupBy({
+        by: ['series'],
+        where: { ...baseWhere, pipelineStage: { not: 'TERMINAL' } },
+        _count: true,
+      }),
+      this.prisma.pipelineEvent.findMany({
+        take: 25,
+        orderBy: { occurredAt: 'desc' },
+        include: {
+          staff: { select: { staffCode: true, fullName: true, series: true } },
+        },
+      }),
+      Promise.all([
+        this.prisma.staffApplicant.count({ where: baseWhere }),
+        this.prisma.staffApplicant.count({
+          where: { ...baseWhere, pipelineStage: { not: 'TERMINAL' } },
+        }),
+        this.prisma.staffApplicant.count({
+          where: { ...baseWhere, pipelineStage: 'S2_VERIFY' },
+        }),
+        this.prisma.staffApplicant.count({
+          where: { ...baseWhere, pipelineStage: 'S3_TRAIN' },
+        }),
+        this.prisma.staffApplicant.count({
+          where: { ...baseWhere, pipelineStage: 'DEFERRED' },
+        }),
+        this.prisma.videoCertification.count({ where: { reviewStatus: 'PENDING' } }),
+      ]),
+    ]);
+
+    const countMap = Object.fromEntries(
+      stageCounts.map((s) => [s.pipelineStage, s._count]),
+    );
+
+    return {
+      kpis: {
+        total_staff: kpis[0],
+        active_pipeline: kpis[1],
+        pending_verification: kpis[2],
+        training_queue: kpis[3],
+        deferred_cases: kpis[4],
+        pending_video: kpis[5],
+      },
+      funnel: PIPELINE_STAGES.map((stage) => ({
+        stage,
+        count: countMap[stage] ?? 0,
+      })),
+      seriesDistribution: seriesDist.map((s) => ({
+        series: s.series,
+        count: s._count,
+      })),
+      recentEvents: recentEvents.map((e) => ({
+        id: e.id,
+        staffCode: e.staff.staffCode,
+        staffName: e.staff.fullName,
+        series: e.staff.series,
+        eventType: e.eventType,
+        fromStage: e.fromStage,
+        toStage: e.toStage,
+        occurredAt: e.occurredAt,
+        notes: e.notes,
+      })),
+    };
   }
 
   async getPlacementAnalytics() {
@@ -317,5 +431,31 @@ export class AdminService {
 
   async getPrivacyRequests() {
     return [];
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Video Certifications (global admin view)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  async getVideoCertifications(filters?: {
+    status?: string;
+    search?: string;
+    page?: number;
+    limit?: number;
+  }) {
+    return this.videoCertService.listForAdmin(filters);
+  }
+
+  async reviewVideoCertification(
+    certId: string,
+    reviewerId: string,
+    body: { status: 'APPROVED' | 'REJECTED'; notes?: string },
+  ) {
+    return this.videoCertService.reviewCertification(
+      certId,
+      reviewerId,
+      body.status,
+      body.notes,
+    );
   }
 }

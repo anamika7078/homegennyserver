@@ -163,6 +163,18 @@ export class AdminController {
     return this.adminService.getQueueStatus();
   }
 
+  @Get('queues/failed')
+  @ApiOperation({ summary: 'List failed BullMQ jobs' })
+  async getFailedQueueJobs(@Query('limit') limit?: string) {
+    return this.adminService.getFailedQueueJobs(limit ? parseInt(limit, 10) : 20);
+  }
+
+  @Post('queues/retry-failed')
+  @ApiOperation({ summary: 'Retry all failed BullMQ jobs' })
+  async retryFailedQueueJobs() {
+    return this.adminService.retryFailedQueueJobs();
+  }
+
   @Get('cron-status')
   @ApiOperation({ summary: 'Cron job status' })
   async getCronStatus() {
@@ -185,6 +197,12 @@ export class AdminController {
     return this.adminService.getPipelineAnalytics();
   }
 
+  @Get('pipeline/overview')
+  @ApiOperation({ summary: 'Global pipeline overview with funnel, KPIs, and recent events' })
+  async getPipelineOverview() {
+    return this.adminService.getPipelineOverview();
+  }
+
   @Get('analytics/placements')
   @ApiOperation({ summary: 'Placement analytics' })
   async getPlacementAnalytics() {
@@ -205,5 +223,35 @@ export class AdminController {
   @ApiOperation({ summary: 'List all privacy/deletion requests' })
   async getPrivacyRequests() {
     return this.adminService.getPrivacyRequests();
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Video Certifications
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  @Get('video-certifications')
+  @ApiOperation({ summary: 'List all video certifications (paginated, filterable)' })
+  async getVideoCertifications(
+    @Query('status') status?: string,
+    @Query('search') search?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.adminService.getVideoCertifications({
+      status: status ?? undefined,
+      search: search ?? undefined,
+      page: page ? parseInt(page, 10) : 1,
+      limit: limit ? parseInt(limit, 10) : 50,
+    });
+  }
+
+  @Put('video-certifications/:id/review')
+  @ApiOperation({ summary: 'Approve or reject a pending video certification' })
+  async reviewVideoCertification(
+    @Param('id') id: string,
+    @Body() body: { status: 'APPROVED' | 'REJECTED'; notes?: string },
+    @Req() req: any,
+  ) {
+    return this.adminService.reviewVideoCertification(id, req.user.id, body);
   }
 }

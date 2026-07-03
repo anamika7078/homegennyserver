@@ -1,6 +1,7 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Storage, Bucket, FileMetadata } from '@google-cloud/storage';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 
 export const VIDEO_PROMPTS: Record<string, { count: number; minDuration: number; prompts: string[] }> = {
@@ -269,6 +270,93 @@ export class VideoCertService {
       where: { staffId },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  /** Admin: paginated global list with staff details */
+  async listForAdmin(filters?: {
+    status?: string;
+    search?: string;
+    page?: number;
+    limit?: number;
+  }) {
+    const page = filters?.page ?? 1;
+    const limit = Math.min(filters?.limit ?? 50, 100);
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.VideoCertificationWhereInput = {};
+    if (filters?.status && filters.status !== 'ALL') {
+      where.reviewStatus = filters.status;
+    }
+    if (filters?.search) {
+      where.staff = {
+        OR: [
+          { fullName: { contains: filters.search, mode: 'insensitive' } },
+          { staffCode: { contains: filters.search, mode: 'insensitive' } },
+        ],
+      };
+    }
+
+    const [items, total, statusCounts] = await Promise.all([
+      this.prisma.videoCertification.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          staff: { select: { id: true, fullName: true, staffCode: true, series: true } },
+        },
+      }),
+      this.prisma.videoCertification.count({ where }),
+      this.prisma.videoCertification.groupBy({
+        by: ['reviewStatus'],
+        _count: true,
+      }),
+    ]);
+
+    const counts = Object.fromEntries(
+      statusCounts.map((s) => [s.reviewStatus, s._count]),
+    );
+
+    return {
+      items,
+      total,
+      page,
+      limit,
+      counts: {
+        ALL: statusCounts.reduce((sum, s) => sum + s._count, 0),
+        PENDING: counts.PENDING ?? 0,
+        APPROVED: counts.APPROVED ?? 0,
+        REJECTED: counts.REJECTED ?? 0,
+      },
+    };
+  }
+
+  /** Admin/Trainer: approve or reject a pending video certification */
+  async reviewCertification(
+    certId: string,
+    reviewerId: string,
+    status: 'APPROVED' | 'REJECTED',
+    notes?: string,
+  ) {
+    const cert = await this.prisma.videoCertification.findUnique({ where: { id: certId } });
+    if (!cert) throw new NotFoundException(`Video certification ${certId} not found`);
+    if (cert.reviewStatus !== 'PENDING') {
+      throw new BadRequestException('This certification has already been reviewed');
+    }
+
+    const updated = await this.prisma.videoCertification.update({
+      where: { id: certId },
+      data: {
+        reviewStatus: status,
+        reviewedBy: reviewerId,
+        reviewNotes: notes ?? null,
+      },
+      include: {
+        staff: { select: { id: true, fullName: true, staffCode: true, series: true } },
+      },
+    });
+    this.logger.log(`[VIDEO-CERT] Cert ${certId} reviewed as ${status} by ${reviewerId}`);
+    return updated;
   }
 }
 

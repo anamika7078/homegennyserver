@@ -139,6 +139,58 @@ export class MonitoringService {
     ];
   }
 
+  /** Returns BullMQ job counts for the notifications queue */
+  async getQueueCounts() {
+    try {
+      const counts = await this.notifQueue.getJobCounts();
+      return {
+        name: 'notifications',
+        pending: (counts.waiting ?? 0) + (counts.delayed ?? 0),
+        active: counts.active ?? 0,
+        completed: counts.completed ?? 0,
+        failed: counts.failed ?? 0,
+      };
+    } catch {
+      return { name: 'notifications', pending: 0, active: 0, completed: 0, failed: 0 };
+    }
+  }
+
+  /** Returns failed jobs from the notifications queue */
+  async getFailedJobs(limit = 20) {
+    try {
+      const jobs = await this.notifQueue.getFailed(0, Math.max(0, limit - 1));
+      return jobs.map((job) => ({
+        id: job.id,
+        name: job.name,
+        data: job.data,
+        failedReason: job.failedReason,
+        attemptsMade: job.attemptsMade,
+        timestamp: job.timestamp,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** Retries all failed jobs in the notifications queue */
+  async retryFailedJobs() {
+    try {
+      const failed = await this.notifQueue.getFailed();
+      let retried = 0;
+      for (const job of failed) {
+        await job.retry();
+        retried++;
+      }
+      return { retried, total: failed.length };
+    } catch (err: unknown) {
+      return {
+        retried: 0,
+        total: 0,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
   /** Returns system health overview */
   async getSystemHealth() {
     let dbOk = false;
