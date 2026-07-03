@@ -16,6 +16,12 @@ const USERS = [
     apis: [
       { method: 'GET', path: '/dashboard/bm', label: 'BM dashboard' },
       { method: 'GET', path: '/alarms', label: 'Alarms list' },
+      {
+        method: 'POST',
+        path: '/payroll/calculate',
+        label: 'Payroll calculator preview',
+        body: { gross_salary: 27500, management_fee_percent: 12 },
+      },
       { method: 'GET', path: '/auth/me', label: 'Profile' },
     ],
   },
@@ -87,11 +93,12 @@ async function login(phone) {
   return body;
 }
 
-async function callApi(token, { method, path }) {
+async function callApi(token, { method, path, body }) {
   const res = await axios({
     method,
     url: `${API}${path}`,
     headers: { Authorization: `Bearer ${token}` },
+    data: body,
     validateStatus: () => true,
   });
   return { status: res.status, ok: res.status >= 200 && res.status < 300 };
