@@ -13,11 +13,20 @@ export class TrainerService {
     private readonly schemaBootstrap: SchemaBootstrapService,
   ) {}
 
-  private ensureTables(): Promise<void> {
-    if (!this.tablesReady) {
-      this.tablesReady = this.schemaBootstrap.ensureModuleTables();
+  private async ensureTables(): Promise<void> {
+    try {
+      if (!this.tablesReady) {
+        this.tablesReady = this.schemaBootstrap.ensureModuleTables().catch((err) => {
+          this.tablesReady = null;
+          throw err;
+        });
+      }
+      await this.tablesReady;
+    } catch (err) {
+      this.logger.warn(
+        `ensureTables: ${err instanceof Error ? err.message : String(err)} — continuing (tables may already exist)`,
+      );
     }
-    return this.tablesReady;
   }
 
   async getDashboardStats(user: AuthUser) {
