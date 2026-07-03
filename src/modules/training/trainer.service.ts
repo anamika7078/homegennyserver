@@ -1,13 +1,28 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuthUser } from '../../common/guards/branch-scope.util';
+import { SchemaBootstrapService } from '../health/schema-bootstrap.service';
 
 @Injectable()
 export class TrainerService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(TrainerService.name);
+  private tablesReady: Promise<void> | null = null;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly schemaBootstrap: SchemaBootstrapService,
+  ) {}
+
+  private ensureTables(): Promise<void> {
+    if (!this.tablesReady) {
+      this.tablesReady = this.schemaBootstrap.ensureModuleTables();
+    }
+    return this.tablesReady;
+  }
 
   async getDashboardStats(user: AuthUser) {
-    const branchClause = user.branchId ? `AND b.branch_id = '${user.branchId}'` : '';
+    await this.ensureTables();
+    const branchClause = user.branchId ? `AND b.branch_id = '${user.branchId}'::uuid` : '';
 
     try {
       // Total Trainees
@@ -71,7 +86,8 @@ export class TrainerService {
   }
 
   async getAssignedBatches(user: AuthUser) {
-    const branchClause = user.branchId ? `AND b.branch_id = '${user.branchId}'` : '';
+    await this.ensureTables();
+    const branchClause = user.branchId ? `AND b.branch_id = '${user.branchId}'::uuid` : '';
     try {
     const rows = await this.prisma.$queryRawUnsafe<any[]>(`
       SELECT

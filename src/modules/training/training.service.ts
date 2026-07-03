@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuthUser, resolveStaffScope } from '../../common/guards/branch-scope.util';
+import { SchemaBootstrapService } from '../health/schema-bootstrap.service';
 
 const CURRICULUM_DAYS: Record<string, number> = {
   DR: 5, DRIVER: 5, SC: 7, SKILLED_CARE: 7,
@@ -43,11 +44,32 @@ function mapBatch(r: any) {
 
 @Injectable()
 export class TrainingService {
-  constructor(private readonly prisma: PrismaService) { }
+  private readonly logger = new Logger(TrainingService.name);
+  private tablesReady: Promise<void> | null = null;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly schemaBootstrap: SchemaBootstrapService,
+  ) {}
+
+  private ensureTables(): Promise<void> {
+    if (!this.tablesReady) {
+      this.tablesReady = this.schemaBootstrap.ensureModuleTables();
+    }
+    return this.tablesReady;
+  }
+
+  private branchFilter(scope: { branchId?: string }, alias = ''): string {
+    if (!scope.branchId) return '';
+    const col = alias ? `${alias}.branch_id` : 'branch_id';
+    return `AND ${col} = '${scope.branchId}'::uuid`;
+  }
 
   async listBatches(user: AuthUser) {
+    await this.ensureTables();
     const scope = resolveStaffScope(user, {});
 
+    try {
     const rows = await this.prisma.$queryRawUnsafe<any[]>(`
       SELECT
         b.id, b.batch_code, b.series, b.trainer_name, b.classroom,
@@ -68,7 +90,7 @@ export class TrainingService {
       FROM training_batches b
       LEFT JOIN batch_enrollments e ON e.batch_id = b.id
       LEFT JOIN staff_applicants sa ON sa.id = e.staff_id
-      ${scope.branchId ? `WHERE b.branch_id = '${scope.branchId}'` : ''}
+      WHERE 1=1 ${this.branchFilter(scope, 'b')}
       GROUP BY b.id
       ORDER BY b.created_at DESC
     `);
@@ -78,9 +100,14 @@ export class TrainingService {
       : rows;
 
     return filtered.map(mapBatch);
+    } catch (err) {
+      this.logger.warn(`listBatches: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
   }
 
   async createBatch(user: AuthUser, body: Record<string, unknown>) {
+    await this.ensureTables();
     const series = String(body.series ?? 'DR');
     const code = genBatchCode(series);
     const startDate = body.start_date ? new Date(String(body.start_date)) : new Date();
@@ -100,6 +127,7 @@ export class TrainingService {
   }
 
   async enrollStaff(batchId: string, staffId: string) {
+    await this.ensureTables();
     const batches = await this.prisma.$queryRawUnsafe<any[]>(
       `SELECT id FROM training_batches WHERE id = $1::uuid`, batchId,
     );
@@ -149,23 +177,24 @@ export class TrainingService {
   }
 
   async getStats(user: AuthUser) {
+    await this.ensureTables();
     const scope = resolveStaffScope(user, {});
-    const branchClause = scope.branchId ? `AND branch_id = '${scope.branchId}'` : '';
 
+    try {
     const counts = await this.prisma.$queryRawUnsafe<any[]>(`
       SELECT
         COUNT(*) FILTER (WHERE status = 'ACTIVE')    AS active,
         COUNT(*) FILTER (WHERE status = 'UPCOMING')  AS upcoming,
         COUNT(*) FILTER (WHERE status = 'COMPLETED') AS completed,
         COUNT(*) AS total
-      FROM training_batches WHERE 1=1 ${branchClause}
+      FROM training_batches WHERE 1=1 ${this.branchFilter(scope)}
     `);
 
     const trainees = await this.prisma.$queryRawUnsafe<any[]>(`
       SELECT COUNT(*) AS total
       FROM batch_enrollments e
       JOIN training_batches b ON b.id = e.batch_id
-      WHERE 1=1 ${branchClause}
+      WHERE 1=1 ${this.branchFilter(scope, 'b')}
     `);
 
     const c = counts[0] ?? {};
@@ -176,5 +205,9 @@ export class TrainingService {
       total: Number(c.total ?? 0),
       totalTrainees: Number(trainees[0]?.total ?? 0),
     };
+    } catch (err) {
+      this.logger.warn(`getStats: ${err instanceof Error ? err.message : String(err)}`);
+      return { active: 0, upcoming: 0, completed: 0, total: 0, totalTrainees: 0 };
+    }
   }
 }

@@ -2,6 +2,7 @@ import { Controller, Get, Post, Headers, UnauthorizedException } from '@nestjs/c
 import { ApiTags } from '@nestjs/swagger';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PortalBootstrapService } from './portal-bootstrap.service';
+import { SchemaBootstrapService } from './schema-bootstrap.service';
 import { countPortalUsers } from '../../database/seeds/portal-users.seed';
 import { PORTAL_USERS } from '../../database/seeds/portal-users.constants';
 
@@ -11,6 +12,7 @@ export class HealthController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly portalBootstrap: PortalBootstrapService,
+    private readonly schemaBootstrap: SchemaBootstrapService,
   ) {}
 
   @Get()
@@ -42,5 +44,16 @@ export class HealthController {
       throw new UnauthorizedException('Invalid seed secret');
     }
     return this.portalBootstrap.runSeed(true);
+  }
+
+  /** Ensure training/finance module tables exist (fixes /training/* 500 on fresh DBs) */
+  @Post('ensure-module-tables')
+  async ensureModuleTables(@Headers('x-seed-secret') secret?: string) {
+    const expected = process.env.SEED_SECRET;
+    if (!expected || secret !== expected) {
+      throw new UnauthorizedException('Invalid seed secret');
+    }
+    await this.schemaBootstrap.ensureModuleTables();
+    return { ok: true, message: 'training_batches, batch_enrollments, payroll_records, client_invoices verified' };
   }
 }
