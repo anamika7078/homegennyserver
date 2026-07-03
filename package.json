@@ -18,6 +18,7 @@
     "prisma:fix": "npx prisma migrate resolve --rolled-back 20260518000000_enterprise_extensions || true && npx prisma migrate resolve --rolled-back 20260528000000_admin_security_triggers || true",
     "prisma:migrate": "npm run prisma:fix && prisma migrate deploy",
     "prisma:seed": "ts-node prisma/seed.ts",
+    "seed:demo": "ts-node scratch/seed_demo_data.ts",
     "prisma:studio": "prisma studio",
     "render:start": "npx prisma migrate resolve --rolled-back 20260518000000_enterprise_extensions || true && npx prisma migrate resolve --rolled-back 20260528000000_admin_security_triggers || true && npx prisma migrate deploy && node scratch/seed_users_now.js && node dist/main"
   },

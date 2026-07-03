@@ -1,6 +1,7 @@
 import { PrismaClient, StaffSeries, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { loadSeedEnv } from '../src/database/seeds/load-env';
+import { seedDemoData } from '../src/database/seeds/demo-data.seed';
 
 loadSeedEnv();
 
@@ -106,6 +107,7 @@ async function main() {
   await seedUsers();
   await seedScenarios();
   await seedRbac();
+  await seedDemoData(prisma);
   console.log('[SEED] Done.');
 }
 
