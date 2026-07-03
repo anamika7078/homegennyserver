@@ -1,0 +1,28 @@
+import { UserRole } from '@prisma/client';
+
+export const PORTAL_BRANCH_ID = '00000000-0000-0000-0000-000000000001';
+
+export const PORTAL_USER_PHONES = [
+  '9800000001',
+  '9800000002',
+  '9800000003',
+  '9800000004',
+  '9800000005',
+  '9800000006',
+  '9800000007',
+] as const;
+
+export const PORTAL_USERS: Array<{
+  phone: string;
+  role: UserRole;
+  fullName: string;
+  email: string;
+}> = [
+  { phone: '9800000001', role: UserRole.BM, fullName: 'Amit Gupta', email: 'bm@homegenny.com' },
+  { phone: '9800000002', role: UserRole.RM, fullName: 'Pooja Mishra', email: 'rm@homegenny.com' },
+  { phone: '9800000003', role: UserRole.ADMIN, fullName: 'Super Admin', email: 'admin@homegenny.com' },
+  { phone: '9800000004', role: UserRole.FINANCE, fullName: 'Rajesh Finance', email: 'finance@homegenny.com' },
+  { phone: '9800000005', role: UserRole.TRAINER, fullName: 'Sunita Trainer', email: 'trainer@homegenny.com' },
+  { phone: '9800000006', role: UserRole.ASSESSOR, fullName: 'Dr. Kavita Assessor', email: 'assessor@homegenny.com' },
+  { phone: '9800000007', role: UserRole.SUPPORT, fullName: 'Ops Support', email: 'support@homegenny.com' },
+];

@@ -86,6 +86,8 @@ export default registerAs('app', () => ({
   bcryptRounds: parseInt(process.env.BCRYPT_ROUNDS || '12', 10),
   maxLoginAttempts: parseInt(process.env.MAX_LOGIN_ATTEMPTS || '5', 10),
   lockoutMinutes: parseInt(process.env.LOCKOUT_MINUTES || '30', 10),
+  autoSeedUsers: process.env.AUTO_SEED_USERS === 'true',
+  seedSecret: process.env.SEED_SECRET,
 
   // Video cert
   videoMinDurationSeconds: parseInt(process.env.VIDEO_MIN_DURATION_SECONDS || '270', 10),

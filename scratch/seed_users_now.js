@@ -1,6 +1,4 @@
 const bcrypt = require('bcryptjs');
-const fs = require('fs');
-const path = require('path');
 const { Client } = require('pg');
 
 const BRANCH_ID = '00000000-0000-0000-0000-000000000001';
@@ -18,15 +16,28 @@ const USERS = [
 ];
 
 async function main() {
-  const client = new Client({ connectionString: DB_URL });
+  const client = new Client({
+    connectionString: DB_URL,
+    ssl: DB_URL.includes('localhost') ? false : { rejectUnauthorized: false },
+  });
   await client.connect();
+  console.log('[OK] Connected to database');
 
-  const migrationSql = fs.readFileSync(
-    path.join(__dirname, '../prisma/migrations/20260520120000_users_core/migration.sql'),
-    'utf8',
+  await client.query(`
+    DO $$ BEGIN
+      ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'TRAINER';
+      ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'ASSESSOR';
+      ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'SUPPORT';
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+  `);
+
+  await client.query(
+    `INSERT INTO branches (id, name, city, state, email, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+     ON CONFLICT (id) DO NOTHING`,
+    [BRANCH_ID, 'HomeGenny Delhi NCR HQ', 'New Delhi', 'Delhi', 'delhi@homegenny.com'],
   );
-  await client.query(migrationSql);
-  console.log('[OK] branches + users tables ready');
 
   const hash = await bcrypt.hash(PASSWORD, 12);
   for (const u of USERS) {
