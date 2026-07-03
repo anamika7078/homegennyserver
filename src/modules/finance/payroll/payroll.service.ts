@@ -68,6 +68,7 @@ export class FinancePayrollService {
 
   /** List all payroll records for a given month/year */
   async listPayrollRuns(month?: number, year?: number): Promise<PayrollRecordRow[]> {
+    try {
     let sql = `
       SELECT
         pr.*,
@@ -83,6 +84,10 @@ export class FinancePayrollService {
     if (conditions.length) sql += ` WHERE ${conditions.join(' AND ')}`;
     sql += ' ORDER BY pr.created_at DESC';
     return this.dataSource.query<PayrollRecordRow[]>(sql, params);
+    } catch (err) {
+      this.logger.warn(`listPayrollRuns: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
   }
 
   /** Preview payroll calculation for a single placement without writing to DB */

@@ -39,7 +39,7 @@ export class AlarmsController {
   }
 
   @Get()
-  @Roles(UserRole.ADMIN, UserRole.BM, UserRole.RM)
+  @Roles(UserRole.ADMIN, UserRole.BM, UserRole.RM, UserRole.SUPPORT)
   @ApiOperation({ summary: 'List alarms (optional filters: severity, category, status)' })
   async findAll(@Query('severity') severity?: string, @Query('category') category?: string, @Query('status') status?: string) {
     return this.alarmsService.findAll({ severity, category, status });

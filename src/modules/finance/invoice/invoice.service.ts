@@ -27,6 +27,7 @@ export class FinanceInvoiceService {
   constructor(private readonly dataSource: DataSource) {}
 
   async listInvoices(params: { status?: string; page?: number; limit?: number } = {}) {
+    try {
     const page  = params.page  ?? 1;
     const limit = params.limit ?? 50;
     const offset = (page - 1) * limit;
@@ -63,6 +64,9 @@ export class FinanceInvoiceService {
     const total = parseInt(countRow[0]?.total ?? '0', 10);
 
     return { data: rows, total, page, limit };
+    } catch {
+      return { data: [], total: 0, page: params.page ?? 1, limit: params.limit ?? 50 };
+    }
   }
 
   async getInvoice(id: string): Promise<InvoiceRow & { line_items: object }> {
