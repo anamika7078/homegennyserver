@@ -1,6 +1,12 @@
 import { PrismaClient } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
-import { PORTAL_BRANCH_ID, PORTAL_USER_PHONES, PORTAL_USERS } from './portal-users.constants';
+import {
+  PORTAL_ADMIN_PHONE,
+  PORTAL_ADMIN_TOTP_SECRET,
+  PORTAL_BRANCH_ID,
+  PORTAL_USER_PHONES,
+  PORTAL_USERS,
+} from './portal-users.constants';
 
 export interface PortalSeedResult {
   seeded: number;
@@ -9,6 +15,34 @@ export interface PortalSeedResult {
 }
 
 type PrismaLike = Pick<PrismaClient, 'branch' | 'user' | '$queryRaw'>;
+
+function portalAdminMetadata(existing?: Record<string, unknown>) {
+  return {
+    ...(existing ?? {}),
+    totp_secret: PORTAL_ADMIN_TOTP_SECRET,
+    totp_enabled: false,
+  };
+}
+
+/** Reset portal demo Admin 2FA when stuck on an orphaned random secret. */
+export async function ensurePortalAdmin2fa(prisma: PrismaLike): Promise<boolean> {
+  const admin = await prisma.user.findUnique({
+    where: { phone: PORTAL_ADMIN_PHONE },
+    select: { id: true, metadata: true },
+  });
+  if (!admin) return false;
+
+  const current = (admin.metadata ?? {}) as Record<string, unknown>;
+  if (current.totp_secret === PORTAL_ADMIN_TOTP_SECRET) {
+    return false;
+  }
+
+  await prisma.user.update({
+    where: { id: admin.id },
+    data: { metadata: portalAdminMetadata(current) },
+  });
+  return true;
+}
 
 export async function countPortalUsers(prisma: PrismaLike): Promise<number> {
   const rows = await prisma.$queryRaw<{ count: bigint }[]>`
@@ -47,6 +81,9 @@ export async function seedPortalUsers(
 
   const seededPhones: string[] = [];
   for (const u of PORTAL_USERS) {
+    const isPortalAdmin = u.phone === PORTAL_ADMIN_PHONE;
+    const adminMeta = isPortalAdmin ? portalAdminMetadata() : undefined;
+
     await prisma.user.upsert({
       where: { phone: u.phone },
       create: {
@@ -57,6 +94,7 @@ export async function seedPortalUsers(
         email: u.email,
         passwordHash: hash,
         isActive: true,
+        ...(adminMeta ? { metadata: adminMeta } : {}),
       },
       update: {
         branchId: PORTAL_BRANCH_ID,
@@ -67,10 +105,13 @@ export async function seedPortalUsers(
         isActive: true,
         refreshTokenHash: null,
         activeSessionId: null,
+        ...(adminMeta ? { metadata: adminMeta } : {}),
       },
     });
     seededPhones.push(u.phone);
   }
+
+  await ensurePortalAdmin2fa(prisma);
 
   return { seeded: seededPhones.length, password, phones: seededPhones };
 }

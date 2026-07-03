@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
-import { countPortalUsers, seedPortalUsers } from '../../database/seeds/portal-users.seed';
+import { countPortalUsers, ensurePortalAdmin2fa, seedPortalUsers } from '../../database/seeds/portal-users.seed';
 import { PORTAL_USERS } from '../../database/seeds/portal-users.constants';
 
 @Injectable()
@@ -23,7 +23,11 @@ export class PortalBootstrapService implements OnModuleInit {
     try {
       const existing = await countPortalUsers(this.prisma);
       if (existing >= PORTAL_USERS.length) {
-        this.logger.log(`Portal users ready (${existing}/${PORTAL_USERS.length})`);
+        const reset = await ensurePortalAdmin2fa(this.prisma);
+        this.logger.log(
+          `Portal users ready (${existing}/${PORTAL_USERS.length})` +
+            (reset ? ' — demo Admin 2FA reset to bootstrap secret' : ''),
+        );
         return;
       }
 
@@ -49,6 +53,7 @@ export class PortalBootstrapService implements OnModuleInit {
       existing: await countPortalUsers(this.prisma),
       total: PORTAL_USERS.length,
       phones: result.phones,
+      admin_2fa_reset: await ensurePortalAdmin2fa(this.prisma),
       message: `Seeded ${result.seeded} portal users`,
     };
   }

@@ -2,6 +2,16 @@ import { UserRole } from '@prisma/client';
 
 export const PORTAL_BRANCH_ID = '00000000-0000-0000-0000-000000000001';
 
+/** Portal demo Admin — phone 9800000003 */
+export const PORTAL_ADMIN_PHONE = '9800000003';
+
+/**
+ * Fixed base32 TOTP secret for the portal demo Admin account.
+ * On deploy, bootstrap resets Admin 2FA to this secret so the QR setup flow is recoverable.
+ * Add key manually in Google Authenticator or scan the QR on first login.
+ */
+export const PORTAL_ADMIN_TOTP_SECRET = 'JBSWY3DPEHPK3PXP';
+
 export const PORTAL_USER_PHONES = [
   '9800000001',
   '9800000002',

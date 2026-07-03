@@ -19,10 +19,10 @@ import {
   generateTotpSecret,
   buildOtpauthUrl,
   verifyTotp,
-  totpCode,
   otpExpiresAt,
   isOtpExpired,
 } from './auth-otp.util';
+import { PORTAL_ADMIN_PHONE } from '../../database/seeds/portal-users.constants';
 
 /** Maximum admin session lifetime: 8 hours (in seconds) */
 const ADMIN_SESSION_MAX_SECONDS = 8 * 60 * 60;
@@ -66,6 +66,18 @@ export interface TotpSetupRequired {
 }
 
 export interface RefreshResponse { access_token: string; }
+
+function parseUserMetadata(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  return raw as Record<string, unknown>;
+}
 
 @Injectable()
 export class AuthService {
@@ -157,11 +169,11 @@ export class AuthService {
     user: UserRecord,
     meta?: { ip?: string; userAgent?: string; deviceId?: string; totp?: string },
   ): Promise<LoginResponse | { requires_2fa: true; user_id: string } | TotpSetupRequired> {
-    const rows = await this.dataSource.query<{ metadata: Record<string, unknown> }[]>(
+    const rows = await this.dataSource.query<{ metadata: unknown }[]>(
       `SELECT metadata FROM users WHERE id = $1`,
       [user.id],
     );
-    const metadata = (rows[0]?.metadata ?? {}) as Record<string, unknown>;
+    const metadata = parseUserMetadata(rows[0]?.metadata);
     const isAdmin = user.role === 'ADMIN';
 
     // ── ADMIN: mandatory hardware/TOTP 2FA ──────────────────────────────────
@@ -184,13 +196,27 @@ export class AuthService {
       }
 
       if (!meta?.totp) {
-        // Admin has a TOTP secret but no code provided — prompt for 2FA
+        // Setup not finished — show QR wizard again with the stored secret
+        if (!metadata.totp_enabled) {
+          const secret = String(metadata.totp_secret);
+          return {
+            requires_totp_setup: true,
+            user_id:     user.id,
+            totp_secret: secret,
+            otpauth_url: buildOtpauthUrl(secret, user.phone),
+          };
+        }
         return { requires_2fa: true, user_id: user.id };
       }
 
-      if (!verifyTotp(String(metadata.totp_secret), meta.totp)) {
+      const totpSecret = String(metadata.totp_secret).trim();
+      if (!verifyTotp(totpSecret, String(meta.totp).trim())) {
         await this.logLoginAttempt(user.id, false, { ...meta, failReason: 'INVALID_2FA' });
-        throw new UnauthorizedException('Invalid 2FA code');
+        const hint =
+          user.phone === PORTAL_ADMIN_PHONE
+            ? ' Scan the QR on login or add the setup key in your authenticator app.'
+            : '';
+        throw new UnauthorizedException(`Invalid 2FA code.${hint}`);
       }
 
       // Mark TOTP as confirmed if this is their first successful use
