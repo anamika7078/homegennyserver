@@ -11,8 +11,12 @@ export class DocumentsService implements OnModuleInit {
   constructor(private readonly repo: DocumentsRepository) {}
 
   onModuleInit() {
-    if (!fs.existsSync(this.uploadDir)) {
-      fs.mkdirSync(this.uploadDir, { recursive: true });
+    try {
+      if (!fs.existsSync(this.uploadDir)) {
+        fs.mkdirSync(this.uploadDir, { recursive: true });
+      }
+    } catch (error) {
+      console.warn(`[DocumentsService] Warning: Could not create upload directory at ${this.uploadDir}. Ensure disk permissions are configured.`, error.message);
     }
   }
 
