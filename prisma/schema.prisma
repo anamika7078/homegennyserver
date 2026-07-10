@@ -682,6 +682,7 @@ model PayrollRecord {
   staffId      String    @map("staff_id") @db.Uuid
   periodMonth  Int       @map("period_month")
   periodYear   Int       @map("period_year")
+  shiftDays    Int?      @map("shift_days")
   grossSalary  Decimal   @map("gross_salary") @db.Decimal(10, 2)
   deductions   Json      @default("{}")
   netSalary    Decimal   @map("net_salary") @db.Decimal(10, 2)

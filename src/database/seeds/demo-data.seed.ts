@@ -37,10 +37,10 @@ const CLIENTS = {
 } as const;
 
 const PLACEMENTS = {
-  maid: 'p1111111-1111-1111-1111-111111111111',
-  dr:   'p2222222-2222-2222-2222-222222222222',
-  sc:   'p3333333-3333-3333-3333-333333333333',
-  uc:   'p4444444-4444-4444-4444-444444444444',
+  maid: '11111111-1111-1111-1111-111111111111',
+  dr:   '22222222-2222-2222-2222-222222222222',
+  sc:   '33333333-3333-3333-3333-333333333333',
+  uc:   '44444444-4444-4444-4444-444444444444',
 } as const;
 
 export async function seedDemoData(prisma: PrismaClient) {
@@ -247,6 +247,9 @@ export async function seedDemoData(prisma: PrismaClient) {
   });
 
   // ── Finance: deployed staff ───────────────────────────────────────────────────
+  // Ensure deposit columns exist
+  await prisma.$executeRaw`ALTER TABLE staff_applicants ADD COLUMN IF NOT EXISTS deposit_amount DECIMAL(10, 2) NOT NULL DEFAULT 0;`;
+  await prisma.$executeRaw`ALTER TABLE staff_applicants ADD COLUMN IF NOT EXISTS deposit_paid BOOLEAN NOT NULL DEFAULT false;`;
   const financeStaff = [
     { id: FIN_STAFF.maid, code: 'FN-M3-101', series: StaffSeries.MAID,           name: 'Priya Nair',    deposit: 5000, paid: true },
     { id: FIN_STAFF.dr,   code: 'FN-DR-102', series: StaffSeries.DRIVER,         name: 'Ramesh Yadav',  deposit: 8000, paid: false },

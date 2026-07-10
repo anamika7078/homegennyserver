@@ -250,7 +250,7 @@ ALTER COLUMN "updated_at" DROP DEFAULT;
 ALTER TABLE "staff_applicants" DROP COLUMN "aadhaar_hash",
 DROP COLUMN "current_scenario_code",
 DROP COLUMN "deployment_ready_date",
-DROP COLUMN "deposit_amount",
+
 DROP COLUMN "deposit_paid",
 DROP COLUMN "restricted_list_flag",
 DROP COLUMN "terminal_reason",
