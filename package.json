@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "description": "HomeGenny Domestic Staffing Platform — NestJS Backend (Google Cloud Edition)",
   "scripts": {
-    "build": "nest build",
+    "build": "npx prisma migrate resolve --rolled-back 20260518000000_enterprise_extensions || true; npx prisma migrate resolve --rolled-back 20260528000000_admin_security_triggers || true; npx prisma migrate resolve --rolled-back 20260710112100_add_employee_tables || true; nest build",
     "start": "node dist/main",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
