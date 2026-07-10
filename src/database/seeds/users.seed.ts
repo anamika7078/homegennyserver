@@ -18,6 +18,7 @@ const USERS = [
   { phone: '9800000005', role: 'TRAINER', fullName: 'Sunita Trainer', email: 'trainer@homegenny.com' },
   { phone: '9800000006', role: 'ASSESSOR', fullName: 'Dr. Kavita Assessor', email: 'assessor@homegenny.com' },
   { phone: '9800000007', role: 'SUPPORT', fullName: 'Ops Support', email: 'support@homegenny.com' },
+  { phone: '9800000008', role: 'HR', fullName: 'HR Admin', email: 'hr@homegenny.com' },
 ] as const;
 
 const EXTRA_ROLES = ['TRAINER', 'ASSESSOR', 'SUPPORT'] as const;

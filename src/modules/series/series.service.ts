@@ -62,7 +62,7 @@ export class SeriesService {
     const updated = await this.prisma.staffApplicant.update({
       where: { id: staffId },
       data: {
-        roleTypes: JSON.stringify(careTypes),
+        roleTypes: careTypes,
         metadata: { ...metadata, care_type_tier: careTypes[0], care_types: careTypes },
       },
     });
@@ -79,7 +79,7 @@ export class SeriesService {
 
     return this.prisma.staffApplicant.update({
       where: { id: staffId },
-      data: { roleTypes: JSON.stringify(roleTypes) },
+      data: { roleTypes },
     });
   }
 

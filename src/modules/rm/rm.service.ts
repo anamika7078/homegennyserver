@@ -5,12 +5,19 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Prisma, PipelineStage, UserRole } from '@prisma/client';
+import { Prisma, PipelineStage, UserRole, StaffAttendanceStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PipelineFsmService, PipelineStage as FsmStage } from '../pipeline/pipeline-fsm.service';
-import { AuthUser, resolveStaffScope } from '../../common/guards/branch-scope.util';
+import { AuthUser, resolveStaffScope, assertStaffAccess } from '../../common/guards/branch-scope.util';
 import { toStaffDto, parseCreateStaffBody } from '../../common/mappers/staff.mapper';
 import { StaffService } from '../staff/staff.service';
+import { PayrollService } from '../payroll/payroll.service';
+import {
+  BRANCH_AREA_CONFIG,
+  DELHI_BRANCH_ID,
+  PUNE_BRANCH_ID,
+  MUMBAI_BRANCH_ID,
+} from './branch-areas.config';
 import * as crypto from 'crypto';
 
 const KANBAN_STAGES: PipelineStage[] = [
@@ -31,6 +38,7 @@ export class RmService {
     private readonly fsm: PipelineFsmService,
     private readonly staffService: StaffService,
     private readonly events: EventEmitter2,
+    private readonly payroll: PayrollService,
   ) {}
 
   private staffWhere(scope: ReturnType<typeof resolveStaffScope>): Prisma.StaffApplicantWhereInput {
@@ -491,5 +499,313 @@ export class RmService {
       take: 100,
     });
     return items.map(toStaffDto);
+  }
+
+  async getLocations(user: AuthUser) {
+    const scope = resolveStaffScope(user, {});
+
+    // Ensure config cities/branches exist for dropdowns (idempotent upsert)
+    const extraBranches = [
+      { id: PUNE_BRANCH_ID, name: 'HomeGenny Pune', city: 'Pune', state: 'Maharashtra' },
+      { id: MUMBAI_BRANCH_ID, name: 'HomeGenny Mumbai', city: 'Mumbai', state: 'Maharashtra' },
+    ];
+    for (const b of extraBranches) {
+      if (scope.branchId && scope.branchId !== b.id && scope.branchId !== DELHI_BRANCH_ID) continue;
+      await this.prisma.branch.upsert({
+        where: { id: b.id },
+        create: {
+          id: b.id,
+          name: b.name,
+          city: b.city,
+          state: b.state,
+          isActive: true,
+        },
+        update: { isActive: true },
+      });
+    }
+
+    const allBranches = await this.prisma.branch.findMany({
+      where: {
+        isActive: true,
+        ...(scope.branchId ? { id: scope.branchId } : {}),
+      },
+      select: { id: true, name: true, city: true },
+      orderBy: [{ city: 'asc' }, { name: 'asc' }],
+    });
+
+    const configAreas = scope.branchId
+      ? BRANCH_AREA_CONFIG.filter((a) => a.branch_id === scope.branchId)
+      : BRANCH_AREA_CONFIG;
+
+    const citySet = new Set<string>();
+    for (const b of allBranches) {
+      citySet.add(b.city === 'New Delhi' ? 'Delhi NCR' : b.city);
+    }
+    for (const a of configAreas) citySet.add(a.city);
+
+    const areas = configAreas.map((a) => ({
+      city: a.city,
+      area: a.area,
+      branch_code: a.branch_code,
+      branch_id: a.branch_id,
+      label: `${a.branch_code} — ${a.area}`,
+    }));
+
+    return {
+      cities: [...citySet].sort(),
+      branches: allBranches.map((b) => ({
+        ...b,
+        city: b.city === 'New Delhi' ? 'Delhi NCR' : b.city,
+      })),
+      areas,
+    };
+  }
+
+  async getAttendance(
+    user: AuthUser,
+    branchId: string,
+    month: number,
+    year: number,
+    branchCode?: string,
+  ) {
+    const scope = resolveStaffScope(user, { branchId });
+    if (scope.branchId && scope.branchId !== branchId) {
+      throw new ForbiddenException('Branch not in scope');
+    }
+
+    const placements = await this.prisma.placement.findMany({
+      where: {
+        branchId,
+        status: 'CONFIRMED',
+        ...(scope.rmId ? { rmId: scope.rmId } : {}),
+      },
+      include: {
+        branch: { select: { id: true, name: true, city: true } },
+      },
+    });
+
+    const staffIds = placements.map((p) => p.staffId);
+    if (!staffIds.length) {
+      return { month, year, branch_id: branchId, staff: [] };
+    }
+
+    const staffRows = await this.prisma.staffApplicant.findMany({
+      where: {
+        id: { in: staffIds },
+        deletedAt: null,
+        ...(scope.rmId ? { assignedRmId: scope.rmId } : {}),
+      },
+      select: { id: true, staffCode: true, fullName: true, branchId: true },
+    });
+    const staffById = new Map(staffRows.map((s) => [s.id, s]));
+
+    const monthStart = new Date(year, month - 1, 1);
+    const monthEnd = new Date(year, month, 0);
+
+    const attendanceRows = await this.prisma.staffDailyAttendance.findMany({
+      where: {
+        staffId: { in: staffIds },
+        branchId,
+        attendanceDate: { gte: monthStart, lte: monthEnd },
+      },
+      orderBy: { attendanceDate: 'asc' },
+    });
+
+    const attendanceByStaff = new Map<string, typeof attendanceRows>();
+    for (const row of attendanceRows) {
+      const list = attendanceByStaff.get(row.staffId) ?? [];
+      list.push(row);
+      attendanceByStaff.set(row.staffId, list);
+    }
+
+    const invoiceRows = await this.prisma.invoice
+      .findMany({
+        where: {
+          periodMonth: month,
+          periodYear: year,
+          placementId: { in: placements.map((p) => p.id) },
+        },
+        select: { id: true, placementId: true },
+      })
+      .catch(() => []);
+
+    const invoiceByPlacement = new Map<string, string>(
+      invoiceRows.map((r) => [r.placementId, r.id] as [string, string]),
+    );
+
+    const daysInMonth = this.payroll.daysInMonth(month, year);
+
+    const staff = await Promise.all(
+      placements
+        .filter((p) => staffById.has(p.staffId))
+        .map(async (p) => {
+          const staff = staffById.get(p.staffId)!;
+          const records = (attendanceByStaff.get(p.staffId) ?? []).map((r) => ({
+            date: r.attendanceDate.toISOString().slice(0, 10),
+            status: r.status,
+            overtime_hours: r.overtimeHours ? Number(r.overtimeHours) : null,
+          }));
+
+          const statusCounts: Record<string, number> = {};
+          for (const r of records) {
+            statusCounts[r.status] = (statusCounts[r.status] ?? 0) + 1;
+          }
+          const summary = this.payroll.summarizeAttendanceCounts(
+            Object.entries(statusCounts).map(([status, count]) => ({
+              status,
+              count: String(count),
+            })),
+            month,
+            year,
+          );
+
+          const monthlySalary = Number(p.staffSalary ?? 0);
+          const monthlyFee = Number(p.managementFee ?? 0);
+          const proratedGross = this.payroll.calculateProratedGross(
+            monthlySalary,
+            summary.billable_days,
+            daysInMonth,
+          );
+
+          return {
+            staff_id: staff.id,
+            staff_code: staff.staffCode,
+            full_name: staff.fullName,
+            placement_id: p.id,
+            monthly_salary: monthlySalary,
+            monthly_management_fee: monthlyFee,
+            present_days: summary.present_days,
+            absent_days: summary.absent_days,
+            leave_days: summary.leave_days,
+            overtime_days: summary.overtime_days,
+            billable_days: summary.billable_days,
+            days_in_month: daysInMonth,
+            prorated_gross: proratedGross,
+            invoice_id: invoiceByPlacement.get(p.id) ?? null,
+            daily_records: records,
+          };
+        }),
+    );
+
+    return { month, year, branch_id: branchId, staff };
+  }
+
+  async markAttendance(
+    user: AuthUser,
+    body: {
+      staff_id: string;
+      date: string;
+      status?: StaffAttendanceStatus | null;
+      overtime_hours?: number;
+      branch_id?: string;
+    },
+  ) {
+    const staff = await this.prisma.staffApplicant.findUnique({
+      where: { id: body.staff_id },
+    });
+    if (!staff) throw new NotFoundException('Staff not found');
+    assertStaffAccess(user, staff);
+
+    const placement = await this.prisma.placement.findFirst({
+      where: {
+        staffId: body.staff_id,
+        status: 'CONFIRMED',
+        ...(body.branch_id ? { branchId: body.branch_id } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!placement) throw new BadRequestException('No confirmed placement for staff');
+
+    const attendanceDate = new Date(body.date);
+    if (Number.isNaN(attendanceDate.getTime())) {
+      throw new BadRequestException('Invalid date');
+    }
+
+    if (!body.status) {
+      await this.prisma.staffDailyAttendance.deleteMany({
+        where: { staffId: body.staff_id, attendanceDate },
+      });
+      return { cleared: true, staff_id: body.staff_id, date: body.date };
+    }
+
+    const record = await this.prisma.staffDailyAttendance.upsert({
+      where: {
+        staffId_attendanceDate: {
+          staffId: body.staff_id,
+          attendanceDate,
+        },
+      },
+      create: {
+        staffId: body.staff_id,
+        placementId: placement.id,
+        branchId: placement.branchId,
+        attendanceDate,
+        status: body.status,
+        overtimeHours: body.overtime_hours,
+        markedBy: user.id,
+      },
+      update: {
+        status: body.status,
+        overtimeHours: body.overtime_hours,
+        markedBy: user.id,
+        placementId: placement.id,
+        branchId: placement.branchId,
+      },
+    });
+
+    return {
+      id: record.id,
+      staff_id: record.staffId,
+      date: body.date,
+      status: record.status,
+      overtime_hours: record.overtimeHours ? Number(record.overtimeHours) : null,
+    };
+  }
+
+  async previewAttendanceInvoice(user: AuthUser, staffId: string, month: number, year: number) {
+    const staff = await this.prisma.staffApplicant.findUnique({ where: { id: staffId } });
+    if (!staff) throw new NotFoundException('Staff not found');
+    assertStaffAccess(user, staff);
+
+    const placement = await this.prisma.placement.findFirst({
+      where: { staffId, status: 'CONFIRMED' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!placement) throw new NotFoundException('No confirmed placement');
+
+    const preview = await this.payroll.previewAttendancePayroll(placement.id, month, year);
+    const existing = await this.prisma.invoice.findFirst({
+      where: { placementId: placement.id, periodMonth: month, periodYear: year },
+      select: { id: true },
+    });
+
+    return {
+      ...preview,
+      staff_code: staff.staffCode,
+      staff_name: staff.fullName,
+      invoice_id: existing?.id ?? null,
+    };
+  }
+
+  async generateAttendanceInvoice(user: AuthUser, staffId: string, month: number, year: number) {
+    const staff = await this.prisma.staffApplicant.findUnique({ where: { id: staffId } });
+    if (!staff) throw new NotFoundException('Staff not found');
+    assertStaffAccess(user, staff);
+
+    const placement = await this.prisma.placement.findFirst({
+      where: { staffId, status: 'CONFIRMED' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!placement) throw new NotFoundException('No confirmed placement');
+
+    const result = await this.payroll.runAttendancePayroll(placement.id, month, year);
+    const invoice = result.invoice as Record<string, unknown>;
+    return {
+      invoice_id: invoice.id,
+      invoice_number: invoice.invoice_number,
+      payroll_id: (result.payroll as Record<string, unknown>).id,
+      preview: result.preview,
+      calculation: result.calculation,
+    };
   }
 }

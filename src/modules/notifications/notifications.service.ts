@@ -6,6 +6,7 @@ import { Repository } from 'typeorm';
 import * as admin from 'firebase-admin';
 import * as nodemailer from 'nodemailer';
 import { NotificationLog } from './notification-log.entity';
+import { PrismaService } from '../../prisma/prisma.service';
 
 // ── Message Templates ─────────────────────────────────────────────────────────
 const TEMPLATES: Record<string, (d: Record<string, string>) => string> = {
@@ -36,6 +37,7 @@ export class NotificationsService {
   constructor(
     private readonly configService: ConfigService,
     @InjectRepository(NotificationLog) private readonly logRepo: Repository<NotificationLog>,
+    private readonly prisma: PrismaService,
   ) {
     // ── Firebase Admin (GCP ADC — no key file on GCE) ──────────────────────
     if (!admin.apps.length) {
@@ -134,5 +136,55 @@ export class NotificationsService {
     } catch (err: unknown) {
       this.logger.error(`[EMAIL] Failed to ${to}: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  // ── In-App Notifications Helpers ──────────────────────────────────────────
+
+  async findInAppNotifications(userId: string, role: string) {
+    return this.prisma.notification.findMany({
+      where: {
+        OR: [
+          { userId },
+          { userId: null },
+        ],
+        channel: 'IN_APP',
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+  }
+
+  async getUnreadInAppCount(userId: string, role: string) {
+    const count = await this.prisma.notification.count({
+      where: {
+        OR: [
+          { userId },
+          { userId: null },
+        ],
+        channel: 'IN_APP',
+        readAt: null,
+      },
+    });
+    return { count };
+  }
+
+  async markAsRead(id: string) {
+    return this.prisma.notification.update({
+      where: { id },
+      data: { readAt: new Date() },
+    });
+  }
+
+  async createInAppNotification(title: string, body: string, userId?: string | null) {
+    return this.prisma.notification.create({
+      data: {
+        title,
+        body,
+        userId: userId || null,
+        channel: 'IN_APP',
+        status: 'SENT',
+        sentAt: new Date(),
+      },
+    });
   }
 }

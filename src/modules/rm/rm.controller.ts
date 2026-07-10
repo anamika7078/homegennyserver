@@ -5,6 +5,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   Req,
   UseGuards,
@@ -129,5 +130,76 @@ export class RmController {
   })
   intake(@Req() req: { user: AuthUser }, @Body() body: Record<string, unknown>) {
     return this.rm.processIntake(req.user, body);
+  }
+
+  @Get('locations')
+  @ApiOperation({ summary: 'Cities and branches for attendance location filters' })
+  locations(@Req() req: { user: AuthUser }) {
+    return this.rm.getLocations(req.user);
+  }
+
+  @Get('attendance')
+  @ApiOperation({ summary: 'Branch staff attendance for a month' })
+  attendance(
+    @Req() req: { user: AuthUser },
+    @Query('branchId') branchId: string,
+    @Query('month') month: string,
+    @Query('year') year: string,
+    @Query('branchCode') branchCode?: string,
+  ) {
+    return this.rm.getAttendance(
+      req.user,
+      branchId,
+      parseInt(month, 10),
+      parseInt(year, 10),
+      branchCode,
+    );
+  }
+
+  @Put('attendance')
+  @ApiOperation({ summary: 'Mark or clear daily attendance for a staff member' })
+  markAttendance(
+    @Req() req: { user: AuthUser },
+    @Body() body: {
+      staff_id: string;
+      date: string;
+      status?: 'PRESENT' | 'ABSENT' | 'LEAVE' | 'OVERTIME' | null;
+      overtime_hours?: number;
+      branch_id?: string;
+    },
+  ) {
+    return this.rm.markAttendance(req.user, body);
+  }
+
+  @Get('attendance/:staffId/invoice-preview')
+  @ApiOperation({ summary: 'Preview pro-rated invoice for staff month' })
+  invoicePreview(
+    @Req() req: { user: AuthUser },
+    @Param('staffId') staffId: string,
+    @Query('month') month: string,
+    @Query('year') year: string,
+  ) {
+    return this.rm.previewAttendanceInvoice(
+      req.user,
+      staffId,
+      parseInt(month, 10),
+      parseInt(year, 10),
+    );
+  }
+
+  @Post('attendance/:staffId/generate-invoice')
+  @ApiOperation({ summary: 'Generate payroll record and client invoice from attendance' })
+  generateInvoice(
+    @Req() req: { user: AuthUser },
+    @Param('staffId') staffId: string,
+    @Query('month') month: string,
+    @Query('year') year: string,
+  ) {
+    return this.rm.generateAttendanceInvoice(
+      req.user,
+      staffId,
+      parseInt(month, 10),
+      parseInt(year, 10),
+    );
   }
 }

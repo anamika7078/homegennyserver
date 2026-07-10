@@ -62,12 +62,20 @@ export const PERMISSIONS = [
   { code: 'support.alerts', name: 'Alerts', module: 'support' },
   { code: 'support.followups', name: 'Follow-ups', module: 'support' },
   { code: 'support.notifications', name: 'Notifications', module: 'support' },
+  // HR
+  { code: 'hr.dashboard', name: 'HR Dashboard', module: 'hr' },
+  { code: 'hr.employees', name: 'Employee Management', module: 'hr' },
+  { code: 'hr.categories', name: 'Employee Categories', module: 'hr' },
+  { code: 'hr.documents', name: 'Employee Documents', module: 'hr' },
+  { code: 'hr.attendance', name: 'Attendance Management', module: 'hr' },
+  { code: 'hr.notifications', name: 'HR Notifications', module: 'hr' },
+  { code: 'hr.reports', name: 'HR Reports', module: 'hr' },
 ] as const;
 
 export type PermissionCode = (typeof PERMISSIONS)[number]['code'];
 
 export const ROLE_PERMISSION_MAP: Record<string, PermissionCode[]> = {
-  ADMIN: PERMISSIONS.map((p) => p.code),
+  ADMIN: PERMISSIONS.map((p) => p.code) as any,
   BM: [
     'bm.rms.manage', 'bm.escalations.approve', 'bm.denials.review', 'bm.scenario.override',
     'bm.agreements.approve', 'bm.training.review', 'bm.analytics', 'bm.deployments.assign',
@@ -91,6 +99,15 @@ export const ROLE_PERMISSION_MAP: Record<string, PermissionCode[]> = {
   ],
   SUPPORT: [
     'support.tickets', 'support.alerts', 'support.followups', 'support.notifications',
+  ],
+  HR: [
+    'hr.dashboard',
+    'hr.employees',
+    'hr.categories',
+    'hr.documents',
+    'hr.attendance',
+    'hr.notifications',
+    'hr.reports',
   ],
 };
 

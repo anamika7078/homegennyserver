@@ -7,7 +7,7 @@ export interface CandidateRow {
   series:         string;
   language_tier:  string | null;
   pipeline_stage: string;
-  role_types:     string | null;
+  role_types:     string[] | null;
 }
 
 @Injectable()

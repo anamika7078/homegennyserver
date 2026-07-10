@@ -6,6 +6,8 @@ import { BullModule } from '@nestjs/bull';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { EventEmitterModule } from '@nestjs/event-emitter';
+
+// Core Modules
 import { AuthModule } from './modules/auth/auth.module';
 import { StaffModule } from './modules/staff/staff.module';
 import { PipelineModule } from './modules/pipeline/pipeline.module';
@@ -14,6 +16,14 @@ import { VideoCertModule } from './modules/video-cert/video-cert.module';
 import { PayrollModule } from './modules/payroll/payroll.module';
 import { MatchingModule } from './modules/matching/matching.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+
+// HR related modules
+import { CategoriesModule } from './modules/categories/categories.module';
+import { EmployeesModule } from './modules/employees/employees.module';
+import { DocumentsModule } from './modules/documents/documents.module';
+import { AttendanceModule } from './modules/attendance/attendance.module';
+
+// Other existing modules
 import { RestrictedListModule } from './modules/restricted-list/restricted-list.module';
 import { PlacementModule } from './modules/placement/placement.module';
 import { MonitoringModule } from './modules/monitoring/monitoring.module';
@@ -43,6 +53,8 @@ import { PrivacyModule } from './modules/privacy/privacy.module';
 import { QueuesModule } from './modules/queues/queues.module';
 import { ComplianceModule } from './modules/compliance/compliance.module';
 import { SystemHealthModule } from './modules/system-health/system-health.module';
+import { RmPortalModule } from './modules/rm-portal/rm-portal.module';
+
 import databaseConfig from './config/database.config';
 import appConfig from './config/app.config';
 
@@ -92,6 +104,11 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     RbacModule,
     AuditModule,
     ScenarioModule,
+    // HR modules
+    AttendanceModule,
+    DocumentsModule,
+    EmployeesModule,
+    CategoriesModule,
     EnterpriseCronModule,
     SeriesModule,
     RealtimeModule,
@@ -125,7 +142,8 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     QueuesModule,
     ComplianceModule,
     SystemHealthModule,
+    RmPortalModule,
   ],
   controllers: [AppController],
 })
-export class AppModule { }
+export class AppModule {}

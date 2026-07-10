@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 
@@ -32,6 +32,17 @@ interface PlacementRow {
 }
 
 interface ShiftCountRow { shift_days: string; }
+
+interface AttendanceCountRow { status: string; count: string; }
+
+export interface AttendanceSummary {
+  present_days: number;
+  absent_days: number;
+  leave_days: number;
+  overtime_days: number;
+  billable_days: number;
+  days_in_month: number;
+}
 
 @Injectable()
 export class PayrollService {
@@ -93,6 +104,63 @@ export class PayrollService {
     };
   }
 
+  daysInMonth(month: number, year: number): number {
+    return new Date(year, month, 0).getDate();
+  }
+
+  calculateProratedGross(monthlySalary: number, billableDays: number, daysInMonth: number): number {
+    if (daysInMonth <= 0) return 0;
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    return r2(monthlySalary * (billableDays / daysInMonth));
+  }
+
+  summarizeAttendanceCounts(rows: AttendanceCountRow[], month: number, year: number): AttendanceSummary {
+    const counts: Record<string, number> = {};
+    for (const row of rows) {
+      counts[row.status] = parseInt(row.count, 10);
+    }
+    const present_days = counts.PRESENT ?? 0;
+    const absent_days = counts.ABSENT ?? 0;
+    const leave_days = counts.LEAVE ?? 0;
+    const overtime_days = counts.OVERTIME ?? 0;
+    return {
+      present_days,
+      absent_days,
+      leave_days,
+      overtime_days,
+      billable_days: present_days + overtime_days,
+      days_in_month: this.daysInMonth(month, year),
+    };
+  }
+
+  calculatePayrollWithAbsoluteFee(grossSalary: number, managementFee: number): PayrollCalculation {
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+
+    const esicApplicable = grossSalary <= 21_000;
+    const esicEmployee = esicApplicable ? r2(grossSalary * ESIC_EMPLOYEE_RATE) : 0;
+    const esicEmployer = esicApplicable ? r2(grossSalary * ESIC_EMPLOYER_RATE) : 0;
+
+    const pfBase = Math.min(grossSalary, PF_WAGE_CEILING);
+    const pfEmployee = r2(pfBase * PF_RATE);
+    const pfEmployer = r2(pfBase * PF_RATE);
+
+    const netSalary = r2(grossSalary - esicEmployee - pfEmployee);
+    const gstOnFee = r2(managementFee * GST_RATE);
+    const clientTotalCharge = r2(grossSalary + esicEmployer + pfEmployer + managementFee + gstOnFee);
+
+    return {
+      grossSalary,
+      esicEmployee,
+      esicEmployer,
+      pfEmployee,
+      pfEmployer,
+      netSalary,
+      managementFee: r2(managementFee),
+      gstOnFee,
+      clientTotalCharge,
+    };
+  }
+
   calculatePayroll(grossSalary: number, managementFeePercent: number): PayrollCalculation {
     const r2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -133,17 +201,19 @@ export class PayrollService {
       const shifts = await manager.query<ShiftCountRow[]>(
         `SELECT COUNT(*) AS shift_days FROM shift_logs
          WHERE placement_id = $1
-           AND EXTRACT(MONTH FROM log_date) = $2
-           AND EXTRACT(YEAR  FROM log_date) = $3
-           AND status = 'PRESENT'`,
+           AND EXTRACT(MONTH FROM shift_date) = $2
+           AND EXTRACT(YEAR  FROM shift_date) = $3
+           AND status = 'APPROVED'`,
         [placementId, month, year],
       );
       const shiftDays = parseInt(shifts[0]?.shift_days ?? '0', 10);
 
-      const calc = this.calculatePayroll(
-        parseFloat(p.staff_salary),
-        parseFloat(p.management_fee),
-      );
+      const monthlySalary = parseFloat(p.staff_salary);
+      const monthlyFee = parseFloat(p.management_fee);
+      const dim = this.daysInMonth(month, year);
+      const proratedGross = this.calculateProratedGross(monthlySalary, shiftDays, dim);
+      const proratedFee = this.calculateProratedGross(monthlyFee, shiftDays, dim);
+      const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee);
 
       const [payroll] = await manager.query<Record<string, unknown>[]>(
         `INSERT INTO payroll_records
@@ -176,6 +246,141 @@ export class PayrollService {
 
       this.logger.log(`[PAYROLL] Completed placement ${placementId} ${month}/${year}`);
       return { payroll, invoice, calculation: calc };
+    });
+  }
+
+  async countAttendanceForStaff(
+    staffId: string,
+    month: number,
+    year: number,
+  ): Promise<AttendanceSummary> {
+    const rows = await this.dataSource.query<AttendanceCountRow[]>(
+      `SELECT status::text, COUNT(*)::text AS count
+       FROM staff_daily_attendance
+       WHERE staff_id = $1
+         AND EXTRACT(MONTH FROM attendance_date) = $2
+         AND EXTRACT(YEAR  FROM attendance_date) = $3
+       GROUP BY status`,
+      [staffId, month, year],
+    );
+    return this.summarizeAttendanceCounts(rows, month, year);
+  }
+
+  async previewAttendancePayroll(placementId: string, month: number, year: number) {
+    const placements = await this.dataSource.query<PlacementRow[]>(
+      `SELECT staff_id, client_id, staff_salary, management_fee
+       FROM placements WHERE id = $1`,
+      [placementId],
+    );
+    if (!placements.length) throw new NotFoundException(`Placement ${placementId} not found`);
+    const p = placements[0];
+
+    const summary = await this.countAttendanceForStaff(p.staff_id, month, year);
+    const monthlySalary = parseFloat(p.staff_salary);
+    const monthlyFee = parseFloat(p.management_fee);
+    const proratedGross = this.calculateProratedGross(
+      monthlySalary,
+      summary.billable_days,
+      summary.days_in_month,
+    );
+    const proratedFee = this.calculateProratedGross(
+      monthlyFee,
+      summary.billable_days,
+      summary.days_in_month,
+    );
+    const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee);
+
+    return {
+      placement_id: placementId,
+      staff_id: p.staff_id,
+      period_month: month,
+      period_year: year,
+      monthly_salary: monthlySalary,
+      monthly_management_fee: monthlyFee,
+      ...summary,
+      prorated_gross: proratedGross,
+      prorated_management_fee: proratedFee,
+      calculation: calc,
+    };
+  }
+
+  async runAttendancePayroll(
+    placementId: string,
+    month: number,
+    year: number,
+  ): Promise<Record<string, unknown>> {
+    const existing = await this.dataSource.query<{ id: string }[]>(
+      `SELECT id FROM client_invoices
+       WHERE placement_id = $1 AND period_month = $2 AND period_year = $3
+       LIMIT 1`,
+      [placementId, month, year],
+    );
+    if (existing.length) {
+      throw new BadRequestException(
+        `Invoice already exists for placement ${placementId} in ${month}/${year}`,
+      );
+    }
+
+    const preview = await this.previewAttendancePayroll(placementId, month, year);
+    if (preview.billable_days <= 0) {
+      throw new BadRequestException('No billable attendance days for this period');
+    }
+
+    const placements = await this.dataSource.query<PlacementRow[]>(
+      `SELECT staff_id, client_id, staff_salary, management_fee
+       FROM placements WHERE id = $1`,
+      [placementId],
+    );
+    const p = placements[0];
+    const calc = preview.calculation as PayrollCalculation;
+
+    return this.dataSource.transaction(async (manager) => {
+      const [payroll] = await manager.query<Record<string, unknown>[]>(
+        `INSERT INTO payroll_records
+           (placement_id, staff_id, period_month, period_year, shift_days,
+            gross_salary, deductions, net_salary,
+            esic_employer, esic_employee, pf_employer, pf_employee)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+        [
+          placementId,
+          p.staff_id,
+          month,
+          year,
+          preview.billable_days,
+          calc.grossSalary,
+          JSON.stringify({ esic: calc.esicEmployee, pf: calc.pfEmployee }),
+          calc.netSalary,
+          calc.esicEmployer,
+          calc.esicEmployee,
+          calc.pfEmployer,
+          calc.pfEmployee,
+        ],
+      );
+
+      const invoiceNo = `INV-${year}${String(month).padStart(2, '0')}-${placementId.slice(0, 6).toUpperCase()}`;
+      const dueDate = new Date(year, month, 5);
+
+      const [invoice] = await manager.query<Record<string, unknown>[]>(
+        `INSERT INTO client_invoices
+           (placement_id, client_id, invoice_number, period_month, period_year,
+            staff_salary_component, management_fee, gst_amount, total_amount, due_date)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+        [
+          placementId,
+          p.client_id,
+          invoiceNo,
+          month,
+          year,
+          calc.grossSalary,
+          calc.managementFee,
+          calc.gstOnFee,
+          calc.clientTotalCharge,
+          dueDate,
+        ],
+      );
+
+      this.logger.log(`[ATTENDANCE_PAYROLL] placement ${placementId} ${month}/${year}`);
+      return { payroll, invoice, preview, calculation: calc };
     });
   }
 

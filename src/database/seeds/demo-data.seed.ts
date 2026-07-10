@@ -8,6 +8,7 @@ import {
   PipelineStage,
   AssessmentResult,
   PlacementStatus,
+  StaffAttendanceStatus,
 } from '@prisma/client';
 
 const BRANCH_ID = '00000000-0000-0000-0000-000000000001';
@@ -356,6 +357,42 @@ export async function seedDemoData(prisma: PrismaClient) {
     }
   }
 
+  // ── RM daily attendance (current month) ─────────────────────────────────────
+  if (rmId) {
+    const attendanceStaff = [
+      { staffId: FIN_STAFF.maid, placementId: PLACEMENTS.maid },
+      { staffId: FIN_STAFF.dr, placementId: PLACEMENTS.dr },
+      { staffId: FIN_STAFF.sc, placementId: PLACEMENTS.sc },
+    ];
+
+    for (const { staffId, placementId } of attendanceStaff) {
+      for (let day = 1; day <= Math.min(now.getDate(), 28); day++) {
+        const attendanceDate = new Date(year, month - 1, day);
+        let status: StaffAttendanceStatus = StaffAttendanceStatus.PRESENT;
+        if (staffId === FIN_STAFF.maid && day === 27) status = StaffAttendanceStatus.LEAVE;
+        if (staffId === FIN_STAFF.maid && day === 28) status = StaffAttendanceStatus.ABSENT;
+        if (staffId === FIN_STAFF.dr && day % 7 === 0) status = StaffAttendanceStatus.LEAVE;
+        if (staffId === FIN_STAFF.sc && day === 15) status = StaffAttendanceStatus.OVERTIME;
+
+        await prisma.staffDailyAttendance.upsert({
+          where: {
+            staffId_attendanceDate: { staffId, attendanceDate },
+          },
+          create: {
+            staffId,
+            placementId,
+            branchId: BRANCH_ID,
+            attendanceDate,
+            status,
+            markedBy: rmId,
+            overtimeHours: status === StaffAttendanceStatus.OVERTIME ? 2 : undefined,
+          },
+          update: { status, placementId, markedBy: rmId },
+        });
+      }
+    }
+  }
+
   // ── Payroll records (current month) ───────────────────────────────────────────
   const payrollRows = [
     { id: 'pr111111-1111-1111-1111-111111111111', placementId: PLACEMENTS.maid, staffId: FIN_STAFF.maid, gross: 18000, net: 16500, disbursed: false },
@@ -453,5 +490,6 @@ export async function seedDemoData(prisma: PrismaClient) {
 
   console.log('[SEED] ✓ Trainer: 4 batches, 6 enrollments, 4 video certs, 2 assessments');
   console.log('[SEED] ✓ Finance: 3 clients, 4 placements, 3 payroll records, 4 invoices');
+  console.log('[SEED] ✓ RM attendance: daily records for 3 deployed staff');
   console.log(`[SEED] ✓ Period: ${month}/${year}`);
 }

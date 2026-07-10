@@ -105,16 +105,18 @@ export class FinancePayrollService {
     const shiftRows = await this.dataSource.query<{ shift_days: string }[]>(
       `SELECT COUNT(*) AS shift_days FROM shift_logs
        WHERE placement_id = $1
-         AND EXTRACT(MONTH FROM log_date) = $2
-         AND EXTRACT(YEAR  FROM log_date) = $3
-         AND status = 'PRESENT'`,
+         AND EXTRACT(MONTH FROM shift_date) = $2
+         AND EXTRACT(YEAR  FROM shift_date) = $3
+         AND status = 'APPROVED'`,
       [placementId, month, year],
     );
     const shiftDays = parseInt(shiftRows[0]?.shift_days ?? '0', 10);
-    const calc = this.corePayroll.calculatePayroll(
-      parseFloat(p.staff_salary),
-      parseFloat(p.management_fee),
-    );
+    const monthlySalary = parseFloat(p.staff_salary);
+    const monthlyFee = parseFloat(p.management_fee);
+    const dim = this.corePayroll.daysInMonth(month, year);
+    const proratedGross = this.corePayroll.calculateProratedGross(monthlySalary, shiftDays, dim);
+    const proratedFee = this.corePayroll.calculateProratedGross(monthlyFee, shiftDays, dim);
+    const calc = this.corePayroll.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee);
 
     return {
       placement_id: placementId,

@@ -6,14 +6,19 @@ import {
   LanguageTier,
 } from '@prisma/client';
 
-function parseRoleTypes(value: string | null | undefined): string[] {
+function parseRoleTypes(value: unknown): string[] {
   if (!value) return [];
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return Array.isArray(parsed) ? parsed.map(String) : [value];
-  } catch {
-    return value.split(',').map((s) => s.trim()).filter(Boolean);
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  if (typeof value === 'string') {
+    // Backward compatibility for older rows / older Prisma schema
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [String(parsed)];
+    } catch {
+      return value.split(',').map((s) => s.trim()).filter(Boolean);
+    }
   }
+  return [String(value)].filter(Boolean);
 }
 
 /** API / legacy snake_case shape expected by frontend */
@@ -80,14 +85,18 @@ export function generateStaffCode(series: StaffSeries): string {
 
 export function parseCreateStaffBody(body: Record<string, unknown>) {
   const series = mapSeriesFromShort(String(body.series ?? 'SC'));
+  const roleTypes =
+    body.role_types === undefined || body.role_types === null
+      ? []
+      : Array.isArray(body.role_types)
+        ? (body.role_types as unknown[]).map(String).filter(Boolean)
+        : [String(body.role_types)].filter(Boolean);
   return {
     staffCode: (body.staff_code as string) || generateStaffCode(series),
     branchId: body.branch_id ? String(body.branch_id) : undefined,
     assignedRmId: body.assigned_rm_id ? String(body.assigned_rm_id) : undefined,
     series,
-    roleTypes: body.role_types
-      ? JSON.stringify(body.role_types)
-      : undefined,
+    roleTypes,
     languageTier: body.language_tier
       ? (String(body.language_tier) as LanguageTier)
       : undefined,

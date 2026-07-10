@@ -1,0 +1,76 @@
+import {
+  Controller,
+  Get,
+  Post,
+  Put,
+  Body,
+  Param,
+  Query,
+  UseGuards,
+  Req,
+  BadRequestException,
+} from '@nestjs/common';
+import { AttendanceService } from './attendance.service';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles, UserRole } from '../auth/decorators/roles.decorator';
+import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+
+@ApiTags('Employee Attendance')
+@ApiBearerAuth()
+@Controller({ path: 'attendance', version: '1' })
+@UseGuards(JwtAuthGuard, RolesGuard)
+export class AttendanceController {
+  constructor(private readonly service: AttendanceService) {}
+
+  @Get()
+  @Roles(UserRole.HR, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Get all attendance logs with filters' })
+  async findAll(
+    @Query('date') date?: string,
+    @Query('employeeId') employeeId?: string,
+    @Query('branchId') branchId?: string,
+    @Query('categoryId') categoryId?: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    return this.service.findAll({ date, employeeId, branchId, categoryId, page, limit });
+  }
+
+  @Get('stats')
+  @Roles(UserRole.HR, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Get daily attendance statistics' })
+  async getStats(@Query('date') date?: string, @Query('branchId') branchId?: string) {
+    return this.service.getStats(date, branchId);
+  }
+
+  @Post('mark')
+  @Roles(UserRole.HR, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Mark employee attendance' })
+  async mark(@Body() body: any, @Req() req: any) {
+    if (!body.employeeId || !body.date || !body.status) {
+      throw new BadRequestException('Employee ID, date, and status are required');
+    }
+    if (!['Present', 'Absent', 'Leave', 'Half Day', 'Late'].includes(body.status)) {
+      throw new BadRequestException('Invalid status. Must be Present, Absent, Leave, Half Day, or Late');
+    }
+    return this.service.mark(body, req.user.id);
+  }
+
+  @Put(':id')
+  @Roles(UserRole.HR, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Edit employee attendance record' })
+  async edit(@Param('id') id: string, @Body() body: any) {
+    return this.service.edit(id, body);
+  }
+
+  @Post('approve')
+  @Roles(UserRole.HR, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Approve multiple attendance logs' })
+  async approve(@Body('ids') ids: string[], @Req() req: any) {
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      throw new BadRequestException('A list of attendance record IDs is required');
+    }
+    return this.service.approve(ids, req.user.id);
+  }
+}

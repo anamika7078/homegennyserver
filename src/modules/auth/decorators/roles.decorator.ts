@@ -10,6 +10,7 @@ export enum UserRole {
   TRAINER = 'TRAINER',
   ASSESSOR = 'ASSESSOR',
   SUPPORT = 'SUPPORT',
+  HR = 'HR',
 }
 
 /** Super Admin maps to ADMIN in JWT / DB */

@@ -13,7 +13,7 @@ export class DashboardController {
   constructor(private readonly dashboardService: DashboardService) {}
 
   @Get('admin')
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.ADMIN, UserRole.HR)
   @ApiOperation({ summary: 'Super Admin dashboard KPIs' })
   getAdminStats() {
     return this.dashboardService.getAdminStats();

@@ -17,18 +17,25 @@ export class StaffService {
     const input = parseCreateStaffBody(data);
     
     if (!data.staff_code) {
-      let branchCode = 'DEF';
-      if (input.branchId) {
-        const branch = await this.prisma.branch.findUnique({ where: { id: input.branchId } });
-        if (branch && branch.city) {
-          branchCode = branch.city.substring(0, 3).toUpperCase();
-        } else if (branch && branch.name) {
-          branchCode = branch.name.substring(0, 3).toUpperCase();
+      const firstName = input.fullName
+        ? input.fullName.split(' ')[0].toUpperCase().replace(/[^A-Z0-9]/g, '')
+        : 'EMP';
+
+      let seqNumber = 1;
+      
+      const latest = await this.prisma.staffApplicant.findFirst({
+        where: { staffCode: { startsWith: firstName } },
+        orderBy: { staffCode: 'desc' },
+      });
+
+      if (latest) {
+        const match = latest.staffCode.match(/\d+$/);
+        if (match) {
+          seqNumber = parseInt(match[0], 10) + 1;
         }
       }
-      const seq = Math.floor(Math.random() * 9999).toString().padStart(4, '0');
-      const seriesShort = mapSeriesToShort(input.series).slice(0, 2).toUpperCase();
-      input.staffCode = `${seriesShort}-${branchCode}-${seq}`;
+      
+      input.staffCode = `${firstName}${seqNumber.toString().padStart(3, '0')}`;
     }
 
     const row = await this.prisma.staffApplicant.create({ data: input });
@@ -43,8 +50,12 @@ export class StaffService {
   }
 
   async findById(id: string) {
+    // Try by UUID first, then fall back to staff_code
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
     const row = await this.prisma.staffApplicant.findFirst({
-      where: { id, deletedAt: null },
+      where: isUuid
+        ? { id, deletedAt: null }
+        : { staffCode: id, deletedAt: null },
     });
     if (!row) throw new NotFoundException(`Staff ${id} not found`);
     return toStaffDto(row);
