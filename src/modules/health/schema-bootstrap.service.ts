@@ -42,6 +42,8 @@ export class SchemaBootstrapService implements OnModuleInit {
   }
 
   private async runBootstrap(): Promise<void> {
+    await this.ensureFinanceColumns();
+
     if (await this.tablesExist()) {
       this.logger.log('Module tables already present (training, finance)');
       return;
@@ -132,5 +134,27 @@ export class SchemaBootstrapService implements OnModuleInit {
     );
 
     this.logger.log('Module tables verified (training, finance)');
+  }
+
+  /** Restore finance columns dropped by partial Prisma migrations on some deployed DBs. */
+  private async ensureFinanceColumns(): Promise<void> {
+    await this.exec(
+      `ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS shift_days INT NOT NULL DEFAULT 0`,
+    );
+    await this.exec(
+      `ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS client_invoice_id UUID`,
+    );
+    await this.exec(
+      `ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS disbursement_ref VARCHAR(100)`,
+    );
+    await this.exec(
+      `ALTER TABLE staff_applicants ADD COLUMN IF NOT EXISTS deposit_paid BOOLEAN NOT NULL DEFAULT false`,
+    );
+    await this.exec(
+      `ALTER TABLE client_invoices ADD COLUMN IF NOT EXISTS payment_ref VARCHAR(100)`,
+    );
+    await this.exec(
+      `ALTER TABLE client_invoices ADD COLUMN IF NOT EXISTS razorpay_order_id VARCHAR(100)`,
+    );
   }
 }
