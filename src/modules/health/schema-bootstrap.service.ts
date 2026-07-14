@@ -43,6 +43,7 @@ export class SchemaBootstrapService implements OnModuleInit {
 
   private async runBootstrap(): Promise<void> {
     await this.ensureFinanceColumns();
+    await this.ensureHrTables();
 
     if (await this.tablesExist()) {
       this.logger.log('Module tables already present (training, finance)');
@@ -156,5 +157,46 @@ export class SchemaBootstrapService implements OnModuleInit {
     await this.exec(
       `ALTER TABLE client_invoices ADD COLUMN IF NOT EXISTS razorpay_order_id VARCHAR(100)`,
     );
+  }
+
+  /** HR payroll table — missing from Prisma migrations on some deployed DBs. */
+  private async ensureHrTables(): Promise<void> {
+    const rows = await this.prisma.$queryRawUnsafe<{ exists: boolean }[]>(`
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'employee_payrolls'
+      ) AS exists
+    `);
+    if (rows[0]?.exists) return;
+
+    const empRows = await this.prisma.$queryRawUnsafe<{ exists: boolean }[]>(`
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'employees'
+      ) AS exists
+    `);
+    if (!empRows[0]?.exists) {
+      this.logger.warn('employees table missing — skipping employee_payrolls bootstrap');
+      return;
+    }
+
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS employee_payrolls (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        employee_id   UUID NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+        period_month  INT NOT NULL,
+        period_year   INT NOT NULL,
+        present_days  DECIMAL(5,2) NOT NULL,
+        gross_salary  DECIMAL(10,2) NOT NULL,
+        deductions    JSONB NOT NULL DEFAULT '{}',
+        net_salary    DECIMAL(10,2) NOT NULL,
+        status        VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+        disbursed_at  TIMESTAMPTZ,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE(employee_id, period_month, period_year)
+      )
+    `);
+    this.logger.log('employee_payrolls table verified');
   }
 }

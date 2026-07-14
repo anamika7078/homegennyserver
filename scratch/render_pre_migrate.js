@@ -72,9 +72,42 @@ async function main() {
       console.log('[render_pre_migrate] employees table exists — marking add_employee_tables as applied');
       run('npx prisma migrate resolve --applied 20260710112100_add_employee_tables');
     }
+
+    await ensureHrTables(client);
   } finally {
     await client.end();
   }
+}
+
+async function ensureHrTables(client) {
+  const payrollsExists = await tableExists(client, 'employee_payrolls');
+  if (payrollsExists) return;
+
+  const employeesExists = await tableExists(client, 'employees');
+  if (!employeesExists) {
+    console.warn('[render_pre_migrate] employees table missing — skipping employee_payrolls');
+    return;
+  }
+
+  console.log('[render_pre_migrate] Creating employee_payrolls table...');
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS employee_payrolls (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      employee_id   UUID NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      period_month  INT NOT NULL,
+      period_year   INT NOT NULL,
+      present_days  DECIMAL(5,2) NOT NULL,
+      gross_salary  DECIMAL(10,2) NOT NULL,
+      deductions    JSONB NOT NULL DEFAULT '{}',
+      net_salary    DECIMAL(10,2) NOT NULL,
+      status        VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+      disbursed_at  TIMESTAMPTZ,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(employee_id, period_month, period_year)
+    )
+  `);
+  console.log('[render_pre_migrate] employee_payrolls ready');
 }
 
 main().catch((err) => {
