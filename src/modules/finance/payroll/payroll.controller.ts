@@ -1,5 +1,9 @@
-import { Controller, Get, Post, Param, Query, Body, UseGuards, ParseIntPipe, DefaultValuePipe } from '@nestjs/common';
+import {
+  Controller, Get, Post, Param, Query, Body, UseGuards,
+  ParseIntPipe, DefaultValuePipe, Res,
+} from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
+import { Response } from 'express';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { FinancePayrollService } from './payroll.service';
 
@@ -19,6 +23,53 @@ export class FinancePayrollController {
     @Query('year',  new DefaultValuePipe(0), ParseIntPipe) year:  number,
   ) {
     return this.service.listPayrollRuns(month || undefined, year || undefined);
+  }
+
+  @Get('lookup')
+  @ApiOperation({ summary: 'Lookup EOR staff or internal employee by code' })
+  @ApiQuery({ name: 'code', required: true })
+  lookupByCode(@Query('code') code: string) {
+    return this.service.lookupByCode(code);
+  }
+
+  @Get('attendance-preview')
+  @ApiOperation({ summary: 'Preview attendance-based payroll / invoice by employee code' })
+  @ApiQuery({ name: 'code', required: true })
+  @ApiQuery({ name: 'month', required: true })
+  @ApiQuery({ name: 'year', required: true })
+  previewAttendanceByCode(
+    @Query('code') code: string,
+    @Query('month', ParseIntPipe) month: number,
+    @Query('year', ParseIntPipe) year: number,
+  ) {
+    return this.service.previewAttendanceByCode(code, month, year);
+  }
+
+  @Post('attendance-generate')
+  @ApiOperation({ summary: 'Generate attendance-based payroll / invoice by employee code' })
+  generateAttendanceByCode(
+    @Body() body: { code: string; month: number; year: number },
+  ) {
+    return this.service.generateAttendanceByCode(body.code, body.month, body.year);
+  }
+
+  @Get('attendance-preview/download')
+  @ApiOperation({ summary: 'Download attendance payroll preview as HTML' })
+  @ApiQuery({ name: 'code', required: true })
+  @ApiQuery({ name: 'month', required: true })
+  @ApiQuery({ name: 'year', required: true })
+  async downloadAttendancePreview(
+    @Query('code') code: string,
+    @Query('month', ParseIntPipe) month: number,
+    @Query('year', ParseIntPipe) year: number,
+    @Res() res: Response,
+  ) {
+    const preview = await this.service.previewAttendanceByCode(code, month, year);
+    const html = this.service.buildPreviewHtml(preview as Record<string, unknown>);
+    const filename = `payroll-${code}-${month}-${year}.html`;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(html);
   }
 
   @Post('preview')

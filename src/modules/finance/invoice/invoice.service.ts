@@ -99,6 +99,38 @@ export class FinanceInvoiceService {
     return { ...inv, line_items };
   }
 
+  async generateInvoiceHtml(id: string): Promise<string> {
+    const inv = await this.getInvoice(id);
+    const fmt = (n: number | string) =>
+      new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 })
+        .format(Number(n));
+
+    const lineItems = (inv.line_items as { description: string; amount: number }[])
+      .map((li) =>
+        `<tr>
+          <td style="padding:8px;border-bottom:1px solid #e5e7eb">${li.description}</td>
+          <td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:600">${fmt(li.amount)}</td>
+        </tr>`,
+      )
+      .join('');
+
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Invoice ${inv.invoice_number}</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:24px;color:#0f172a">
+  <h1 style="margin:0 0 4px">HomeGenny</h1>
+  <p style="margin:0 0 24px;color:#64748b">Client Invoice</p>
+  <p><strong>Invoice #:</strong> ${inv.invoice_number}</p>
+  <p><strong>Client:</strong> ${inv.client_name ?? '—'}</p>
+  <p><strong>Staff:</strong> ${inv.staff_name ?? '—'} (${(inv as InvoiceRow & { staff_code?: string }).staff_code ?? ''})</p>
+  <p><strong>Period:</strong> ${inv.period_month}/${inv.period_year}</p>
+  <p><strong>Due Date:</strong> ${new Date(inv.due_date).toLocaleDateString('en-IN')}</p>
+  <p><strong>Status:</strong> ${inv.status}</p>
+  <table style="width:100%;border-collapse:collapse;margin-top:24px">${lineItems}</table>
+  <p style="margin-top:16px;font-size:18px;font-weight:700;text-align:right">Total: ${fmt(inv.total_amount)}</p>
+  <p style="margin-top:32px;font-size:12px;color:#94a3b8">Generated ${new Date().toLocaleString('en-IN')}</p>
+</body></html>`;
+  }
+
   async approveInvoice(id: string) {
     const rows = await this.dataSource.query<InvoiceRow[]>(
       `SELECT * FROM client_invoices WHERE id = $1`, [id],

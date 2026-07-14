@@ -31,6 +31,11 @@ export class AttendanceService {
   }
 
   async mark(dto: any, actorId: string) {
+    const employee = await this.repo.findEmployeeById(dto.employeeId);
+    if (!employee) {
+      throw new NotFoundException(`Employee with ID ${dto.employeeId} not found`);
+    }
+
     const attendanceDate = new Date(dto.date);
     
     // Check if attendance already marked for the employee on this date

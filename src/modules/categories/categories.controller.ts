@@ -7,7 +7,7 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 
 @ApiTags('Employee Categories')
 @ApiBearerAuth()
-@Controller('categories')
+@Controller({ path: 'categories', version: '1' })
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class CategoriesController {
   constructor(private readonly service: CategoriesService) {}

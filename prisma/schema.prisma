@@ -1251,6 +1251,7 @@ model Employee {
   deletedAt        DateTime?          @map("deleted_at") @db.Timestamptz(6)
   documents        EmployeeDocument[]
   attendance       EmployeeAttendance[]
+  payrolls         EmployeePayroll[]
 
   @@map("employees")
 }
@@ -1292,4 +1293,23 @@ model EmployeeAttendance {
   @@unique([employeeId, date])
   @@index([date])
   @@map("attendance")
+}
+
+model EmployeePayroll {
+  id           String    @id @default(uuid()) @db.Uuid
+  employeeId   String    @map("employee_id") @db.Uuid
+  employee     Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  periodMonth  Int       @map("period_month")
+  periodYear   Int       @map("period_year")
+  presentDays  Decimal   @map("present_days") @db.Decimal(5, 2)
+  grossSalary  Decimal   @map("gross_salary") @db.Decimal(10, 2)
+  deductions   Json      @default("{}")
+  netSalary    Decimal   @map("net_salary") @db.Decimal(10, 2)
+  status       String    @default("PENDING") @db.VarChar(20)
+  disbursedAt  DateTime? @map("disbursed_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([employeeId, periodMonth, periodYear])
+  @@map("employee_payrolls")
 }

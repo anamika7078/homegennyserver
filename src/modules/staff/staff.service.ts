@@ -18,8 +18,8 @@ export class StaffService {
     
     if (!data.staff_code) {
       const firstName = input.fullName
-        ? input.fullName.split(' ')[0].toUpperCase().replace(/[^A-Z0-9]/g, '')
-        : 'EMP';
+        ? input.fullName.split(' ')[0].toLowerCase().replace(/[^a-z0-9]/g, '')
+        : 'emp';
 
       let seqNumber = 1;
       

@@ -13,6 +13,7 @@ const USERS = [
   { phone: '9800000005', role: 'TRAINER', fullName: 'Sunita Trainer', email: 'trainer@homegenny.com' },
   { phone: '9800000006', role: 'ASSESSOR', fullName: 'Dr. Kavita Assessor', email: 'assessor@homegenny.com' },
   { phone: '9800000007', role: 'SUPPORT', fullName: 'Ops Support', email: 'support@homegenny.com' },
+  { phone: '9800000008', role: 'HR', fullName: 'HR Admin', email: 'hr@homegenny.com' },
 ];
 
 async function main() {
@@ -28,6 +29,7 @@ async function main() {
       ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'TRAINER';
       ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'ASSESSOR';
       ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'SUPPORT';
+      ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'HR';
     EXCEPTION WHEN duplicate_object THEN NULL;
     END $$;
   `);
@@ -42,8 +44,8 @@ async function main() {
   const hash = await bcrypt.hash(PASSWORD, 12);
   for (const u of USERS) {
     await client.query(
-      `INSERT INTO users (branch_id, role, full_name, phone, email, password_hash, is_active, updated_at)
-       VALUES ($1, $2::user_role, $3, $4, $5, $6, true, NOW())
+      `INSERT INTO users (id, branch_id, role, full_name, phone, email, password_hash, is_active, updated_at)
+       VALUES (gen_random_uuid(), $1, $2::user_role, $3, $4, $5, $6, true, NOW())
        ON CONFLICT (phone) DO UPDATE SET
          branch_id = EXCLUDED.branch_id,
          role = EXCLUDED.role,

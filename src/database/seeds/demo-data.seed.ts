@@ -68,11 +68,11 @@ export async function seedDemoData(prisma: PrismaClient) {
 
   // ── Trainer trainees ───────────────────────────────────────────────────────
   const trainerStaff = [
-    { id: TR_STAFF.dr,   code: 'ST-DR-001', series: StaffSeries.DRIVER,         name: 'Amit Sharma' },
-    { id: TR_STAFF.sc,   code: 'ST-SC-002', series: StaffSeries.SKILLED_CARE,   name: 'Sunita Kumar' },
-    { id: TR_STAFF.uc,   code: 'ST-UC-003', series: StaffSeries.UNSKILLED_CARE, name: 'Rahul Verma' },
-    { id: TR_STAFF.maid, code: 'ST-M3-004', series: StaffSeries.MAID,           name: 'Kavita Devi' },
-    { id: TR_STAFF.dr2,  code: 'ST-DR-005', series: StaffSeries.DRIVER,         name: 'Vikram Singh' },
+    { id: TR_STAFF.dr,   code: 'amit001',   series: StaffSeries.DRIVER,         name: 'Amit Sharma' },
+    { id: TR_STAFF.sc,   code: 'sunita001', series: StaffSeries.SKILLED_CARE,   name: 'Sunita Kumar' },
+    { id: TR_STAFF.uc,   code: 'rahul001',  series: StaffSeries.UNSKILLED_CARE, name: 'Rahul Verma' },
+    { id: TR_STAFF.maid, code: 'kavita001', series: StaffSeries.MAID,           name: 'Kavita Devi' },
+    { id: TR_STAFF.dr2,  code: 'vikram001', series: StaffSeries.DRIVER,         name: 'Vikram Singh' },
   ];
 
   for (const s of trainerStaff) {
@@ -251,10 +251,10 @@ export async function seedDemoData(prisma: PrismaClient) {
   await prisma.$executeRaw`ALTER TABLE staff_applicants ADD COLUMN IF NOT EXISTS deposit_amount DECIMAL(10, 2) NOT NULL DEFAULT 0;`;
   await prisma.$executeRaw`ALTER TABLE staff_applicants ADD COLUMN IF NOT EXISTS deposit_paid BOOLEAN NOT NULL DEFAULT false;`;
   const financeStaff = [
-    { id: FIN_STAFF.maid, code: 'FN-M3-101', series: StaffSeries.MAID,           name: 'Priya Nair',    deposit: 5000, paid: true },
-    { id: FIN_STAFF.dr,   code: 'FN-DR-102', series: StaffSeries.DRIVER,         name: 'Ramesh Yadav',  deposit: 8000, paid: false },
-    { id: FIN_STAFF.sc,   code: 'FN-SC-103', series: StaffSeries.SKILLED_CARE,   name: 'Lakshmi Iyer',  deposit: 6000, paid: true },
-    { id: FIN_STAFF.uc,   code: 'FN-UC-104', series: StaffSeries.UNSKILLED_CARE, name: 'Geeta Sharma',  deposit: 4500, paid: true },
+    { id: FIN_STAFF.maid, code: 'priya001',  series: StaffSeries.MAID,           name: 'Priya Nair',    deposit: 5000, paid: true },
+    { id: FIN_STAFF.dr,   code: 'ramesh001', series: StaffSeries.DRIVER,         name: 'Ramesh Yadav',  deposit: 8000, paid: false },
+    { id: FIN_STAFF.sc,   code: 'lakshmi001', series: StaffSeries.SKILLED_CARE,   name: 'Lakshmi Iyer',  deposit: 6000, paid: true },
+    { id: FIN_STAFF.uc,   code: 'geeta001',  series: StaffSeries.UNSKILLED_CARE, name: 'Geeta Sharma',  deposit: 4500, paid: true },
   ];
 
   for (const s of financeStaff) {

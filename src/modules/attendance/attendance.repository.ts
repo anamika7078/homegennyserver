@@ -24,6 +24,13 @@ export class AttendanceRepository {
     });
   }
 
+  async findEmployeeById(id: string) {
+    return this.prisma.employee.findFirst({
+      where: { id, deletedAt: null },
+      select: { id: true },
+    });
+  }
+
   async findById(id: string) {
     return this.prisma.employeeAttendance.findUnique({
       where: { id },

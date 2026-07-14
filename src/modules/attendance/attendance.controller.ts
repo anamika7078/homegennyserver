@@ -11,6 +11,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { AttendanceService } from './attendance.service';
+import { PayrollService } from '../payroll/payroll.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
@@ -21,7 +22,10 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 @Controller({ path: 'attendance', version: '1' })
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class AttendanceController {
-  constructor(private readonly service: AttendanceService) {}
+  constructor(
+    private readonly service: AttendanceService,
+    private readonly payrollService: PayrollService,
+  ) {}
 
   @Get()
   @Roles(UserRole.HR, UserRole.ADMIN)
@@ -72,5 +76,34 @@ export class AttendanceController {
       throw new BadRequestException('A list of attendance record IDs is required');
     }
     return this.service.approve(ids, req.user.id);
+  }
+
+  @Get(':employeeId/payroll-preview')
+  @Roles(UserRole.HR, UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Preview monthly payroll based on attendance' })
+  async previewPayroll(
+    @Param('employeeId') employeeId: string,
+    @Query('month') month: string,
+    @Query('year') year: string,
+  ) {
+    return this.payrollService.previewEmployeePayroll(employeeId, parseInt(month, 10), parseInt(year, 10));
+  }
+
+  @Post(':employeeId/generate-payroll')
+  @Roles(UserRole.HR, UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Generate monthly payroll based on attendance' })
+  async generatePayroll(
+    @Param('employeeId') employeeId: string,
+    @Query('month') month: string,
+    @Query('year') year: string,
+  ) {
+    return this.payrollService.runEmployeePayroll(employeeId, parseInt(month, 10), parseInt(year, 10));
+  }
+
+  @Get('payrolls/all')
+  @Roles(UserRole.HR, UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Get all generated employee payrolls' })
+  async getEmployeePayrolls() {
+    return this.payrollService.getEmployeePayrolls();
   }
 }

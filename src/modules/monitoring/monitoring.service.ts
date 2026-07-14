@@ -245,7 +245,7 @@ export class MonitoringService {
         SELECT sa.id, sa.staff_code, sa.assigned_rm_id,
                (sa.verified_docs->>'dl_valid_to')::DATE AS expiry
         FROM staff_applicants sa
-        WHERE sa.series = 'DR'
+        WHERE sa.series = 'DRIVER'
           AND sa.pipeline_stage = 'S5_DEPLOY'
           AND (sa.verified_docs->>'dl_valid_to') IS NOT NULL
           AND (sa.verified_docs->>'dl_valid_to')::DATE BETWEEN NOW() AND NOW() + INTERVAL '60 days'
@@ -271,7 +271,7 @@ export class MonitoringService {
                sa.verified_docs->>'dl_number' AS dl_number,
                sa.assigned_rm_id
         FROM staff_applicants sa
-        WHERE sa.series = 'DR'
+        WHERE sa.series = 'DRIVER'
           AND sa.pipeline_stage = 'S5_DEPLOY'
           AND sa.verified_docs->>'dl_number' IS NOT NULL
       `);

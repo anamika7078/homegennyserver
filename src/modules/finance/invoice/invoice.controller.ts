@@ -1,5 +1,6 @@
-import { Controller, Get, Post, Param, Query, UseGuards, DefaultValuePipe } from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, UseGuards, DefaultValuePipe, Res } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
+import { Response } from 'express';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { FinanceInvoiceService } from './invoice.service';
 
@@ -28,6 +29,15 @@ export class FinanceInvoiceController {
   @ApiOperation({ summary: 'Invoice status summary for dashboard' })
   getSummary() {
     return this.service.getInvoiceSummary();
+  }
+
+  @Get(':id/download')
+  @ApiOperation({ summary: 'Download invoice as HTML file' })
+  async downloadInvoice(@Param('id') id: string, @Res() res: Response) {
+    const html = await this.service.generateInvoiceHtml(id);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="invoice-${id}.html"`);
+    res.send(html);
   }
 
   @Get(':id')

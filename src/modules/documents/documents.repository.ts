@@ -13,6 +13,13 @@ export class DocumentsRepository {
     });
   }
 
+  async findEmployeeById(id: string) {
+    return this.prisma.employee.findFirst({
+      where: { id, deletedAt: null },
+      select: { id: true },
+    });
+  }
+
   async findById(id: string) {
     return this.prisma.employeeDocument.findUnique({
       where: { id },

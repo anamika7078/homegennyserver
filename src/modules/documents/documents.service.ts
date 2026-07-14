@@ -91,6 +91,11 @@ export class DocumentsService implements OnModuleInit {
       throw new BadRequestException('No document file uploaded');
     }
 
+    const employee = await this.repo.findEmployeeById(employeeId);
+    if (!employee) {
+      throw new NotFoundException(`Employee with ID ${employeeId} not found`);
+    }
+
     // Size limit check: 5 MB
     const maxSize = 5 * 1024 * 1024;
     if (file.size > maxSize) {
