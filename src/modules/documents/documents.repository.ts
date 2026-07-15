@@ -16,8 +16,18 @@ export class DocumentsRepository {
   async findEmployeeById(id: string) {
     return this.prisma.employee.findFirst({
       where: { id, deletedAt: null },
-      select: { id: true },
+      select: {
+        id: true,
+        fullName: true,
+        employeeId: true,
+        category: { select: { name: true } },
+        emergencyContact: true,
+      },
     });
+  }
+
+  async updateEmployee(id: string, data: Prisma.EmployeeUpdateInput) {
+    return this.prisma.employee.update({ where: { id }, data });
   }
 
   async findById(id: string) {

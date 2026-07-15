@@ -48,6 +48,29 @@ export class DocumentsController {
     });
   }
 
+  @Post(':employeeId/unavailable')
+  @Roles(UserRole.HR, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Mark a document as not available with a remark' })
+  async markUnavailable(
+    @Param('employeeId') employeeId: string,
+    @Body('type') type: string,
+    @Body('remark') remark: string,
+  ) {
+    return this.service.markUnavailable(employeeId, type, remark);
+  }
+
+  @Post(':employeeId/complete-onboarding')
+  @Roles(UserRole.HR, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Complete employee onboarding when all docs are uploaded or remarked as unavailable',
+  })
+  async completeOnboarding(
+    @Param('employeeId') employeeId: string,
+    @Body('remark') remark?: string,
+  ) {
+    return this.service.completeOnboarding(employeeId, remark);
+  }
+
   @Get('employee/:employeeId')
   @Roles(UserRole.HR, UserRole.ADMIN)
   @ApiOperation({ summary: 'Get all uploaded documents for an employee' })

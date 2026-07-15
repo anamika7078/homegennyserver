@@ -68,11 +68,111 @@ export class DocumentsService implements OnModuleInit {
     }
   }
 
-  async getMissingDocuments(employee: any): Promise<string[]> {
-    const mandatory = this.getMandatoryDocumentTypes(employee.category.name);
+  /** Docs the HR portal onboarding UI collects (includes Police Verification). */
+  getPortalOnboardingDocumentTypes(categoryName: string): string[] {
+    const base = ['Aadhaar Card', 'PAN Card', 'Passport Size Photo', 'Police Verification Certificate'];
+    if (categoryName === 'Driver') {
+      return [...base, 'Driving License'];
+    }
+    if (categoryName === 'Maid') {
+      return ['Aadhaar Card', 'Passport Size Photo', 'Police Verification Certificate'];
+    }
+    return base;
+  }
+
+  private hasUnavailableRemark(doc: { status: string; metadata?: unknown }): boolean {
+    if (doc.status !== 'Not Available') return false;
+    const meta = (doc.metadata ?? {}) as { remark?: string; unavailable?: boolean };
+    return Boolean(meta.unavailable && meta.remark && String(meta.remark).trim());
+  }
+
+  async getMissingDocuments(employee: any, portalOnly = false): Promise<string[]> {
+    const categoryName = employee.category?.name ?? '';
+    const mandatory = portalOnly
+      ? this.getPortalOnboardingDocumentTypes(categoryName)
+      : this.getMandatoryDocumentTypes(categoryName);
     const docs = await this.repo.findByEmployeeId(employee.id);
-    const uploadedTypes = docs.map((d) => d.type);
-    return mandatory.filter((m) => !uploadedTypes.includes(m));
+    const satisfied = new Set(
+      docs
+        .filter((d) => {
+          if (d.status === 'Not Available') return this.hasUnavailableRemark(d);
+          return Boolean(d.fileUrl && d.fileUrl !== 'unavailable');
+        })
+        .map((d) => d.type),
+    );
+    return mandatory.filter((m) => !satisfied.has(m));
+  }
+
+  async markUnavailable(employeeId: string, type: string, remark: string) {
+    if (!type?.trim()) {
+      throw new BadRequestException('Document type is required');
+    }
+    if (!remark?.trim()) {
+      throw new BadRequestException('Remark is required when a document is not available');
+    }
+
+    const employee = await this.repo.findEmployeeById(employeeId);
+    if (!employee) {
+      throw new NotFoundException(`Employee with ID ${employeeId} not found`);
+    }
+
+    const existing = await this.repo.findByEmployeeAndType(employeeId, type);
+    if (existing) {
+      if (existing.fileUrl && existing.fileUrl !== 'unavailable') {
+        const oldFilePath = path.join(process.cwd(), existing.fileUrl);
+        if (fs.existsSync(oldFilePath)) {
+          try {
+            fs.unlinkSync(oldFilePath);
+          } catch {}
+        }
+      }
+      await this.repo.delete(existing.id);
+    }
+
+    return this.repo.create({
+      type,
+      fileUrl: 'unavailable',
+      status: 'Not Available',
+      employee: { connect: { id: employeeId } },
+      metadata: {
+        unavailable: true,
+        remark: remark.trim(),
+        markedAt: new Date().toISOString(),
+      },
+    });
+  }
+
+  async completeOnboarding(employeeId: string, remark?: string) {
+    const employee = await this.repo.findEmployeeById(employeeId);
+    if (!employee) {
+      throw new NotFoundException(`Employee with ID ${employeeId} not found`);
+    }
+
+    const missing = await this.getMissingDocuments(employee, true);
+    if (missing.length > 0) {
+      throw new BadRequestException(
+        `Cannot complete onboarding. Missing or unmarked documents: ${missing.join(', ')}. Upload each document or mark it Not Available with a remark.`,
+      );
+    }
+
+    const contact =
+      employee.emergencyContact && typeof employee.emergencyContact === 'object'
+        ? (employee.emergencyContact as Record<string, unknown>)
+        : {};
+
+    await this.repo.updateEmployee(employeeId, {
+      emergencyContact: {
+        ...contact,
+        ...(remark?.trim() ? { onboardingRemark: remark.trim() } : {}),
+        onboardingCompletedAt: new Date().toISOString(),
+      },
+    });
+
+    return {
+      employeeId,
+      completed: true,
+      message: 'Onboarding completed successfully',
+    };
   }
 
   async upload(

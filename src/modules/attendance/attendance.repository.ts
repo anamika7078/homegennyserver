@@ -6,12 +6,20 @@ import { Prisma } from '@prisma/client';
 export class AttendanceRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findByEmployeeIdAndDate(employeeId: string, date: Date) {
-    const startOfDay = new Date(date);
-    startOfDay.setHours(0, 0, 0, 0);
+  private dayRange(date: Date) {
+    const startOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+    const endOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+    return { startOfDay, endOfDay };
+  }
 
-    const endOfDay = new Date(date);
-    endOfDay.setHours(23, 59, 59, 999);
+  private parseDateOnly(dateStr: string): Date {
+    const [y, m, d] = String(dateStr).split('T')[0].split('-').map(Number);
+    if (!y || !m || !d) return new Date(dateStr);
+    return new Date(y, m - 1, d);
+  }
+
+  async findByEmployeeIdAndDate(employeeId: string, date: Date) {
+    const { startOfDay, endOfDay } = this.dayRange(date);
 
     return this.prisma.employeeAttendance.findFirst({
       where: {
@@ -43,20 +51,19 @@ export class AttendanceRepository {
     employeeId?: string;
     branchId?: string;
     categoryId?: string;
-    page?: number;
-    limit?: number;
+    page?: number | string;
+    limit?: number | string;
   }) {
-    const page = Number(params.page ?? 1);
-    const limit = Number(params.limit ?? 50);
+    const page = Math.max(1, parseInt(String(params.page ?? 1), 10) || 1);
+    const limit = Math.min(500, Math.max(1, parseInt(String(params.limit ?? 50), 10) || 50));
     const skip = (page - 1) * limit;
 
     const where: Prisma.EmployeeAttendanceWhereInput = {};
 
     if (params.date) {
-      const d = new Date(params.date);
-      const start = new Date(d.setHours(0, 0, 0, 0));
-      const end = new Date(d.setHours(23, 59, 59, 999));
-      where.date = { gte: start, lte: end };
+      const d = this.parseDateOnly(params.date);
+      const { startOfDay, endOfDay } = this.dayRange(d);
+      where.date = { gte: startOfDay, lte: endOfDay };
     }
 
     if (params.employeeId) {
@@ -76,7 +83,7 @@ export class AttendanceRepository {
     const [items, total] = await Promise.all([
       this.prisma.employeeAttendance.findMany({
         where,
-        skip,
+        skip: skip,
         take: limit,
         orderBy: { date: 'desc' },
         include: {
@@ -117,13 +124,10 @@ export class AttendanceRepository {
   }
 
   async getAttendanceStatsForDate(date: Date, branchId?: string) {
-    const start = new Date(date);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(date);
-    end.setHours(23, 59, 59, 999);
+    const { startOfDay, endOfDay } = this.dayRange(date);
 
     const where: Prisma.EmployeeAttendanceWhereInput = {
-      date: { gte: start, lte: end },
+      date: { gte: startOfDay, lte: endOfDay },
     };
 
     if (branchId) {

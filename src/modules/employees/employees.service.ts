@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { EmployeesRepository } from './employees.repository';
 import { Prisma } from '@prisma/client';
 
@@ -109,6 +109,50 @@ export class EmployeesService {
   async toggleStatus(id: string, status: string) {
     await this.findOne(id);
     return this.repo.update(id, { status });
+  }
+
+  async processExit(
+    id: string,
+    dto: {
+      channel: 'ONLINE' | 'OFFLINE';
+      reason: string;
+      exitDate: string;
+      notes?: string;
+    },
+  ) {
+    const employee = await this.findOne(id);
+
+    if (employee.status === 'Resigned') {
+      throw new ConflictException('Employee is already marked as Resigned');
+    }
+    if (!dto.reason?.trim()) {
+      throw new BadRequestException('Resignation / exit reason is required');
+    }
+    if (!dto.exitDate) {
+      throw new BadRequestException('Exit date is required');
+    }
+    if (!['ONLINE', 'OFFLINE'].includes(dto.channel)) {
+      throw new BadRequestException('Channel must be ONLINE or OFFLINE');
+    }
+
+    const contact =
+      employee.emergencyContact && typeof employee.emergencyContact === 'object'
+        ? (employee.emergencyContact as Record<string, unknown>)
+        : {};
+
+    return this.repo.update(id, {
+      status: 'Resigned',
+      emergencyContact: {
+        ...contact,
+        exit: {
+          channel: dto.channel,
+          reason: dto.reason.trim(),
+          exitDate: dto.exitDate,
+          notes: dto.notes?.trim() || null,
+          processedAt: new Date().toISOString(),
+        },
+      },
+    });
   }
 
   async delete(id: string) {

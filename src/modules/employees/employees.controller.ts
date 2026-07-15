@@ -66,6 +66,25 @@ export class EmployeesController {
     return this.service.toggleStatus(id, status);
   }
 
+  @Post(':id/exit')
+  @Roles(UserRole.HR, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Process online or offline staff exit / resignation' })
+  async processExit(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      channel: 'ONLINE' | 'OFFLINE';
+      reason: string;
+      exitDate: string;
+      notes?: string;
+    },
+  ) {
+    if (!body?.channel || !body?.reason || !body?.exitDate) {
+      throw new BadRequestException('channel, reason, and exitDate are required');
+    }
+    return this.service.processExit(id, body);
+  }
+
   @Delete(':id')
   @Roles(UserRole.HR, UserRole.ADMIN)
   @ApiOperation({ summary: 'Soft delete employee record' })

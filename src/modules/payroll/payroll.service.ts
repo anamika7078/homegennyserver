@@ -519,7 +519,21 @@ export class PayrollService {
 
   async getEmployeePayrolls(): Promise<Record<string, unknown>[]> {
     return this.dataSource.query(
-      `SELECT ep.*, e.name AS employee_name, e.email AS employee_email
+      `SELECT ep.id,
+              ep.employee_id AS "employeeId",
+              ep.period_month AS "periodMonth",
+              ep.period_year AS "periodYear",
+              ep.present_days AS "presentDays",
+              ep.gross_salary AS "grossSalary",
+              ep.deductions,
+              ep.net_salary AS "netSalary",
+              ep.status,
+              ep.disbursed_at AS "disbursedAt",
+              ep.created_at AS "createdAt",
+              e.full_name AS "employeeName",
+              e.employee_id AS "employeeCode",
+              e.email AS "employeeEmail",
+              e.department AS "department"
        FROM employee_payrolls ep
        JOIN employees e ON e.id = ep.employee_id
        ORDER BY ep.period_year DESC, ep.period_month DESC, ep.created_at DESC`,

@@ -9,6 +9,8 @@ import {
   UseGuards,
   Req,
   BadRequestException,
+  ParseIntPipe,
+  DefaultValuePipe,
 } from '@nestjs/common';
 import { AttendanceService } from './attendance.service';
 import { PayrollService } from '../payroll/payroll.service';
@@ -35,8 +37,8 @@ export class AttendanceController {
     @Query('employeeId') employeeId?: string,
     @Query('branchId') branchId?: string,
     @Query('categoryId') categoryId?: string,
-    @Query('page') page?: number,
-    @Query('limit') limit?: number,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
+    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit?: number,
   ) {
     return this.service.findAll({ date, employeeId, branchId, categoryId, page, limit });
   }
@@ -94,10 +96,16 @@ export class AttendanceController {
   @ApiOperation({ summary: 'Generate monthly payroll based on attendance' })
   async generatePayroll(
     @Param('employeeId') employeeId: string,
-    @Query('month') month: string,
-    @Query('year') year: string,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
+    @Body() body?: { month?: number; year?: number },
   ) {
-    return this.payrollService.runEmployeePayroll(employeeId, parseInt(month, 10), parseInt(year, 10));
+    const m = Number(body?.month ?? month);
+    const y = Number(body?.year ?? year);
+    if (!m || !y) {
+      throw new BadRequestException('month and year are required');
+    }
+    return this.payrollService.runEmployeePayroll(employeeId, m, y);
   }
 
   @Get('payrolls/all')

@@ -1,6 +1,13 @@
-import { Injectable, ConflictException, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { AttendanceRepository } from './attendance.repository';
 import { Prisma } from '@prisma/client';
+
+/** Parse YYYY-MM-DD as a local calendar date (avoids UTC offset shift). */
+function parseDateOnly(dateStr: string): Date {
+  const [y, m, d] = String(dateStr).split('T')[0].split('-').map(Number);
+  if (!y || !m || !d) return new Date(dateStr);
+  return new Date(y, m - 1, d);
+}
 
 @Injectable()
 export class AttendanceService {
@@ -36,12 +43,17 @@ export class AttendanceService {
       throw new NotFoundException(`Employee with ID ${dto.employeeId} not found`);
     }
 
-    const attendanceDate = new Date(dto.date);
-    
-    // Check if attendance already marked for the employee on this date
+    const attendanceDate = parseDateOnly(dto.date);
+
+    // Upsert: update if already marked for this employee + date
     const existing = await this.repo.findByEmployeeIdAndDate(dto.employeeId, attendanceDate);
     if (existing) {
-      throw new ConflictException('Attendance cannot be marked twice for the same employee on the same date');
+      return this.edit(existing.id, {
+        status: dto.status,
+        checkIn: dto.checkIn,
+        checkOut: dto.checkOut,
+        notes: dto.notes,
+      });
     }
 
     const workingHours = this.calculateWorkingHours(dto.checkIn, dto.checkOut);
@@ -83,7 +95,7 @@ export class AttendanceService {
   }
 
   async getStats(dateStr?: string, branchId?: string) {
-    const date = dateStr ? new Date(dateStr) : new Date();
+    const date = dateStr ? parseDateOnly(dateStr) : new Date();
     return this.repo.getAttendanceStatsForDate(date, branchId);
   }
 }
