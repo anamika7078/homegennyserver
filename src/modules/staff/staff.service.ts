@@ -57,8 +57,47 @@ export class StaffService {
         ? { id, deletedAt: null }
         : { staffCode: id, deletedAt: null },
     });
-    if (!row) throw new NotFoundException(`Staff ${id} not found`);
-    return toStaffDto(row);
+    if (row) return toStaffDto(row);
+
+    // Fall back to internal HR employees table
+    const emp = await this.prisma.employee.findFirst({
+      where: isUuid
+        ? { id, deletedAt: null }
+        : { employeeId: { equals: id, mode: 'insensitive' }, deletedAt: null },
+    });
+    if (emp) {
+      return {
+        id: emp.id,
+        staff_code: emp.employeeId,
+        branch_id: emp.branchId,
+        assigned_rm_id: null,
+        series: emp.department || 'GENERAL',
+        series_db: emp.department || 'GENERAL',
+        role_types: [emp.designation || emp.department || 'STAFF'],
+        language_tier: 'ENGLISH',
+        pipeline_stage: emp.status === 'Active' ? 'CONFIRMED' : emp.status.toUpperCase(),
+        current_scenario_code: null,
+        terminal_outcome: null,
+        full_name: emp.fullName,
+        date_of_birth: emp.dateOfBirth,
+        mobile: emp.mobile,
+        email: emp.email,
+        address: `${emp.address || ''}, ${emp.city || ''}`.trim().replace(/^,/, ''),
+        emergency_contact_name: null,
+        emergency_contact_mobile: null,
+        verified_docs: true,
+        pv_status: 'CLEARED',
+        restricted_list_flag: false,
+        video_cert_id: null,
+        restrictions: [],
+        metadata: {},
+        created_at: emp.createdAt,
+        updated_at: emp.updatedAt,
+        source: 'HR_EMPLOYEE',
+      };
+    }
+
+    throw new NotFoundException(`Staff ${id} not found`);
   }
 
   async findAll(params: {
@@ -84,7 +123,58 @@ export class StaffService {
       }),
       this.prisma.staffApplicant.count({ where }),
     ]);
-    return { items: items.map(toStaffDto), total };
+
+    // Also include internal HR employees
+    let effectiveBranchId = params.branchId;
+    if (!effectiveBranchId && params.rmId) {
+      const rm = await this.prisma.user.findUnique({
+        where: { id: params.rmId },
+        select: { branchId: true },
+      });
+      if (rm?.branchId) effectiveBranchId = rm.branchId;
+    }
+
+    const empWhere: Prisma.EmployeeWhereInput = { deletedAt: null };
+    if (effectiveBranchId) empWhere.branchId = effectiveBranchId;
+
+    const empItems = await this.prisma.employee.findMany({
+      where: empWhere,
+      orderBy: { updatedAt: 'desc' },
+      take: params.limit ?? 100,
+    });
+
+    const mappedEmployees = empItems.map((e) => ({
+      id: e.id,
+      staff_code: e.employeeId,
+      branch_id: e.branchId,
+      assigned_rm_id: params.rmId ?? null,
+      series: e.department || 'GENERAL',
+      series_db: e.department || 'GENERAL',
+      role_types: [e.designation || e.department || 'STAFF'],
+      language_tier: 'ENGLISH',
+      pipeline_stage: e.status === 'Active' ? 'CONFIRMED' : e.status.toUpperCase(),
+      current_scenario_code: null,
+      terminal_outcome: null,
+      full_name: e.fullName,
+      date_of_birth: e.dateOfBirth,
+      mobile: e.mobile,
+      email: e.email,
+      address: `${e.address || ''}, ${e.city || ''}`.trim().replace(/^,/, ''),
+      emergency_contact_name: null,
+      emergency_contact_mobile: null,
+      verified_docs: true,
+      pv_status: 'CLEARED',
+      restricted_list_flag: false,
+      video_cert_id: null,
+      restrictions: [],
+      metadata: {},
+      created_at: e.createdAt,
+      updated_at: e.updatedAt,
+      source: 'HR_EMPLOYEE',
+    }));
+
+    const combined = [...items.map(toStaffDto), ...mappedEmployees];
+    return { items: combined, total: total + mappedEmployees.length };
   }
 
   async update(id: string, data: Record<string, unknown>, actorId?: string) {
