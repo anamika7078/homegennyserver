@@ -180,8 +180,8 @@ export class TrainingService {
     }
 
     await this.prisma.$executeRawUnsafe(
-      `INSERT INTO batch_enrollments (batch_id, staff_id, attendance)
-       VALUES ($1::uuid, $2::uuid, '{}')`,
+      `INSERT INTO batch_enrollments (id, batch_id, staff_id, attendance)
+       VALUES (gen_random_uuid(), $1::uuid, $2::uuid, '{}')`,
       batchId, staffId,
     );
     return { success: true, employeeName: empRows[0].full_name };

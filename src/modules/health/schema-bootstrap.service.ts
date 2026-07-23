@@ -69,7 +69,7 @@ export class SchemaBootstrapService implements OnModuleInit {
 
     await this.exec(`
       CREATE TABLE IF NOT EXISTS batch_enrollments (
-        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        id         UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
         batch_id   UUID NOT NULL REFERENCES training_batches(id) ON DELETE CASCADE,
         staff_id   UUID NOT NULL REFERENCES staff_applicants(id),
         attendance INTEGER[] NOT NULL DEFAULT '{}',
@@ -160,6 +160,20 @@ export class SchemaBootstrapService implements OnModuleInit {
     );
     await this.exec(
       `ALTER TABLE training_batches ADD COLUMN IF NOT EXISTS trainer_id UUID`,
+    );
+    // Ensure all UUID primary key columns have gen_random_uuid() defaults
+    // (some tables may have been created before this fix was applied)
+    await this.exec(
+      `ALTER TABLE batch_enrollments ALTER COLUMN id SET DEFAULT gen_random_uuid()`,
+    );
+    await this.exec(
+      `ALTER TABLE payroll_records ALTER COLUMN id SET DEFAULT gen_random_uuid()`,
+    );
+    await this.exec(
+      `ALTER TABLE client_invoices ALTER COLUMN id SET DEFAULT gen_random_uuid()`,
+    );
+    await this.exec(
+      `ALTER TABLE employee_payrolls ALTER COLUMN id SET DEFAULT gen_random_uuid()`,
     );
   }
 
