@@ -56,6 +56,7 @@ export class SchemaBootstrapService implements OnModuleInit {
         batch_code   VARCHAR(40) UNIQUE NOT NULL,
         series       VARCHAR(10) NOT NULL,
         trainer_name VARCHAR(100),
+        trainer_id   UUID,
         classroom    VARCHAR(80),
         start_date   DATE NOT NULL,
         status       VARCHAR(20) NOT NULL DEFAULT 'UPCOMING',
@@ -156,6 +157,9 @@ export class SchemaBootstrapService implements OnModuleInit {
     );
     await this.exec(
       `ALTER TABLE client_invoices ADD COLUMN IF NOT EXISTS razorpay_order_id VARCHAR(100)`,
+    );
+    await this.exec(
+      `ALTER TABLE training_batches ADD COLUMN IF NOT EXISTS trainer_id UUID`,
     );
   }
 

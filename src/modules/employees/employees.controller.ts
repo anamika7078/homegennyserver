@@ -25,14 +25,37 @@ export class EmployeesController {
   constructor(private readonly service: EmployeesService) {}
 
   @Get()
-  @Roles(UserRole.HR, UserRole.ADMIN)
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.TRAINER)
   @ApiOperation({ summary: 'Get all employees (search, filters, paginate)' })
   async findAll(@Query() query: any) {
     return this.service.findAll(query);
   }
 
+  /** Lightweight employee list — all internal roles can use this for dropdowns */
+  @Get('list')
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.TRAINER, UserRole.FINANCE)
+  @ApiOperation({ summary: 'Get a lightweight list of active employees for dropdowns' })
+  async listForDropdown(@Query('branchId') branchId?: string, @Query('status') status?: string) {
+    const result = await this.service.findAll({
+      branchId,
+      status: status ?? 'Active',
+      limit: 500,
+      page: 1,
+    });
+    // Return slim objects suitable for dropdowns
+    return result.items.map((e: any) => ({
+      id: e.id,
+      employeeId: e.employeeId,
+      fullName: e.fullName,
+      mobile: e.mobile,
+      department: e.department,
+      designation: e.designation,
+      branchId: e.branchId,
+    }));
+  }
+
   @Get(':id')
-  @Roles(UserRole.HR, UserRole.ADMIN)
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.TRAINER)
   @ApiOperation({ summary: 'Get employee details by ID' })
   async findOne(@Param('id') id: string) {
     return this.service.findOne(id);

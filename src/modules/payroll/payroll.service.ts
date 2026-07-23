@@ -217,10 +217,10 @@ export class PayrollService {
 
       const [payroll] = await manager.query<Record<string, unknown>[]>(
         `INSERT INTO payroll_records
-           (placement_id, staff_id, period_month, period_year, shift_days,
+           (id, placement_id, staff_id, period_month, period_year, shift_days,
             gross_salary, deductions, net_salary,
             esic_employer, esic_employee, pf_employer, pf_employee)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+         VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
         [
           placementId, p.staff_id, month, year, shiftDays,
           calc.grossSalary,
@@ -235,9 +235,9 @@ export class PayrollService {
 
       const [invoice] = await manager.query<Record<string, unknown>[]>(
         `INSERT INTO client_invoices
-           (placement_id, client_id, invoice_number, period_month, period_year,
+           (id, placement_id, client_id, invoice_number, period_month, period_year,
             staff_salary_component, management_fee, gst_amount, total_amount, due_date)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+         VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
         [
           placementId, p.client_id, invoiceNo, month, year,
           calc.grossSalary, calc.managementFee, calc.gstOnFee, calc.clientTotalCharge, dueDate,
@@ -337,10 +337,10 @@ export class PayrollService {
     return this.dataSource.transaction(async (manager) => {
       const [payroll] = await manager.query<Record<string, unknown>[]>(
         `INSERT INTO payroll_records
-           (placement_id, staff_id, period_month, period_year, shift_days,
+           (id, placement_id, staff_id, period_month, period_year, shift_days,
             gross_salary, deductions, net_salary,
             esic_employer, esic_employee, pf_employer, pf_employee)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+         VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
         [
           placementId,
           p.staff_id,
@@ -362,9 +362,9 @@ export class PayrollService {
 
       const [invoice] = await manager.query<Record<string, unknown>[]>(
         `INSERT INTO client_invoices
-           (placement_id, client_id, invoice_number, period_month, period_year,
+           (id, placement_id, client_id, invoice_number, period_month, period_year,
             staff_salary_component, management_fee, gst_amount, total_amount, due_date)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+         VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
         [
           placementId,
           p.client_id,
@@ -498,9 +498,9 @@ export class PayrollService {
     return this.dataSource.transaction(async (manager) => {
       const [payroll] = await manager.query<Record<string, unknown>[]>(
         `INSERT INTO employee_payrolls
-           (employee_id, period_month, period_year, present_days,
-            gross_salary, deductions, net_salary)
-         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7) RETURNING *`,
+           (id, employee_id, period_month, period_year, present_days,
+            gross_salary, deductions, net_salary, updated_at)
+         VALUES (gen_random_uuid(), $1::uuid, $2, $3, $4, $5, $6, $7, NOW()) RETURNING *`,
         [
           employeeId,
           month,

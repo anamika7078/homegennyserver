@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Req, UseGuards, Delete } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -57,5 +57,10 @@ export class TrainingController {
     @Body() body: { status: string },
   ) {
     return this.svc.updateBatchStatus(batchId, body.status);
+  }
+  @Delete('batches/:batchId')
+  @ApiOperation({ summary: 'Delete a training batch' })
+  deleteBatch(@Param('batchId') batchId: string) {
+    return this.svc.deleteBatch(batchId);
   }
 }

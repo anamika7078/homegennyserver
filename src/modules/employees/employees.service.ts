@@ -18,32 +18,47 @@ export class EmployeesService {
     return employee;
   }
 
-  async generateUniqueEmployeeId(fullName: string): Promise<string> {
+  async generateUniqueEmployeeId(fullName: string, excludeId?: string): Promise<string> {
     if (!fullName || !fullName.trim()) {
       throw new ConflictException('Full name is required for ID generation');
     }
+
+    // Use the full first name (letters only) in uppercase as the prefix
+    // e.g. "Anamika Sharma" → "ANAMIKA", "Radhey" → "RADHEY"
     const firstName = fullName.trim().split(/\s+/)[0];
-    const cleanedName = firstName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const prefix = firstName.replace(/[^a-zA-Z]/g, '').toUpperCase();
 
-    const existingIds = await this.repo.findExistingIdsStartingWith(cleanedName);
-
-    let suffix = 1;
-    let employeeId = `${cleanedName}${String(suffix).padStart(3, '0')}`;
-    
-    // Increment the suffix until we find a unique ID
-    while (existingIds.includes(employeeId)) {
-      suffix++;
-      employeeId = `${cleanedName}${String(suffix).padStart(3, '0')}`;
+    if (!prefix) {
+      throw new BadRequestException(
+        'Employee name must contain at least one letter for ID generation',
+      );
     }
 
-    return employeeId;
+    // Fetch all existing IDs with this prefix from DB (case-insensitive)
+    const existingIds = await this.repo.findExistingIdsStartingWith(prefix, excludeId);
+
+    // Find the next available numeric suffix (001, 002, …)
+    let suffix = 1;
+    let employeeId = `${prefix}${String(suffix).padStart(3, '0')}`;
+    while (existingIds.some((id) => id.toUpperCase() === employeeId)) {
+      suffix++;
+      employeeId = `${prefix}${String(suffix).padStart(3, '0')}`;
+    }
+
+    return employeeId; // e.g. ANAMIKA001, ANAMIKA002 …
   }
 
   async create(dto: any) {
     const employeeId = await this.generateUniqueEmployeeId(dto.fullName);
 
-    // Validate that mobile number is not duplicated
-    // Note: We can add mobile checks if desired, but let's proceed with creating the record.
+    // Final DB-level duplicate guard (race-condition safety)
+    const collision = await this.repo.findByEmployeeId(employeeId);
+    if (collision) {
+      throw new ConflictException(
+        `Employee ID ${employeeId} already exists. Please retry — the system will assign the next available number.`,
+      );
+    }
+
     const createData: Prisma.EmployeeCreateInput = {
       employeeId,
       fullName: dto.fullName,
@@ -75,10 +90,9 @@ export class EmployeesService {
   }
 
   async update(id: string, dto: any) {
-    await this.findOne(id);
+    const existing = await this.findOne(id);
 
     const updateData: Prisma.EmployeeUpdateInput = {
-      ...(dto.fullName ? { fullName: dto.fullName } : {}),
       ...(dto.profilePhoto !== undefined ? { profilePhoto: dto.profilePhoto } : {}),
       ...(dto.mobile ? { mobile: dto.mobile } : {}),
       ...(dto.alternateMobile !== undefined ? { alternateMobile: dto.alternateMobile } : {}),
@@ -102,6 +116,13 @@ export class EmployeesService {
       ...(dto.branchId ? { branch: { connect: { id: dto.branchId } } } : {}),
       ...(dto.categoryId ? { category: { connect: { id: dto.categoryId } } } : {}),
     };
+
+    // If fullName changed, re-generate the employeeId to match the new first name
+    if (dto.fullName && dto.fullName.trim() !== existing.fullName.trim()) {
+      updateData.fullName = dto.fullName;
+      const newEmployeeId = await this.generateUniqueEmployeeId(dto.fullName, id);
+      updateData.employeeId = newEmployeeId;
+    }
 
     return this.repo.update(id, updateData);
   }

@@ -39,6 +39,32 @@ export class TrainerService {
     return user.branchId ? `AND sa.branch_id = '${user.branchId}'::uuid` : '';
   }
 
+  /**
+   * Looks up the HR employee record matching this trainer user's phone number.
+   * Returns a SQL snippet `AND b.trainer_id = '<uuid>'` for use in WHERE clauses.
+   * Falls back to empty string (no filter) if no matching employee is found,
+   * so the system degrades gracefully rather than hiding all batches.
+   */
+  private async getTrainerEmployeeClause(userId: string): Promise<string> {
+    try {
+      const userRows = await this.prisma.$queryRawUnsafe<{ phone: string }[]>(
+        `SELECT phone FROM users WHERE id = $1::uuid LIMIT 1`, userId,
+      );
+      const phone = userRows[0]?.phone;
+      if (!phone) return `AND b.rm_id = '${userId}'::uuid`;
+
+      const empRows = await this.prisma.$queryRawUnsafe<{ id: string }[]>(
+        `SELECT id FROM employees WHERE mobile = $1 AND deleted_at IS NULL LIMIT 1`, phone,
+      );
+      const empId = empRows[0]?.id;
+      if (!empId) return `AND b.rm_id = '${userId}'::uuid`;
+
+      return `AND (b.trainer_id = '${empId}'::uuid OR b.rm_id = '${userId}'::uuid)`;
+    } catch {
+      return `AND b.rm_id = '${userId}'::uuid`;
+    }
+  }
+
   async getVideoCerts(user: AuthUser) {
     await this.ensureTables();
     const branchClause = this.staffBranchClause(user);
@@ -87,15 +113,16 @@ export class TrainerService {
     const staffBranchClause = this.staffBranchClause(user);
 
     try {
+      const trainerClause = await this.getTrainerEmployeeClause(user.id);
       const trainees = await this.prisma.$queryRawUnsafe<{ total: bigint }[]>(`
         SELECT COUNT(*) as total FROM batch_enrollments e
         JOIN training_batches b ON b.id = e.batch_id
-        WHERE 1=1 ${branchClause}
+        WHERE 1=1 ${branchClause} ${trainerClause}
       `);
 
       const sessionsToday = await this.prisma.$queryRawUnsafe<{ total: bigint }[]>(`
         SELECT COUNT(*) as total FROM training_batches b
-        WHERE DATE(b.start_date) = CURRENT_DATE ${branchClause}
+        WHERE DATE(b.start_date) = CURRENT_DATE ${branchClause} ${trainerClause}
       `);
 
       const videoCertsRows = await this.prisma.$queryRawUnsafe<{ total: bigint }[]>(`
@@ -110,7 +137,7 @@ export class TrainerService {
         FROM batch_enrollments e
         JOIN training_batches b ON b.id = e.batch_id
         WHERE b.status = 'ACTIVE'
-          ${branchClause}
+          ${branchClause} ${trainerClause}
       `).catch(() => [{ total: BigInt(0) }]);
 
       const avgScoreRows = await this.prisma.$queryRawUnsafe<{ avg_score: number }[]>(`
@@ -166,9 +193,11 @@ export class TrainerService {
     await this.ensureTables();
     const branchClause = this.branchClause(user);
     try {
+    const trainerClause = await this.getTrainerEmployeeClause(user.id);
+    
     const rows = await this.prisma.$queryRawUnsafe<any[]>(`
       SELECT
-        b.id, b.batch_code, b.series, b.trainer_name, b.classroom,
+        b.id, b.batch_code, b.series, b.trainer_name, b.trainer_id, b.classroom,
         b.start_date, b.status, b.branch_id, b.created_at,
         COALESCE(
           json_agg(
@@ -176,17 +205,19 @@ export class TrainerService {
               'id', e.id,
               'staffId', e.staff_id::text,
               'attendance', e.attendance,
-              'staffCode', sa.staff_code,
-              'fullName', sa.full_name,
-              'series', sa.series::text
-            ) ORDER BY sa.full_name
+              'staffCode', emp.employee_id,
+              'fullName', emp.full_name,
+              'mobile', emp.mobile,
+              'department', emp.department,
+              'designation', emp.designation
+            ) ORDER BY emp.full_name
           ) FILTER (WHERE e.id IS NOT NULL),
           '[]'::json
         ) AS enrollments
       FROM training_batches b
       LEFT JOIN batch_enrollments e ON e.batch_id = b.id
-      LEFT JOIN staff_applicants sa ON sa.id = e.staff_id
-      WHERE 1=1 ${branchClause}
+      LEFT JOIN employees emp ON emp.id = e.staff_id AND emp.deleted_at IS NULL
+      WHERE 1=1 ${branchClause} ${trainerClause}
       GROUP BY b.id
       ORDER BY b.created_at DESC
     `);

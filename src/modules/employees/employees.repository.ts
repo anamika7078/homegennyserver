@@ -87,14 +87,16 @@ export class EmployeesRepository {
     });
   }
 
-  async findExistingIdsStartingWith(prefix: string) {
-    // Find all active/inactive employee IDs that start with the prefix
+  async findExistingIdsStartingWith(prefix: string, excludeId?: string) {
+    // Find all employee IDs that start with the prefix (case-insensitive)
+    // Exclude the employee being updated (if any) so they don't collide with themselves
     const employees = await this.prisma.employee.findMany({
       where: {
         employeeId: {
           startsWith: prefix,
           mode: 'insensitive',
         },
+        ...(excludeId ? { id: { not: excludeId } } : {}),
       },
       select: { employeeId: true },
     });

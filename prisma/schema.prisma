@@ -325,7 +325,6 @@ model StaffApplicant {
   verificationTracks VerificationTrack[]
   assessments        Assessment[]
   trainingSessions   TrainingSession[]
-  batchEnrollments   BatchEnrollment[]
   agreements         Agreement[]
   deployments        Deployment[]
   careLogs           CareLog[]
@@ -509,6 +508,7 @@ model TrainingBatch {
   batchCode   String   @unique @map("batch_code") @db.VarChar(40)
   series      String   @db.VarChar(10)
   trainerName String?  @map("trainer_name") @db.VarChar(100)
+  trainerId   String?  @map("trainer_id") @db.Uuid
   classroom   String?  @db.VarChar(80)
   startDate   DateTime @map("start_date") @db.Date
   status      String   @default("UPCOMING") @db.VarChar(20)
@@ -528,7 +528,7 @@ model BatchEnrollment {
   batchId    String         @map("batch_id") @db.Uuid
   batch      TrainingBatch  @relation(fields: [batchId], references: [id], onDelete: Cascade)
   staffId    String         @map("staff_id") @db.Uuid
-  staff      StaffApplicant @relation(fields: [staffId], references: [id])
+  staff      Employee       @relation(fields: [staffId], references: [id])
   attendance Int[]          @default([])
   createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
@@ -1252,6 +1252,7 @@ model Employee {
   documents        EmployeeDocument[]
   attendance       EmployeeAttendance[]
   payrolls         EmployeePayroll[]
+  batchEnrollments BatchEnrollment[]
 
   @@map("employees")
 }
