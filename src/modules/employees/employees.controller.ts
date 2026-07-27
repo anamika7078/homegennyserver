@@ -31,6 +31,13 @@ export class EmployeesController {
     return this.service.findAll(query);
   }
 
+  @Get('branches')
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.TRAINER, UserRole.FINANCE)
+  @ApiOperation({ summary: 'Get all branches for dropdowns' })
+  async getBranches() {
+    return this.service.getBranches();
+  }
+
   /** Lightweight employee list — all internal roles can use this for dropdowns */
   @Get('list')
   @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.TRAINER, UserRole.FINANCE)

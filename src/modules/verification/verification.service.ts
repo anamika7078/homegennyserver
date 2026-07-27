@@ -94,9 +94,32 @@ export class VerificationService {
     }
   }
 
-  async submitPoliceVerification(staffId: string, _details: Record<string, any>): Promise<PoliceVerificationResult> {
+  async submitPoliceVerification(staffId: string, details: Record<string, any>): Promise<PoliceVerificationResult> {
     const ref = `PV-${staffId.slice(0, 8).toUpperCase()}-${Date.now()}`;
-    return { reference_number: ref, status: 'PENDING', submitted_at: new Date().toISOString() };
+    const res: PoliceVerificationResult = { reference_number: ref, status: 'PENDING', submitted_at: new Date().toISOString() };
+    await this.prisma.verificationTrack.upsert({
+      where: {
+        staffId_trackType: {
+          staffId,
+          trackType: 'POLICE_VERIFICATION',
+        },
+      },
+      create: {
+        staffId,
+        trackType: 'POLICE_VERIFICATION',
+        status: 'PENDING',
+        result: res as any,
+        notes: details?.notes || 'Police verification submitted',
+        verifiedAt: new Date(),
+      },
+      update: {
+        status: 'PENDING',
+        result: res as any,
+        notes: details?.notes || 'Police verification resubmitted',
+        verifiedAt: new Date(),
+      },
+    }).catch(() => {});
+    return res;
   }
 
   async submitMedicalVerification(staffId: string, details: Record<string, any>) {

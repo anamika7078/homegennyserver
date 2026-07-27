@@ -135,7 +135,12 @@ export class StaffService {
     }
 
     const empWhere: Prisma.EmployeeWhereInput = { deletedAt: null };
-    if (effectiveBranchId) empWhere.branchId = effectiveBranchId;
+    if (effectiveBranchId && effectiveBranchId !== '00000000-0000-0000-0000-000000000001') {
+      empWhere.OR = [
+        { branchId: effectiveBranchId },
+        { branchId: '00000000-0000-0000-0000-000000000001' },
+      ];
+    }
 
     const empItems = await this.prisma.employee.findMany({
       where: empWhere,
@@ -143,35 +148,51 @@ export class StaffService {
       take: params.limit ?? 100,
     });
 
-    const mappedEmployees = empItems.map((e) => ({
-      id: e.id,
-      staff_code: e.employeeId,
-      branch_id: e.branchId,
-      assigned_rm_id: params.rmId ?? null,
-      series: e.department || 'GENERAL',
-      series_db: e.department || 'GENERAL',
-      role_types: [e.designation || e.department || 'STAFF'],
-      language_tier: 'ENGLISH',
-      pipeline_stage: e.status === 'Active' ? 'CONFIRMED' : e.status.toUpperCase(),
-      current_scenario_code: null,
-      terminal_outcome: null,
-      full_name: e.fullName,
-      date_of_birth: e.dateOfBirth,
-      mobile: e.mobile,
-      email: e.email,
-      address: `${e.address || ''}, ${e.city || ''}`.trim().replace(/^,/, ''),
-      emergency_contact_name: null,
-      emergency_contact_mobile: null,
-      verified_docs: true,
-      pv_status: 'CLEARED',
-      restricted_list_flag: false,
-      video_cert_id: null,
-      restrictions: [],
-      metadata: {},
-      created_at: e.createdAt,
-      updated_at: e.updatedAt,
-      source: 'HR_EMPLOYEE',
-    }));
+    const mappedEmployees = empItems.map((e) => {
+      const depStr = `${e.department || ''} ${e.designation || ''}`.toUpperCase();
+      let series = 'DRIVER';
+      if (depStr.includes('MAID') || depStr.includes('COOK') || depStr.includes('CLEAN')) series = 'MAID';
+      else if (depStr.includes('SKILL') || depStr.includes('CARE') || depStr.includes('NURSE')) series = 'SKILLED_CARE';
+      else if (depStr.includes('UNSKILL') || depStr.includes('HELP') || depStr.includes('BOY') || depStr.includes('GUARD')) series = 'UNSKILLED_CARE';
+      else if (depStr.includes('DRIV')) series = 'DRIVER';
+      else series = (e.department || 'GENERAL').toUpperCase();
+
+      return {
+        id: e.id,
+        staff_code: e.employeeId,
+        branch_id: e.branchId,
+        assigned_rm_id: params.rmId ?? null,
+        series: series,
+        series_db: series,
+        role_types: [e.designation || e.department || 'STAFF'],
+        language_tier: 'ENGLISH',
+        pipeline_stage: e.status === 'Active' ? 'CONFIRMED' : e.status.toUpperCase(),
+        current_scenario_code: null,
+        terminal_outcome: null,
+        full_name: e.fullName,
+        date_of_birth: e.dateOfBirth,
+        mobile: e.mobile,
+        email: e.email,
+        address: `${e.address || ''}, ${e.city || ''}`.trim().replace(/^,/, ''),
+        emergency_contact_name: null,
+        emergency_contact_mobile: null,
+        verified_docs: true,
+        pv_status: 'CLEARED',
+        restricted_list_flag: false,
+        video_cert_id: null,
+        restrictions: [],
+        metadata: {},
+        created_at: e.createdAt,
+        updated_at: e.updatedAt,
+        source: 'HR_EMPLOYEE',
+      };
+    }).filter((e) => {
+      if (params.series) {
+        const targetSeries = mapSeriesFromShort(params.series);
+        if (e.series !== targetSeries && e.series !== params.series) return false;
+      }
+      return true;
+    });
 
     const combined = [...items.map(toStaffDto), ...mappedEmployees];
     return { items: combined, total: total + mappedEmployees.length };

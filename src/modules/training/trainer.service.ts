@@ -222,7 +222,7 @@ export class TrainerService {
       ORDER BY b.created_at DESC
     `);
     
-    return rows.map((r) => {
+    const mappedRows = rows.map((r) => {
       const enrollments = (typeof r.enrollments === 'string' ? JSON.parse(r.enrollments) : r.enrollments) ?? [];
       return {
         id: r.id,
@@ -235,6 +235,55 @@ export class TrainerService {
         enrollments,
       };
     });
+
+    const allStaffIds = new Set<string>();
+    const allStaffCodes = new Set<string>();
+    for (const b of mappedRows) {
+      for (const e of (b.enrollments || [])) {
+        if (e.staffId) allStaffIds.add(String(e.staffId));
+        if (e.staffCode) allStaffCodes.add(String(e.staffCode));
+      }
+    }
+
+    if (allStaffIds.size > 0 || allStaffCodes.size > 0) {
+      const assessments = await this.prisma.assessment.findMany({
+        where: {
+          OR: [
+            { staffId: { in: Array.from(allStaffIds) } },
+            { staff: { staffCode: { in: Array.from(allStaffCodes) } } },
+            { staff: { id: { in: Array.from(allStaffIds) } } },
+          ],
+        },
+        orderBy: { createdAt: 'desc' },
+        include: { staff: true },
+      });
+
+      const assessmentMap = new Map<string, any>();
+      for (const a of assessments) {
+        const scores = (a.skillScores || {}) as any;
+        const scoreVal = Number(scores.score ?? scores.driving ?? scores.communication ?? 75);
+        const assessmentObj = {
+          score: scoreVal,
+          result: a.result || 'PASS',
+          remarks: a.remarks || '',
+        };
+        if (!assessmentMap.has(a.staffId)) assessmentMap.set(a.staffId, assessmentObj);
+        if (a.staff?.staffCode && !assessmentMap.has(a.staff.staffCode)) {
+          assessmentMap.set(a.staff.staffCode, assessmentObj);
+        }
+      }
+
+      for (const b of mappedRows) {
+        for (const e of (b.enrollments || [])) {
+          const matched = assessmentMap.get(String(e.staffId)) || (e.staffCode ? assessmentMap.get(String(e.staffCode)) : undefined);
+          if (matched) {
+            e.assessment = matched;
+          }
+        }
+      }
+    }
+
+    return mappedRows;
     } catch {
       return [];
     }
@@ -254,6 +303,105 @@ export class TrainerService {
   }
 
   async updateAssessment(trainerId: string, traineeId: string, data: any) {
-    return { success: true, traineeId, status: 'ASSESSED' };
+    let staffId = traineeId;
+    let applicant = await this.prisma.staffApplicant.findFirst({
+      where: { OR: [{ id: traineeId }, { staffCode: traineeId }] },
+    });
+    if (!applicant) {
+      const emp = await this.prisma.employee.findFirst({
+        where: { OR: [{ id: traineeId }, { employeeId: traineeId }] },
+      });
+      if (emp) {
+        applicant = await this.prisma.staffApplicant.findFirst({
+          where: { OR: [{ mobile: emp.mobile }, { staffCode: emp.employeeId }] },
+        });
+        if (!applicant) {
+          applicant = await this.prisma.staffApplicant.create({
+            data: {
+              id: emp.id,
+              staffCode: emp.employeeId,
+              fullName: emp.fullName,
+              mobile: emp.mobile,
+              dateOfBirth: emp.dateOfBirth ?? '1995-01-01',
+              address: emp.address ?? 'Delhi',
+              series: 'DRIVER',
+              branchId: emp.branchId || null,
+              pipelineStage: 'S3_TRAIN' as any,
+              languageTier: 'T1' as any,
+              pvStatus: 'CLEAR',
+            },
+          }).catch(async () => {
+            return await this.prisma.staffApplicant.create({
+              data: {
+                staffCode: emp.employeeId,
+                fullName: emp.fullName,
+                mobile: emp.mobile,
+                dateOfBirth: emp.dateOfBirth ?? '1995-01-01',
+                address: emp.address ?? 'Delhi',
+                series: 'DRIVER',
+                branchId: emp.branchId || null,
+                pipelineStage: 'S3_TRAIN' as any,
+                languageTier: 'T1' as any,
+                pvStatus: 'CLEAR',
+              },
+            });
+          });
+        }
+      }
+    }
+    if (applicant) {
+      staffId = applicant.id;
+    }
+
+    const attemptCount = await this.prisma.assessment.count({
+      where: { staffId },
+    });
+
+    const scoreVal = Number(data?.score ?? 75);
+    const skillScores = {
+      score: scoreVal,
+      communication: scoreVal,
+      technical: scoreVal,
+      empathy: scoreVal,
+      driving: scoreVal,
+      safety: scoreVal,
+    };
+    const resultVal = (data?.result || 'PASS') as any;
+    const remarksVal = data?.remarks || '';
+
+    const existing = await this.prisma.assessment.findFirst({
+      where: { staffId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    let saved;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trainerId);
+    if (existing) {
+      saved = await this.prisma.assessment.update({
+        where: { id: existing.id },
+        data: {
+          skillScores,
+          result: resultVal,
+          remarks: remarksVal,
+          status: 'COMPLETED',
+          approvedAt: new Date(),
+        },
+      });
+    } else {
+      saved = await this.prisma.assessment.create({
+        data: {
+          staffId,
+          assessorId: isUuid ? trainerId : null,
+          attemptNumber: attemptCount + 1,
+          skillScores,
+          result: resultVal,
+          remarks: remarksVal,
+          status: 'COMPLETED',
+          approvedAt: new Date(),
+        },
+      });
+    }
+
+    return { success: true, traineeId: staffId, assessment: saved };
   }
 }

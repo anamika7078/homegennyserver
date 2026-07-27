@@ -9,6 +9,7 @@ import { PfModule } from './pf/pf.module';
 import { DepositModule } from './deposit/deposit.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { FinanceCustomerModule } from './customer/customer.module';
+import { CommercialModule } from './commercial/commercial.module';
 
 @Module({
   controllers: [FinanceController],
@@ -22,6 +23,7 @@ import { FinanceCustomerModule } from './customer/customer.module';
     DepositModule,
     AnalyticsModule,
     FinanceCustomerModule,
+    CommercialModule,
   ],
 })
 export class FinanceModule {}

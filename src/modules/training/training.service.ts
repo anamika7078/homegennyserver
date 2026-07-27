@@ -80,8 +80,7 @@ export class TrainingService {
     await this.ensureTables();
     const scope = resolveStaffScope(user, {});
 
-    try {
-    const rows = await this.prisma.$queryRawUnsafe<any[]>(`
+    try {    const rows = await this.prisma.$queryRawUnsafe<any[]>(`
       SELECT
         b.id, b.batch_code, b.series, b.trainer_name, b.trainer_id, b.classroom,
         b.start_date, b.status, b.branch_id, b.rm_id, b.created_at,
@@ -91,18 +90,19 @@ export class TrainingService {
               'id', e.id,
               'staffId', e.staff_id::text,
               'attendance', e.attendance,
-              'staffCode', emp.employee_id,
-              'fullName', emp.full_name,
-              'mobile', emp.mobile,
-              'department', emp.department,
-              'designation', emp.designation
-            ) ORDER BY emp.full_name
+              'staffCode', COALESCE(emp.employee_id, sa.staff_code, 'N/A'),
+              'fullName', COALESCE(emp.full_name, sa.full_name, 'Unknown'),
+              'mobile', COALESCE(emp.mobile, sa.mobile, ''),
+              'department', COALESCE(emp.department, sa.series, ''),
+              'designation', COALESCE(emp.designation, sa.series, '')
+            ) ORDER BY COALESCE(emp.full_name, sa.full_name)
           ) FILTER (WHERE e.id IS NOT NULL),
           '[]'::json
         ) AS enrollments
       FROM training_batches b
       LEFT JOIN batch_enrollments e ON e.batch_id = b.id
       LEFT JOIN employees emp ON emp.id = e.staff_id AND emp.deleted_at IS NULL
+      LEFT JOIN staff_applicants sa ON sa.id = e.staff_id AND sa.deleted_at IS NULL
       WHERE 1=1 ${this.branchFilter(scope, 'b')}
       GROUP BY b.id
       ORDER BY b.created_at DESC
@@ -123,30 +123,34 @@ export class TrainingService {
     await this.ensureTables();
     const series = String(body.series ?? 'DR');
     const code = genBatchCode(series);
-    const startDate = body.start_date ? new Date(String(body.start_date)) : new Date();
-    const trainerName = body.trainer_name ? String(body.trainer_name) : null;
-    const trainerId = body.trainer_id ? String(body.trainer_id) : null;
-    const classroom = body.classroom ? String(body.classroom) : null;
-    const branchId = user.branchId ?? null;
-    const rmId = user.id;
+    const trainerName = String(body.trainerName ?? body.trainer_name ?? (user as any).name ?? (user as any).fullName ?? 'Staff Trainer');
+    const trainerId = String(body.trainerId ?? body.trainer_id ?? user.id);
+    const classroom = String(body.classroom ?? 'Main Hall');
+    const startDate = String(body.startDate ?? body.start_date ?? new Date().toISOString().slice(0, 10));
+    const status = String(body.status ?? 'UPCOMING');
+    const branchId = body.branchId ?? body.branch_id ?? resolveStaffScope(user, {}).branchId ?? null;
+    const rmId = body.rmId ?? body.rm_id ?? resolveStaffScope(user, {}).rmId ?? null;
 
-    if (trainerId) {
-      const existingBatch = await this.prisma.$queryRawUnsafe<any[]>(
-        `SELECT id FROM training_batches WHERE trainer_id = $1::uuid AND start_date = $2::date`, trainerId, startDate
-      );
-      if (existingBatch.length > 0) {
-        throw new ConflictException('This employee is already assigned to a batch on the selected date.');
-      }
-    }
+    const res = await this.prisma.$queryRawUnsafe<any[]>(
+      `INSERT INTO training_batches (id, batch_code, series, trainer_name, trainer_id, classroom, start_date, status, branch_id, rm_id, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4::uuid, $5, $6::date, $7, $8::uuid, $9::uuid, now(), now())
+       RETURNING id`,
+      code, series, trainerName, trainerId, classroom, startDate, status, branchId, rmId,
+    );
 
-    const rows = await this.prisma.$queryRawUnsafe<any[]>(`
-      INSERT INTO training_batches (id, batch_code, series, trainer_name, trainer_id, classroom, start_date, status, branch_id, rm_id, updated_at)
-      VALUES ($1::uuid, $2, $3, $4, ${trainerId ? `$8::uuid` : 'NULL'}, $5, $6, 'UPCOMING', ${branchId ? `'${branchId}'::uuid` : 'NULL'}, $7::uuid, NOW())
-      RETURNING id, batch_code, series, trainer_name, trainer_id, classroom, start_date, status
-    `, crypto.randomUUID(), code, series, trainerName, classroom, startDate, rmId, trainerId);
-
-    const batch = rows[0];
-    return { ...mapBatch(batch), enrollments: [] };
+    return {
+      success: true,
+      batch: {
+        id: res[0].id,
+        batchCode: code,
+        series,
+        trainerName,
+        classroom,
+        startDate,
+        status,
+        enrollments: [],
+      },
+    };
   }
 
   async enrollStaff(batchId: string, staffId: string) {
@@ -157,11 +161,16 @@ export class TrainingService {
     if (!batches.length) throw new NotFoundException('Batch not found');
     const batchStartDate = batches[0].start_date;
 
-    // Validate HR Employee exists
-    const empRows = await this.prisma.$queryRawUnsafe<any[]>(
+    // Validate Employee or StaffApplicant exists
+    let empRows = await this.prisma.$queryRawUnsafe<any[]>(
       `SELECT id, full_name FROM employees WHERE id = $1::uuid AND deleted_at IS NULL LIMIT 1`, staffId,
-    );
-    if (!empRows.length) throw new NotFoundException('Employee not found');
+    ).catch(() => []);
+    if (!empRows.length) {
+      empRows = await this.prisma.$queryRawUnsafe<any[]>(
+        `SELECT id, full_name FROM staff_applicants WHERE id = $1::uuid AND deleted_at IS NULL LIMIT 1`, staffId,
+      ).catch(() => []);
+    }
+    if (!empRows.length) throw new NotFoundException('Staff or Employee not found');
 
     const existingInSameBatch = await this.prisma.$queryRawUnsafe<any[]>(
       `SELECT id FROM batch_enrollments WHERE batch_id = $1::uuid AND staff_id = $2::uuid`, batchId, staffId

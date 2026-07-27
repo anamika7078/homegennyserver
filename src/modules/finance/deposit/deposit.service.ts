@@ -21,7 +21,33 @@ type DepositEvent = 'REFUND' | 'FORFEITURE' | 'PARTIAL_REFUND';
 export class DepositService {
   constructor(private readonly dataSource: DataSource) {}
 
+  private async hasDepositColumns(): Promise<boolean> {
+    const rows = await this.dataSource.query<{ deposit_amount: boolean; deposit_paid: boolean }[]>(`
+      SELECT
+        EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'staff_applicants'
+            AND column_name = 'deposit_amount'
+        ) AS deposit_amount,
+        EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'staff_applicants'
+            AND column_name = 'deposit_paid'
+        ) AS deposit_paid
+    `);
+
+    return Boolean(rows[0]?.deposit_amount && rows[0]?.deposit_paid);
+  }
+
   async listDeposits(status?: 'PAID' | 'UNPAID' | 'FORFEITED') {
+    if (!(await this.hasDepositColumns())) {
+      return [];
+    }
+
     let sql = `
       SELECT
         sa.id,
@@ -103,6 +129,16 @@ export class DepositService {
   }
 
   async getDepositStats() {
+    if (!(await this.hasDepositColumns())) {
+      return {
+        total_staff: '0',
+        paid_count: '0',
+        unpaid_count: '0',
+        total_collected: '0',
+        total_outstanding: '0',
+      };
+    }
+
     const rows = await this.dataSource.query<{
       total_staff: string;
       paid_count: string;

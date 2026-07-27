@@ -32,22 +32,68 @@ export class AssessmentsService {
   async create(data: any) {
     try {
       if (data.candidate_id) {
-      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(data.candidate_id);
-      if (!isUuid) {
-        const applicant = await this.prisma.staffApplicant.findFirst({
+        let applicant = await this.prisma.staffApplicant.findFirst({
           where: {
             OR: [
-              { staffCode: { contains: data.candidate_id, mode: 'insensitive' } },
-              { fullName: { contains: data.candidate_id, mode: 'insensitive' } }
-            ]
-          }
+              { id: data.candidate_id },
+              { staffCode: { equals: data.candidate_id, mode: 'insensitive' } },
+              { fullName: { contains: data.candidate_id, mode: 'insensitive' } },
+            ],
+          },
         });
+        if (!applicant) {
+          const emp = await this.prisma.employee.findFirst({
+            where: {
+              OR: [
+                { id: data.candidate_id },
+                { employeeId: { equals: data.candidate_id, mode: 'insensitive' } },
+                { fullName: { contains: data.candidate_id, mode: 'insensitive' } },
+              ],
+            },
+          });
+          if (emp) {
+            applicant = await this.prisma.staffApplicant.findFirst({
+              where: { OR: [{ mobile: emp.mobile }, { staffCode: emp.employeeId }] },
+            });
+            if (!applicant) {
+              applicant = await this.prisma.staffApplicant.create({
+                data: {
+                  id: emp.id,
+                  staffCode: emp.employeeId,
+                  fullName: emp.fullName,
+                  mobile: emp.mobile,
+                  dateOfBirth: emp.dateOfBirth ?? '1995-01-01',
+                  address: emp.address ?? 'Delhi',
+                  series: 'DRIVER',
+                  branchId: emp.branchId || null,
+                  pipelineStage: 'S1_INTAKE',
+                  languageTier: 'T1' as any,
+                  pvStatus: 'CLEAR',
+                },
+              }).catch(async () => {
+                return await this.prisma.staffApplicant.create({
+                  data: {
+                    staffCode: emp.employeeId,
+                    fullName: emp.fullName,
+                    mobile: emp.mobile,
+                    dateOfBirth: emp.dateOfBirth ?? '1995-01-01',
+                    address: emp.address ?? 'Delhi',
+                    series: 'DRIVER',
+                    branchId: emp.branchId || null,
+                    pipelineStage: 'S1_INTAKE',
+                    languageTier: 'T1' as any,
+                    pvStatus: 'CLEAR',
+                  },
+                });
+              });
+            }
+          }
+        }
         if (!applicant) {
           throw new BadRequestException(`Candidate not found matching ID/Name: ${data.candidate_id}`);
         }
         data.candidate_id = applicant.id;
       }
-    }
 
     let attemptCount = 0;
     if (data.candidate_id && data.assessment_type) {
@@ -137,6 +183,11 @@ export class AssessmentsService {
             terminalOutcome: 'DENIED',
             currentScenarioCode: TERMINAL_OUTCOME_DR09,
           },
+        }).catch(async () => {
+          await this.prisma.employee.update({
+            where: { id: assessment.candidate_id },
+            data: { status: 'Inactive' },
+          }).catch(() => {});
         });
 
         await this.prisma.pipelineEvent.create({

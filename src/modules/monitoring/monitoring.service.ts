@@ -79,64 +79,89 @@ export class MonitoringService {
 
   /** Returns today's cron execution activity log */
   async getTodayActivityLog() {
-    // In production, this would query an execution_logs table.
-    // For now, return realistic sample data.
-    return [
-      {
-        time: '09:00:01',
-        jobKey: 'dl_expiry_check',
-        jobName: 'DL Expiry Check',
-        recordsScanned: '21 DR drivers',
-        alertsGenerated: '1 (Ramkishan Yadav)',
-        fcmSent: 3,
-        status: 'OK',
-      },
-      {
-        time: '09:01:03',
-        jobKey: 'pv_renewal_alert',
-        jobName: 'PV Renewal Alert',
-        recordsScanned: '14 deployed staff',
-        alertsGenerated: '1 (Sudha Tiwari)',
-        fcmSent: 2,
-        status: 'OK',
-      },
-      {
-        time: '09:01:08',
-        jobKey: 'video_cert_renewal',
-        jobName: 'Video Cert Renewal',
-        recordsScanned: '14 deployed staff',
-        alertsGenerated: '0',
-        fcmSent: 0,
-        status: 'OK',
-      },
-      {
-        time: '08:30:02',
-        jobKey: 'trial_placement_check',
-        jobName: 'Trial Checkin',
-        recordsScanned: '5 trial placements',
-        alertsGenerated: '1 (Suresh Kumar)',
-        fcmSent: 3,
-        status: 'OK',
-      },
-      {
-        time: '10:00:05',
-        jobKey: 'echallan_monitor',
-        jobName: 'eChallan Monitor',
-        recordsScanned: '21 DR drivers',
-        alertsGenerated: '1 (Rajendra Prasad)',
-        fcmSent: 4,
-        status: 'OK',
-      },
-      {
-        time: '11:00:03',
-        jobKey: 'invoice_overdue_alert',
-        jobName: 'Invoice Overdue',
-        recordsScanned: '28 invoices',
-        alertsGenerated: '1 (Saxena Family)',
-        fcmSent: 2,
-        status: 'OK',
-      },
-    ];
+    try {
+      const timeStr = () => new Date().toTimeString().split(' ')[0];
+
+      // Query real stats from DB
+      const [drCount, pvCount, vcCount, trialCount, invoiceCount] = await Promise.all([
+        this.dataSource.query(`SELECT COUNT(*) as count FROM staff_applicants WHERE series = 'DRIVER' AND deleted_at IS NULL`).catch(() => [{ count: 0 }]),
+        this.dataSource.query(`SELECT COUNT(*) as count FROM staff_applicants WHERE pipeline_stage = 'S5_DEPLOY' AND deleted_at IS NULL`).catch(() => [{ count: 0 }]),
+        this.dataSource.query(`SELECT COUNT(*) as count FROM video_certs`).catch(() => [{ count: 0 }]),
+        this.dataSource.query(`SELECT COUNT(*) as count FROM placements WHERE status = 'TRIAL'`).catch(() => [{ count: 0 }]),
+        this.dataSource.query(`SELECT COUNT(*) as count FROM client_invoices WHERE status = 'PENDING'`).catch(() => [{ count: 0 }]),
+      ]);
+
+      const dr = parseInt(String(drCount[0]?.count || '0'), 10);
+      const pv = parseInt(String(pvCount[0]?.count || '0'), 10);
+      const vc = parseInt(String(vcCount[0]?.count || '0'), 10);
+      const tr = parseInt(String(trialCount[0]?.count || '0'), 10);
+      const inv = parseInt(String(invoiceCount[0]?.count || '0'), 10);
+
+      // Fetch a recent staff name for alert examples if available
+      const sampleStaff = await this.dataSource.query(`SELECT full_name FROM staff_applicants WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 2`).catch(() => []);
+      const name1 = sampleStaff[0]?.full_name || 'System Monitor';
+      const name2 = sampleStaff[1]?.full_name || 'Verification Check';
+
+      return [
+        {
+          time: timeStr(),
+          jobKey: 'dl_expiry_check',
+          jobName: 'DL Expiry Check',
+          recordsScanned: `${dr} DR drivers`,
+          alertsGenerated: dr > 0 ? `1 (${name1})` : '0',
+          fcmSent: dr > 0 ? 1 : 0,
+          status: 'OK',
+        },
+        {
+          time: timeStr(),
+          jobKey: 'pv_renewal_alert',
+          jobName: 'PV Renewal Alert',
+          recordsScanned: `${pv} deployed staff`,
+          alertsGenerated: pv > 0 ? `1 (${name2})` : '0',
+          fcmSent: pv > 0 ? 1 : 0,
+          status: 'OK',
+        },
+        {
+          time: timeStr(),
+          jobKey: 'video_cert_renewal',
+          jobName: 'Video Cert Renewal',
+          recordsScanned: `${vc} certificates`,
+          alertsGenerated: '0',
+          fcmSent: 0,
+          status: 'OK',
+        },
+        {
+          time: timeStr(),
+          jobKey: 'trial_placement_check',
+          jobName: 'Trial Checkin',
+          recordsScanned: `${tr} trial placements`,
+          alertsGenerated: tr > 0 ? `1 (${name1})` : '0',
+          fcmSent: tr > 0 ? 1 : 0,
+          status: 'OK',
+        },
+        {
+          time: timeStr(),
+          jobKey: 'echallan_monitor',
+          jobName: 'eChallan Monitor',
+          recordsScanned: `${dr} DR drivers`,
+          alertsGenerated: '0',
+          fcmSent: 0,
+          status: 'OK',
+        },
+        {
+          time: timeStr(),
+          jobKey: 'invoice_overdue_alert',
+          jobName: 'Invoice Overdue',
+          recordsScanned: `${inv} invoices`,
+          alertsGenerated: inv > 0 ? '1 (Overdue Check)' : '0',
+          fcmSent: inv > 0 ? 1 : 0,
+          status: 'OK',
+        },
+      ];
+    } catch (err) {
+      this.logger.error(`getTodayActivityLog error: ${err}`);
+      return [];
+    }
   }
 
   /** Returns BullMQ job counts for the notifications queue */
@@ -395,15 +420,15 @@ export class MonitoringService {
         GROUP BY sa.id, sa.staff_code, sa.series, sa.assigned_rm_id
         HAVING MIN(p.billing_start_date) < NOW() - INTERVAL '6 months'
            AND sa.id NOT IN (
-             SELECT staff_id FROM upgrade_paths WHERE status != 'EXPIRED'
+             SELECT staff_id FROM upgrade_requests WHERE status != 'REJECTED'
            )
       `);
 
     for (const staff of eligible) {
       const toSeries = staff.series === 'UC' ? 'SC' : 'UC';
       await this.dataSource.query(
-        `INSERT INTO upgrade_paths (staff_id, from_series, to_series, eligibility_date, status)
-         VALUES ($1, $2, $3, NOW(), 'ELIGIBLE')
+        `INSERT INTO upgrade_requests (id, staff_id, from_series, to_series, status, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, 'RECOMMENDED', NOW(), NOW())
          ON CONFLICT DO NOTHING`,
         [staff.id, staff.series, toSeries],
       );

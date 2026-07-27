@@ -179,4 +179,8 @@ export class EmployeesService {
   async delete(id: string) {
     return this.repo.softDelete(id);
   }
+
+  async getBranches() {
+    return this.repo.getBranches();
+  }
 }

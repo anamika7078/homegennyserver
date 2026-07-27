@@ -44,6 +44,7 @@ export class SchemaBootstrapService implements OnModuleInit {
   private async runBootstrap(): Promise<void> {
     await this.ensureFinanceColumns();
     await this.ensureHrTables();
+    await this.ensureCommercialTables();
 
     if (await this.tablesExist()) {
       this.logger.log('Module tables already present (training, finance)');
@@ -150,6 +151,9 @@ export class SchemaBootstrapService implements OnModuleInit {
       `ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS disbursement_ref VARCHAR(100)`,
     );
     await this.exec(
+      `ALTER TABLE staff_applicants ADD COLUMN IF NOT EXISTS deposit_amount DECIMAL(10,2) NOT NULL DEFAULT 0`,
+    );
+    await this.exec(
       `ALTER TABLE staff_applicants ADD COLUMN IF NOT EXISTS deposit_paid BOOLEAN NOT NULL DEFAULT false`,
     );
     await this.exec(
@@ -216,5 +220,226 @@ export class SchemaBootstrapService implements OnModuleInit {
       )
     `);
     this.logger.log('employee_payrolls table verified');
+  }
+
+  private async ensureCommercialTables(): Promise<void> {
+    this.logger.log('Verifying Commercial module tables...');
+
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS finance_wage_config (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        state VARCHAR(100) NOT NULL,
+        zone VARCHAR(100) NOT NULL,
+        effective_date DATE NOT NULL,
+        category VARCHAR(100) NOT NULL,
+        basic_wage DECIMAL(10, 2) NOT NULL,
+        da DECIMAL(10, 2) NOT NULL,
+        hra DECIMAL(10, 2) NOT NULL,
+        skilled_allowance DECIMAL(10, 2) NOT NULL,
+        additional_hours_pct DECIMAL(5, 2) NOT NULL,
+        employer_pf_pct DECIMAL(5, 2) NOT NULL,
+        employer_pf_max DECIMAL(10, 2) NOT NULL,
+        employee_pf_pct DECIMAL(5, 2) NOT NULL,
+        employer_esic_pct DECIMAL(5, 2) NOT NULL,
+        employee_esic_pct DECIMAL(5, 2) NOT NULL,
+        bonus_pct DECIMAL(5, 2) NOT NULL,
+        leave_days INT NOT NULL,
+        lwf_pct DECIMAL(5, 2) NOT NULL,
+        lwf_max DECIMAL(10, 2) NOT NULL,
+        uniform_allowance DECIMAL(10, 2) NOT NULL,
+        relieving_pct DECIMAL(5, 2) NOT NULL,
+        management_pct DECIMAL(5, 2) NOT NULL,
+        training_charges DECIMAL(10, 2) NOT NULL,
+        gst_pct DECIMAL(5, 2) NOT NULL,
+        professional_tax DECIMAL(10, 2) NOT NULL,
+        nfh DECIMAL(10, 2) NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS finance_commercial_calculations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        customer_id UUID REFERENCES finance_customers(id) ON DELETE SET NULL,
+        customer_name VARCHAR(255) NOT NULL,
+        unit_code VARCHAR(50) NOT NULL,
+        branch_id UUID,
+        branch_name VARCHAR(255),
+        state VARCHAR(100) NOT NULL,
+        zone VARCHAR(100) NOT NULL,
+        contract_duration INT NOT NULL,
+        revision_number INT NOT NULL DEFAULT 1,
+        total_monthly_cost DECIMAL(12, 2) NOT NULL DEFAULT 0,
+        total_gst DECIMAL(12, 2) NOT NULL DEFAULT 0,
+        total_grand_total DECIMAL(12, 2) NOT NULL DEFAULT 0,
+        total_resources INT NOT NULL DEFAULT 0,
+        status VARCHAR(50) NOT NULL DEFAULT 'DRAFT',
+        created_by VARCHAR(255),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS finance_commercial_items (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        calculation_id UUID NOT NULL REFERENCES finance_commercial_calculations(id) ON DELETE CASCADE,
+        category VARCHAR(100) NOT NULL,
+        no_of_resources INT NOT NULL,
+        working_hours DECIMAL(5, 2) NOT NULL,
+        shift_type VARCHAR(50) NOT NULL,
+        wage_config_id UUID REFERENCES finance_wage_config(id) ON DELETE SET NULL,
+        basic DECIMAL(10, 2) NOT NULL,
+        da DECIMAL(10, 2) NOT NULL,
+        hra DECIMAL(10, 2) NOT NULL,
+        skilled_allowance DECIMAL(10, 2) NOT NULL,
+        additional_hours DECIMAL(10, 2) NOT NULL,
+        subtotal1 DECIMAL(10, 2) NOT NULL,
+        subtotal2 DECIMAL(10, 2) NOT NULL,
+        employer_pf DECIMAL(10, 2) NOT NULL,
+        bonus DECIMAL(10, 2) NOT NULL,
+        leave_wages DECIMAL(10, 2) NOT NULL,
+        esic DECIMAL(10, 2) NOT NULL,
+        lwf DECIMAL(10, 2) NOT NULL,
+        uniform DECIMAL(10, 2) NOT NULL,
+        nfh DECIMAL(10, 2) NOT NULL,
+        subtotal3 DECIMAL(10, 2) NOT NULL,
+        relieving DECIMAL(10, 2) NOT NULL,
+        subtotal4 DECIMAL(10, 2) NOT NULL,
+        management_fee DECIMAL(10, 2) NOT NULL,
+        training_charges DECIMAL(10, 2) NOT NULL,
+        monthly_cost DECIMAL(10, 2) NOT NULL,
+        daily_rate DECIMAL(10, 2) NOT NULL,
+        hourly_rate DECIMAL(10, 2) NOT NULL,
+        gst DECIMAL(10, 2) NOT NULL,
+        grand_total DECIMAL(10, 2) NOT NULL,
+        gross_salary DECIMAL(10, 2) NOT NULL,
+        employee_pf DECIMAL(10, 2) NOT NULL,
+        employee_esic DECIMAL(10, 2) NOT NULL,
+        professional_tax DECIMAL(10, 2) NOT NULL,
+        net_salary DECIMAL(10, 2) NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS finance_quotations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        quotation_number VARCHAR(100) UNIQUE NOT NULL,
+        calculation_id UUID REFERENCES finance_commercial_calculations(id) ON DELETE SET NULL,
+        customer_id UUID REFERENCES finance_customers(id) ON DELETE SET NULL,
+        customer_name VARCHAR(255) NOT NULL,
+        unit_code VARCHAR(50) NOT NULL,
+        date DATE NOT NULL,
+        validity DATE NOT NULL,
+        prepared_by VARCHAR(255) NOT NULL,
+        status VARCHAR(50) NOT NULL DEFAULT 'DRAFT',
+        terms_conditions TEXT,
+        total_monthly_cost DECIMAL(12, 2) NOT NULL DEFAULT 0,
+        total_gst DECIMAL(12, 2) NOT NULL DEFAULT 0,
+        total_grand_total DECIMAL(12, 2) NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS finance_quotation_items (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        quotation_id UUID NOT NULL REFERENCES finance_quotations(id) ON DELETE CASCADE,
+        category VARCHAR(100) NOT NULL,
+        no_of_resources INT NOT NULL,
+        monthly_rate DECIMAL(10, 2) NOT NULL,
+        gst DECIMAL(10, 2) NOT NULL,
+        grand_total DECIMAL(10, 2) NOT NULL,
+        daily_rate DECIMAL(10, 2) NOT NULL,
+        hourly_rate DECIMAL(10, 2) NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS finance_rate_cards (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        calculation_id UUID REFERENCES finance_commercial_calculations(id) ON DELETE SET NULL,
+        customer_id UUID REFERENCES finance_customers(id) ON DELETE SET NULL,
+        customer_name VARCHAR(255) NOT NULL,
+        unit_code VARCHAR(50) NOT NULL,
+        category VARCHAR(100) NOT NULL,
+        monthly_rate DECIMAL(10, 2) NOT NULL,
+        daily_rate DECIMAL(10, 2) NOT NULL,
+        hourly_rate DECIMAL(10, 2) NOT NULL,
+        effective_date DATE NOT NULL,
+        status VARCHAR(50) NOT NULL DEFAULT 'ACTIVE',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS finance_approval (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        calculation_id UUID NOT NULL REFERENCES finance_commercial_calculations(id) ON DELETE CASCADE,
+        stage VARCHAR(50) NOT NULL,
+        status VARCHAR(50) NOT NULL,
+        comments TEXT,
+        user_id UUID,
+        user_name VARCHAR(255),
+        approval_date TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS finance_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        action VARCHAR(100) NOT NULL,
+        module VARCHAR(100) NOT NULL,
+        details JSONB NOT NULL DEFAULT '{}',
+        user_id UUID,
+        user_name VARCHAR(255),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    const countRows = await this.prisma.$queryRawUnsafe<{ cnt: bigint }[]>(`
+      SELECT COUNT(*)::bigint as cnt FROM finance_wage_config
+    `);
+    if (Number(countRows[0]?.cnt || 0) === 0) {
+      this.logger.log('Seeding initial finance_wage_config templates...');
+      const defaultCats = [
+        { cat: 'Security Guard', basic: 15000, da: 2000, hra: 1500, skilled: 1000 },
+        { cat: 'Lady Guard', basic: 15000, da: 2000, hra: 1500, skilled: 1000 },
+        { cat: 'Supervisor', basic: 18000, da: 2500, hra: 2000, skilled: 1500 },
+        { cat: 'Security Officer', basic: 22000, da: 3000, hra: 2500, skilled: 2000 },
+        { cat: 'Housekeeping', basic: 13500, da: 1500, hra: 1200, skilled: 500 },
+        { cat: 'Driver', basic: 16000, da: 2200, hra: 1500, skilled: 1200 },
+        { cat: 'Office Boy', basic: 13000, da: 1500, hra: 1000, skilled: 500 },
+        { cat: 'Receptionist', basic: 17000, da: 2000, hra: 1800, skilled: 1000 },
+        { cat: 'Technician', basic: 19000, da: 2500, hra: 2000, skilled: 1500 },
+        { cat: 'Caregiver', basic: 16500, da: 2000, hra: 1500, skilled: 1200 },
+        { cat: 'Nurse', basic: 24000, da: 3500, hra: 2500, skilled: 2500 },
+        { cat: 'Cook', basic: 15500, da: 2000, hra: 1500, skilled: 1000 },
+        { cat: 'Helper', basic: 12500, da: 1200, hra: 1000, skilled: 500 },
+      ];
+      for (const item of defaultCats) {
+        await this.exec(`
+          INSERT INTO finance_wage_config (
+            state, zone, effective_date, category, basic_wage, da, hra, skilled_allowance,
+            additional_hours_pct, employer_pf_pct, employer_pf_max, employee_pf_pct,
+            employer_esic_pct, employee_esic_pct, bonus_pct, leave_days, lwf_pct, lwf_max,
+            uniform_allowance, relieving_pct, management_pct, training_charges, gst_pct,
+            professional_tax, nfh, status
+          ) VALUES (
+            'Delhi NCR', 'Zone A', CURRENT_DATE, '${item.cat}', ${item.basic}, ${item.da}, ${item.hra}, ${item.skilled},
+            50, 12, 15000, 12, 3.25, 0.75, 8.33, 15, 0.2, 25, 500, 8.33, 10, 300, 18, 200, 300, 'ACTIVE'
+          )
+        `);
+      }
+    }
+
+    this.logger.log('Commercial module tables verified.');
   }
 }
