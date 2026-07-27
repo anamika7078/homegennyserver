@@ -414,7 +414,7 @@ export class PayrollService {
        GROUP BY status`,
       [employeeId, month, year],
     );
-    
+
     const counts: Record<string, number> = {};
     for (const row of rows) {
       counts[row.status] = parseInt(row.count, 10);

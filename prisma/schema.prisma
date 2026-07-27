@@ -1314,3 +1314,25 @@ model EmployeePayroll {
   @@unique([employeeId, periodMonth, periodYear])
   @@map("employee_payrolls")
 }
+
+// ── Finance Customer Module ───────────────────────────────────────────────────
+
+model FinanceCustomer {
+  id           String   @id @default(uuid()) @db.Uuid
+  customerName String   @map("customer_name") @db.VarChar(255)
+  address      String
+  panCard      String   @map("pan_card") @db.VarChar(20)
+  gstn         String?  @db.VarChar(20)
+  billNoPrefix String   @map("bill_no_prefix") @db.VarChar(30) // e.g. BILL/202507
+  billSeq      Int      @default(0) @map("bill_seq")           // auto-increment per month
+  unitCode     String   @unique @map("unit_code") @db.VarChar(20)
+  unitName     String   @map("unit_name") @db.VarChar(255)
+  status       String   @default("ACTIVE") @db.VarChar(20)
+  metadata     Json     @default("{}")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([unitCode])
+  @@index([panCard])
+  @@map("finance_customers")
+}
