@@ -226,6 +226,31 @@ export class SchemaBootstrapService implements OnModuleInit {
     this.logger.log('Verifying Commercial module tables...');
 
     await this.exec(`
+      CREATE TABLE IF NOT EXISTS finance_customers (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        customer_name VARCHAR(255) NOT NULL,
+        address TEXT NOT NULL,
+        pan_card VARCHAR(20) UNIQUE NOT NULL,
+        gstn VARCHAR(20),
+        bill_no_prefix VARCHAR(30) NOT NULL,
+        bill_seq INT NOT NULL DEFAULT 0,
+        unit_code VARCHAR(20) UNIQUE NOT NULL,
+        unit_name VARCHAR(255) NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+        metadata JSONB NOT NULL DEFAULT '{}',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    await this.exec(`
+      CREATE INDEX IF NOT EXISTS idx_finance_customers_unit_code ON finance_customers(unit_code)
+    `);
+    await this.exec(`
+      CREATE INDEX IF NOT EXISTS idx_finance_customers_pan_card ON finance_customers(pan_card)
+    `);
+
+    await this.exec(`
       CREATE TABLE IF NOT EXISTS finance_wage_config (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         state VARCHAR(100) NOT NULL,
