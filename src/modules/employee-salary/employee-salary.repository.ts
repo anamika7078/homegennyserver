@@ -10,13 +10,25 @@ export class EmployeeSalaryRepository {
   async assignProfile(dto: AssignSalaryProfileDto) {
     const { employeeId, templateId, panNumber, pfUan, pan, uan, ...rest } = dto as any;
     const cleanTemplateId = templateId && typeof templateId === 'string' && templateId.trim() !== '' ? templateId : null;
-    const finalPan = pan !== undefined ? pan : (panNumber !== undefined ? panNumber : undefined);
-    const finalUan = uan !== undefined ? uan : (pfUan !== undefined ? pfUan : undefined);
+    const rawPan = pan !== undefined ? pan : panNumber;
+    const rawUan = uan !== undefined ? uan : pfUan;
+    const finalPan = rawPan && typeof rawPan === 'string' && rawPan.trim() !== '' ? rawPan.trim() : null;
+    const finalUan = rawUan && typeof rawUan === 'string' && rawUan.trim() !== '' ? rawUan.trim() : null;
+    const cleanBankName = rest.bankName && typeof rest.bankName === 'string' && rest.bankName.trim() !== '' ? rest.bankName.trim() : null;
+    const cleanAccountNumber = rest.accountNumber && typeof rest.accountNumber === 'string' && rest.accountNumber.trim() !== '' ? rest.accountNumber.trim() : null;
+    const cleanIfsc = rest.ifsc && typeof rest.ifsc === 'string' && rest.ifsc.trim() !== '' ? rest.ifsc.trim() : null;
+    const cleanEsicNumber = rest.esicNumber && typeof rest.esicNumber === 'string' && rest.esicNumber.trim() !== '' ? rest.esicNumber.trim() : null;
+
     const dataObj = {
-      ...rest,
-      ...(finalPan !== undefined ? { pan: finalPan } : {}),
-      ...(finalUan !== undefined ? { uan: finalUan } : {}),
+      grossSalary: rest.grossSalary !== undefined ? rest.grossSalary : 0,
+      bankName: cleanBankName,
+      accountNumber: cleanAccountNumber,
+      ifsc: cleanIfsc,
+      pan: finalPan,
+      uan: finalUan,
+      esicNumber: cleanEsicNumber,
     };
+
     return this.prisma.employeeSalaryProfile.upsert({
       where: { employeeId },
       create: {
@@ -118,6 +130,8 @@ export class EmployeeSalaryRepository {
       if (emp.salaryProfile) {
         return {
           ...emp.salaryProfile,
+          panNumber: emp.salaryProfile.pan,
+          pfUan: emp.salaryProfile.uan,
           employee: {
             id: emp.id,
             employeeId: emp.employeeId,
@@ -137,6 +151,8 @@ export class EmployeeSalaryRepository {
         ifsc: null,
         pan: null,
         uan: null,
+        panNumber: null,
+        pfUan: null,
         templateId: null,
         template: null,
         employee: {

@@ -101,13 +101,16 @@ export class AdminService {
       ? await bcrypt.hash(String(data.password), 12)
       : await bcrypt.hash('HomeGenny@2024', 12);
 
+    const branchId = data.branchId && String(data.branchId).trim() !== '' ? String(data.branchId).trim() : null;
+    const email = data.email && String(data.email).trim() !== '' ? String(data.email).trim() : null;
+
     return this.prisma.user.create({
       data: {
         fullName:     data.fullName,
         phone:        data.phone,
-        email:        data.email ?? null,
+        email:        email,
         role:         data.role,
-        branchId:     data.branchId ?? null,
+        branchId:     branchId,
         passwordHash: hash,
       },
     });
