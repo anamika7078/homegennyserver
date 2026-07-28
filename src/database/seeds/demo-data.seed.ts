@@ -75,6 +75,12 @@ export async function seedDemoData(prisma: PrismaClient) {
     { id: TR_STAFF.dr2,  code: 'vikram001', series: StaffSeries.DRIVER,         name: 'Vikram Singh' },
   ];
 
+  const category = await prisma.employeeCategory.upsert({
+    where: { name: 'Domestic Staff' },
+    create: { name: 'Domestic Staff' },
+    update: {},
+  });
+
   for (const s of trainerStaff) {
     await prisma.staffApplicant.upsert({
       where: { id: s.id },
@@ -91,6 +97,32 @@ export async function seedDemoData(prisma: PrismaClient) {
         pipelineStage: PipelineStage.S3_TRAIN,
       },
       update: { pipelineStage: PipelineStage.S3_TRAIN, assignedRmId: rmId },
+    });
+
+    await prisma.employee.upsert({
+      where: { id: s.id },
+      create: {
+        id: s.id,
+        employeeId: `EMP-${s.code.toUpperCase()}`,
+        fullName: s.name,
+        mobile: `91${s.code.slice(-4)}00001`,
+        dateOfBirth: new Date('1995-01-15'),
+        gender: 'Other',
+        address: 'Delhi NCR',
+        city: 'New Delhi',
+        state: 'Delhi',
+        pincode: '110001',
+        emergencyContact: { name: 'Emergency Contact', phone: '9999999999' },
+        joiningDate: new Date('2024-01-01'),
+        branchId: BRANCH_ID,
+        department: 'Operations',
+        designation: s.series,
+        categoryId: category.id,
+        employmentType: 'Full-time',
+        salary: 15000,
+        status: 'ACTIVE',
+      },
+      update: { fullName: s.name },
     });
   }
 
@@ -398,10 +430,13 @@ export async function seedDemoData(prisma: PrismaClient) {
 
   // ── Payroll records (current month) ───────────────────────────────────────────
   const payrollRows = [
-    { id: 'pr111111-1111-1111-1111-111111111111', placementId: PLACEMENTS.maid, staffId: FIN_STAFF.maid, gross: 18000, net: 16500, disbursed: false },
-    { id: 'pr222222-2222-2222-2222-222222222222', placementId: PLACEMENTS.dr,   staffId: FIN_STAFF.dr,   gross: 22000, net: 20100, disbursed: false },
-    { id: 'pr333333-3333-3333-3333-333333333333', placementId: PLACEMENTS.sc,   staffId: FIN_STAFF.sc,   gross: 25000, net: 22800, disbursed: true },
+    { id: 'ee111111-1111-1111-1111-111111111111', placementId: PLACEMENTS.maid, staffId: FIN_STAFF.maid, gross: 18000, net: 16500, disbursed: false },
+    { id: 'ee222222-2222-2222-2222-222222222222', placementId: PLACEMENTS.dr,   staffId: FIN_STAFF.dr,   gross: 22000, net: 20100, disbursed: false },
+    { id: 'ee333333-3333-3333-3333-333333333333', placementId: PLACEMENTS.sc,   staffId: FIN_STAFF.sc,   gross: 25000, net: 22800, disbursed: true },
   ];
+
+  await prisma.$executeRaw`ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS disbursement_ref VARCHAR(100);`;
+  await prisma.$executeRaw`ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS shift_days INT DEFAULT 0;`;
 
   for (const pr of payrollRows) {
     await prisma.$executeRaw`
@@ -430,7 +465,7 @@ export async function seedDemoData(prisma: PrismaClient) {
   // ── Client invoices ───────────────────────────────────────────────────────────
   const invoices = [
     {
-      id: 'inv11111-1111-1111-1111-111111111111',
+      id: 'eb111111-1111-1111-1111-111111111111',
       placementId: PLACEMENTS.maid,
       clientId: CLIENTS.saxena,
       number: `INV-${year}${String(month).padStart(2, '0')}-M3X01`,
@@ -439,7 +474,7 @@ export async function seedDemoData(prisma: PrismaClient) {
       dueOffset: -5,
     },
     {
-      id: 'inv22222-2222-2222-2222-222222222222',
+      id: 'eb222222-2222-2222-2222-222222222222',
       placementId: PLACEMENTS.dr,
       clientId: CLIENTS.kapoor,
       number: `INV-${year}${String(month).padStart(2, '0')}-DR001`,
@@ -448,7 +483,7 @@ export async function seedDemoData(prisma: PrismaClient) {
       dueOffset: 10,
     },
     {
-      id: 'inv33333-3333-3333-3333-333333333333',
+      id: 'eb333333-3333-3333-3333-333333333333',
       placementId: PLACEMENTS.sc,
       clientId: CLIENTS.mehta,
       number: `INV-${year}${String(month).padStart(2, '0')}-SC001`,
@@ -458,7 +493,7 @@ export async function seedDemoData(prisma: PrismaClient) {
       paid: true,
     },
     {
-      id: 'inv44444-4444-4444-4444-444444444444',
+      id: 'eb444444-4444-4444-4444-444444444444',
       placementId: PLACEMENTS.dr,
       clientId: CLIENTS.kapoor,
       number: `INV-${year}${String(month - 1 || 12).padStart(2, '0')}-DR002`,
