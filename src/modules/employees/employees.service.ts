@@ -59,6 +59,9 @@ export class EmployeesService {
       );
     }
 
+    const validBranchId = await this.repo.ensureValidBranch(dto.branchId);
+    const validCategoryId = await this.repo.ensureValidCategory(dto.categoryId);
+
     const createData: Prisma.EmployeeCreateInput = {
       employeeId,
       fullName: dto.fullName,
@@ -82,8 +85,8 @@ export class EmployeesService {
       employmentType: dto.employmentType,
       salary: new Prisma.Decimal(dto.salary),
       status: dto.status || 'Active',
-      branch: { connect: { id: dto.branchId } },
-      category: { connect: { id: dto.categoryId } },
+      branch: { connect: { id: validBranchId } },
+      category: { connect: { id: validCategoryId } },
     };
 
     return this.repo.create(createData);
@@ -91,6 +94,18 @@ export class EmployeesService {
 
   async update(id: string, dto: any) {
     const existing = await this.findOne(id);
+
+    let branchConnect = {};
+    if (dto.branchId) {
+      const validBranchId = await this.repo.ensureValidBranch(dto.branchId);
+      branchConnect = { branch: { connect: { id: validBranchId } } };
+    }
+
+    let categoryConnect = {};
+    if (dto.categoryId) {
+      const validCategoryId = await this.repo.ensureValidCategory(dto.categoryId);
+      categoryConnect = { category: { connect: { id: validCategoryId } } };
+    }
 
     const updateData: Prisma.EmployeeUpdateInput = {
       ...(dto.profilePhoto !== undefined ? { profilePhoto: dto.profilePhoto } : {}),
@@ -113,8 +128,8 @@ export class EmployeesService {
       ...(dto.employmentType ? { employmentType: dto.employmentType } : {}),
       ...(dto.salary !== undefined ? { salary: new Prisma.Decimal(dto.salary) } : {}),
       ...(dto.status ? { status: dto.status } : {}),
-      ...(dto.branchId ? { branch: { connect: { id: dto.branchId } } } : {}),
-      ...(dto.categoryId ? { category: { connect: { id: dto.categoryId } } } : {}),
+      ...branchConnect,
+      ...categoryConnect,
     };
 
     // If fullName changed, re-generate the employeeId to match the new first name

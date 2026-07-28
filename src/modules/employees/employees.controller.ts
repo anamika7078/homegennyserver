@@ -25,7 +25,7 @@ export class EmployeesController {
   constructor(private readonly service: EmployeesService) {}
 
   @Get()
-  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.TRAINER)
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.TRAINER, UserRole.FINANCE)
   @ApiOperation({ summary: 'Get all employees (search, filters, paginate)' })
   async findAll(@Query() query: any) {
     return this.service.findAll(query);
@@ -62,7 +62,7 @@ export class EmployeesController {
   }
 
   @Get(':id')
-  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.TRAINER)
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.TRAINER, UserRole.FINANCE)
   @ApiOperation({ summary: 'Get employee details by ID' })
   async findOne(@Param('id') id: string) {
     return this.service.findOne(id);

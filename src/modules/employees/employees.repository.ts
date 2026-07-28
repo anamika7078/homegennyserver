@@ -185,4 +185,37 @@ export class EmployeesRepository {
       orderBy: { name: 'asc' },
     });
   }
+
+  async ensureValidBranch(branchId?: string): Promise<string> {
+    if (branchId) {
+      const b = await this.prisma.branch.findUnique({ where: { id: branchId } });
+      if (b) return b.id;
+    }
+    const first = await this.prisma.branch.findFirst();
+    if (first) return first.id;
+    const created = await this.prisma.branch.create({
+      data: {
+        id: '00000000-0000-0000-0000-000000000001',
+        name: 'Corporate HQ',
+        city: 'New Delhi',
+        state: 'Delhi',
+      },
+    });
+    return created.id;
+  }
+
+  async ensureValidCategory(categoryId?: string): Promise<string> {
+    if (categoryId) {
+      const c = await this.prisma.employeeCategory.findUnique({ where: { id: categoryId } });
+      if (c) return c.id;
+    }
+    const first = await this.prisma.employeeCategory.findFirst();
+    if (first) return first.id;
+    const created = await this.prisma.employeeCategory.create({
+      data: {
+        name: 'Operations',
+      },
+    });
+    return created.id;
+  }
 }

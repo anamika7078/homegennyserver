@@ -22,6 +22,12 @@ import { CategoriesModule } from './modules/categories/categories.module';
 import { EmployeesModule } from './modules/employees/employees.module';
 import { DocumentsModule } from './modules/documents/documents.module';
 import { AttendanceModule } from './modules/attendance/attendance.module';
+import { SalaryStructureModule } from './modules/salary-structure/salary-structure.module';
+import { EmployeeSalaryModule } from './modules/employee-salary/employee-salary.module';
+import { OvertimeModule } from './modules/overtime/overtime.module';
+import { BonusModule } from './modules/bonus/bonus.module';
+import { ReimbursementModule } from './modules/reimbursement/reimbursement.module';
+import { LoanModule } from './modules/loan/loan.module';
 
 // Other existing modules
 import { RestrictedListModule } from './modules/restricted-list/restricted-list.module';
@@ -109,6 +115,12 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     DocumentsModule,
     EmployeesModule,
     CategoriesModule,
+    SalaryStructureModule,
+    EmployeeSalaryModule,
+    OvertimeModule,
+    BonusModule,
+    ReimbursementModule,
+    LoanModule,
     EnterpriseCronModule,
     SeriesModule,
     RealtimeModule,

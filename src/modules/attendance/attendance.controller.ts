@@ -30,7 +30,7 @@ export class AttendanceController {
   ) {}
 
   @Get()
-  @Roles(UserRole.HR, UserRole.ADMIN)
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.FINANCE)
   @ApiOperation({ summary: 'Get all attendance logs with filters' })
   async findAll(
     @Query('date') date?: string,
@@ -44,10 +44,17 @@ export class AttendanceController {
   }
 
   @Get('stats')
-  @Roles(UserRole.HR, UserRole.ADMIN)
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.FINANCE)
   @ApiOperation({ summary: 'Get daily attendance statistics' })
   async getStats(@Query('date') date?: string, @Query('branchId') branchId?: string) {
     return this.service.getStats(date, branchId);
+  }
+
+  @Get('payrolls/all')
+  @Roles(UserRole.HR, UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Get all generated employee payrolls' })
+  async getEmployeePayrolls() {
+    return this.payrollService.getEmployeePayrolls();
   }
 
   @Post('mark')
@@ -106,12 +113,5 @@ export class AttendanceController {
       throw new BadRequestException('month and year are required');
     }
     return this.payrollService.runEmployeePayroll(employeeId, m, y);
-  }
-
-  @Get('payrolls/all')
-  @Roles(UserRole.HR, UserRole.FINANCE, UserRole.ADMIN)
-  @ApiOperation({ summary: 'Get all generated employee payrolls' })
-  async getEmployeePayrolls() {
-    return this.payrollService.getEmployeePayrolls();
   }
 }
