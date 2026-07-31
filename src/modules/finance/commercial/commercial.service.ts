@@ -28,6 +28,16 @@ export interface WageConfigDto {
   professional_tax: number;
   nfh: number;
   status?: string;
+  // ── Toggle flags ──
+  pf_applicable?: boolean;
+  esic_applicable?: boolean;
+  bonus_applicable?: boolean;
+  bonus_frequency?: string; // 'monthly' | 'yearly'
+  lwf_applicable?: boolean;
+  uniform_applicable?: boolean;
+  relieving_applicable?: boolean;
+  nfh_applicable?: boolean;
+  shift_pattern?: string; // '8' | '12'
 }
 
 export interface CalculationItemDto {
@@ -116,26 +126,35 @@ export class CommercialService {
         zone,
         category,
         basic_wage: 15000,
-        da: 2000,
-        hra: 1500,
-        skilled_allowance: 1000,
+        da: 0,
+        hra: 0,
+        skilled_allowance: 0,
         additional_hours_pct: 50,
-        employer_pf_pct: 12,
+        employer_pf_pct: 13,
         employer_pf_max: 15000,
         employee_pf_pct: 12,
         employer_esic_pct: 3.25,
         employee_esic_pct: 0.75,
         bonus_pct: 8.33,
-        leave_days: 15,
-        lwf_pct: 0.2,
-        lwf_max: 25,
-        uniform_allowance: 500,
-        relieving_pct: 8.33,
-        management_pct: 10,
-        training_charges: 300,
+        leave_days: 32,
+        lwf_pct: 0,
+        lwf_max: 62,
+        uniform_allowance: 275,
+        relieving_pct: 16.67,
+        management_pct: 5.5,
+        training_charges: 0,
         gst_pct: 18,
-        professional_tax: 200,
-        nfh: 300,
+        professional_tax: 0,
+        nfh: 0,
+        pf_applicable: true,
+        esic_applicable: true,
+        bonus_applicable: true,
+        bonus_frequency: 'monthly',
+        lwf_applicable: true,
+        uniform_applicable: true,
+        relieving_applicable: true,
+        nfh_applicable: false,
+        shift_pattern: '8',
       };
     }
     return rows[0];
@@ -148,9 +167,13 @@ export class CommercialService {
         additional_hours_pct, employer_pf_pct, employer_pf_max, employee_pf_pct,
         employer_esic_pct, employee_esic_pct, bonus_pct, leave_days, lwf_pct, lwf_max,
         uniform_allowance, relieving_pct, management_pct, training_charges, gst_pct,
-        professional_tax, nfh, status
+        professional_tax, nfh, status,
+        pf_applicable, esic_applicable, bonus_applicable, bonus_frequency,
+        lwf_applicable, uniform_applicable, relieving_applicable, nfh_applicable, shift_pattern
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, 'ACTIVE'
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+        $19, $20, $21, $22, $23, $24, $25, 'ACTIVE',
+        $26, $27, $28, $29, $30, $31, $32, $33, $34
       ) RETURNING id`,
       [
         dto.state,
@@ -178,6 +201,16 @@ export class CommercialService {
         dto.gst_pct,
         dto.professional_tax,
         dto.nfh,
+        // Toggle flags
+        dto.pf_applicable ?? true,
+        dto.esic_applicable ?? true,
+        dto.bonus_applicable ?? true,
+        dto.bonus_frequency ?? 'monthly',
+        dto.lwf_applicable ?? true,
+        dto.uniform_applicable ?? true,
+        dto.relieving_applicable ?? true,
+        dto.nfh_applicable ?? false,
+        dto.shift_pattern ?? '8',
       ]
     );
     return result[0];
@@ -215,75 +248,62 @@ export class CommercialService {
     const trainingCharges = Number(config.training_charges);
     const gstPct = Number(config.gst_pct);
     const professionalTax = Number(config.professional_tax);
-    const nfh = Number(config.nfh);
+    const nfhVal = Number(config.nfh);
 
-    // Subtotal1 = Basic + DA
+    // Toggle flags (default to true for backward compat)
+    const pfOn = config.pf_applicable !== false;
+    const esicOn = config.esic_applicable !== false;
+    const bonusOn = config.bonus_applicable !== false;
+    const bonusFreq: string = config.bonus_frequency || 'monthly';
+    const lwfOn = config.lwf_applicable !== false;
+    const uniformOn = config.uniform_applicable !== false;
+    const relievingOn = config.relieving_applicable !== false;
+    const nfhOn = config.nfh_applicable === true;
+
+    // ── Phase A: Gross Salary ──
     const subtotal1 = basic + da;
-
-    // Additional Hours = Subtotal1 * (Additional Hours % / 100)
-    // (If user configures 50%, it behaves as Subtotal1 / 2)
     const additionalHours = subtotal1 * (additionalHoursPct / 100);
+    const subtotal2 = subtotal1 + additionalHours + hra + skilledAllowance;
 
-    // Subtotal2 = Basic + DA + Additional Hours + HRA + Skilled Allowance
-    const subtotal2 = basic + da + additionalHours + hra + skilledAllowance;
+    // ── Phase B: Statutory Contributions ──
+    // Bonus
+    const bonusRaw = bonusOn ? subtotal1 * (bonusPct / 100) : 0;
+    const bonus = bonusFreq === 'yearly' ? bonusRaw / 12 : bonusRaw;
 
-    // Eligible Salary for PF = subtotal2
-    const eligibleSalary = subtotal2;
+    // Leave with Wages = SubTotal2 × (leaveDays / 312)
+    const workingYear = 312;
+    const leaveWages = subtotal2 * (leaveDays / workingYear);
 
-    // Employer PF = Min(Eligible Salary * PF %, PF Max)
-    const employerPf = Math.min(eligibleSalary * (employerPfPct / 100), employerPfMax);
+    // PF Base = Basic + Skilled Allowance + Leave (capped at employer_pf_max)
+    const pfBase = basic + skilledAllowance + leaveWages;
+    const employerPfCeiling = employerPfMax * (employerPfPct / 100);
+    const employerPf = pfOn ? Math.min(Math.round(pfBase * (employerPfPct / 100)), employerPfCeiling) : 0;
 
-    // Bonus = Basic * Bonus %
-    const bonus = basic * (bonusPct / 100);
+    // ESIC Employer = (SubTotal2 + Leave + Bonus) × ESIC %
+    const esic = esicOn ? (subtotal2 + leaveWages + bonus) * (employerEsicPct / 100) : 0;
 
-    // Leave Wages = Subtotal2 * Leave Days / 12 / 26
-    const leaveWages = (subtotal2 * leaveDays) / 12 / 26;
+    // LWF & Uniform (fixed amounts when applicable)
+    const lwf = lwfOn ? Math.min(pfBase * (lwfPct / 100) || 0, lwfMax) : 0;
+    const uniform = uniformOn ? uniformAllowance : 0;
+    const nfh = nfhOn ? nfhVal : 0;
 
-    // ESIC = (Subtotal2 + Bonus + Leave + NFH) * ESIC %
-    const esic = (subtotal2 + bonus + leaveWages + nfh) * (employerEsicPct / 100);
-
-    // LWF = Min(Eligible Salary * LWF %, LWF Max)
-    const lwf = Math.min(eligibleSalary * (lwfPct / 100), lwfMax);
-
-    // Subtotal3 = Subtotal2 + PF + ESIC + Bonus + Leave + NFH + LWF + Uniform
-    const subtotal3 = subtotal2 + employerPf + esic + bonus + leaveWages + nfh + lwf + uniformAllowance;
-
-    // Relieving = Subtotal3 * Relieving %
-    const relieving = subtotal3 * (relievingPct / 100);
-
-    // Subtotal4 = Subtotal3 + Relieving
+    // ── Phase C: CTC ──
+    const subtotal3 = subtotal2 + employerPf + esic + bonus + leaveWages + nfh + lwf + uniform;
+    const relieving = relievingOn ? subtotal3 * (relievingPct / 100) : 0;
     const subtotal4 = subtotal3 + relieving;
-
-    // Management Fee = Subtotal4 * Management %
     const managementFee = subtotal4 * (managementPct / 100);
-
-    // Monthly Cost per resource = Subtotal4 + Management Fee + Training Charges
     const monthlyCostPerResource = subtotal4 + managementFee + trainingCharges;
     const monthlyCost = monthlyCostPerResource * noOfResources;
-
-    // Daily Rate per resource = Monthly Cost / 30.45
     const dailyRate = monthlyCostPerResource / 30.45;
-
-    // Hourly Rate per resource = Daily Rate / 8
     const hourlyRate = dailyRate / 8;
-
-    // GST = Monthly Cost * GST %
     const gst = monthlyCost * (gstPct / 100);
-
-    // Grand Total = Monthly Cost + GST
     const grandTotal = monthlyCost + gst;
 
-    // EMPLOYEE SALARY
-    // Gross Salary = Subtotal2 + Bonus + Leave Wages + NFH
+    // ── Employee Salary ──
     const grossSalary = subtotal2 + bonus + leaveWages + nfh;
-
-    // Employee PF = Eligible Salary * Employee PF %
-    const employeePf = eligibleSalary * (employeePfPct / 100);
-
-    // Employee ESIC = Gross Salary * Employee ESIC %
-    const employeeEsic = grossSalary * (employeeEsicPct / 100);
-
-    // Net Salary = Gross Salary - Employee PF - Employee ESIC - Professional Tax
+    const employeePfCeiling = employerPfMax * (employeePfPct / 100);
+    const employeePf = pfOn ? Math.min(Math.round(pfBase * (employeePfPct / 100)), employeePfCeiling) : 0;
+    const employeeEsic = esicOn ? grossSalary * (employeeEsicPct / 100) : 0;
     const netSalary = grossSalary - employeePf - employeeEsic - professionalTax;
 
     return {
@@ -296,10 +316,11 @@ export class CommercialService {
       subtotal2,
       employerPf,
       bonus,
+      bonusRaw,
       leaveWages,
       esic,
       lwf,
-      uniform: uniformAllowance,
+      uniform,
       nfh,
       subtotal3,
       relieving,

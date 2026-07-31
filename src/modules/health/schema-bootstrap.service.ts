@@ -251,6 +251,34 @@ export class SchemaBootstrapService implements OnModuleInit {
     `);
 
     await this.exec(`
+      CREATE TABLE IF NOT EXISTS finance_customer_branches (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        customer_id UUID NOT NULL REFERENCES finance_customers(id) ON DELETE CASCADE,
+        unit_code VARCHAR(50) UNIQUE NOT NULL,
+        unit_name VARCHAR(255) NOT NULL,
+        address TEXT,
+        state VARCHAR(100),
+        city VARCHAR(100),
+        pincode VARCHAR(20),
+        gstn VARCHAR(50),
+        status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    await this.exec(`
+      DO $$ BEGIN ALTER TABLE finance_customer_branches ADD COLUMN pincode VARCHAR(20); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+    `);
+
+    await this.exec(`
+      CREATE INDEX IF NOT EXISTS idx_finance_customer_branches_customer_id ON finance_customer_branches(customer_id)
+    `);
+    await this.exec(`
+      CREATE INDEX IF NOT EXISTS idx_finance_customer_branches_unit_code ON finance_customer_branches(unit_code)
+    `);
+
+    await this.exec(`
       CREATE TABLE IF NOT EXISTS finance_wage_config (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         state VARCHAR(100) NOT NULL,
@@ -283,6 +311,27 @@ export class SchemaBootstrapService implements OnModuleInit {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )
     `);
+
+    // ── Add toggle & frequency columns to finance_wage_config (idempotent) ──
+    const newCols = [
+      { name: 'pf_applicable', def: `BOOLEAN NOT NULL DEFAULT true` },
+      { name: 'esic_applicable', def: `BOOLEAN NOT NULL DEFAULT true` },
+      { name: 'bonus_applicable', def: `BOOLEAN NOT NULL DEFAULT true` },
+      { name: 'bonus_frequency', def: `VARCHAR(10) NOT NULL DEFAULT 'monthly'` },
+      { name: 'lwf_applicable', def: `BOOLEAN NOT NULL DEFAULT true` },
+      { name: 'uniform_applicable', def: `BOOLEAN NOT NULL DEFAULT true` },
+      { name: 'relieving_applicable', def: `BOOLEAN NOT NULL DEFAULT true` },
+      { name: 'nfh_applicable', def: `BOOLEAN NOT NULL DEFAULT true` },
+      { name: 'shift_pattern', def: `VARCHAR(10) NOT NULL DEFAULT '8'` },
+    ];
+    for (const col of newCols) {
+      await this.exec(`
+        DO $$ BEGIN
+          ALTER TABLE finance_wage_config ADD COLUMN ${col.name} ${col.def};
+        EXCEPTION WHEN duplicate_column THEN NULL; END $$
+      `);
+    }
+
 
     await this.exec(`
       CREATE TABLE IF NOT EXISTS finance_commercial_calculations (

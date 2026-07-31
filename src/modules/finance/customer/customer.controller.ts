@@ -13,14 +13,20 @@ export class FinanceCustomerController {
   constructor(private readonly service: FinanceCustomerService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List all finance customers' })
+  @ApiOperation({ summary: 'List all finance customers with branches' })
   @ApiQuery({ name: 'search', required: false })
   listCustomers(@Query('search') search?: string) {
     return this.service.listCustomers(search);
   }
 
+  @Get('branches/all')
+  @ApiOperation({ summary: 'List all customer branches' })
+  listAllCustomerBranches() {
+    return this.service.listAllCustomerBranches();
+  }
+
   @Post()
-  @ApiOperation({ summary: 'Create a new finance customer (auto-generates unit code)' })
+  @ApiOperation({ summary: 'Create a new finance customer with multi-branch support' })
   createCustomer(@Body() body: CreateCustomerDto) {
     return this.service.createCustomer(body);
   }
@@ -29,6 +35,18 @@ export class FinanceCustomerController {
   @ApiOperation({ summary: 'Get a single finance customer by ID' })
   getCustomer(@Param('id') id: string) {
     return this.service.getCustomer(id);
+  }
+
+  @Get(':id/branches')
+  @ApiOperation({ summary: 'Get all active branches for a customer' })
+  getCustomerBranches(@Param('id') id: string) {
+    return this.service.getCustomerBranches(id);
+  }
+
+  @Post(':id/branches')
+  @ApiOperation({ summary: 'Add a new branch to an existing customer' })
+  addCustomerBranch(@Param('id') id: string, @Body() body: any) {
+    return this.service.addCustomerBranch(id, body);
   }
 
   @Put(':id')

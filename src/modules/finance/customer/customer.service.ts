@@ -1,24 +1,42 @@
-import { Injectable, ConflictException, NotFoundException } from '@nestjs/common';
+import { Injectable, ConflictException, NotFoundException, BadRequestException, OnModuleInit, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+
+export interface BranchItemDto {
+  unit_code: string;
+  unit_name: string;
+  address?: string;
+  state?: string;
+  city?: string;
+  pincode?: string;
+  gstn?: string;
+}
 
 export interface CreateCustomerDto {
   customer_name: string;
   address: string;
   pan_card: string;
   gstn?: string;
+  branches?: BranchItemDto[];
 }
 
 function generateUnitCode(name: string, existing: string[]): string {
-  // Take first letter of each word, uppercase, max 5 chars
+  const clean = name.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
   const words = name.trim().toUpperCase().split(/\s+/).filter(Boolean);
-  let base = words.map((w) => w[0]).join('').slice(0, 5);
-  if (base.length < 3) base = name.replace(/\s+/g, '').slice(0, 5).toUpperCase();
 
-  let code = base;
+  let base = '';
+  if (words.length >= 3) {
+    base = words.map((w) => w[0]).join('').slice(0, 5);
+  }
+  if (base.length < 3) {
+    base = clean.slice(0, 5);
+  }
+  if (!base) base = 'UNIT';
+
+  let code = `${base}-01`;
   let counter = 1;
   while (existing.includes(code)) {
-    code = base.slice(0, 4) + String(counter).padStart(1, '0');
     counter++;
+    code = `${base}-${String(counter).padStart(2, '0')}`;
   }
   return code.toUpperCase();
 }
@@ -33,79 +51,278 @@ function buildBillPrefix(month: number, year: number): string {
 }
 
 @Injectable()
-export class FinanceCustomerService {
+export class FinanceCustomerService implements OnModuleInit {
+  private readonly logger = new Logger(FinanceCustomerService.name);
+
   constructor(private readonly dataSource: DataSource) {}
 
+  async onModuleInit() {
+    await this.ensureTablesExist();
+  }
+
+  private async ensureTablesExist() {
+    try {
+      await this.dataSource.query(`
+        CREATE TABLE IF NOT EXISTS finance_customer_branches (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          customer_id UUID NOT NULL REFERENCES finance_customers(id) ON DELETE CASCADE,
+          unit_code VARCHAR(50) UNIQUE NOT NULL,
+          unit_name VARCHAR(255) NOT NULL,
+          address TEXT,
+          state VARCHAR(100),
+          city VARCHAR(100),
+          pincode VARCHAR(20),
+          gstn VARCHAR(50),
+          status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
+      await this.dataSource.query(`
+        DO $$ BEGIN ALTER TABLE finance_customer_branches ADD COLUMN pincode VARCHAR(20); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+      `);
+    } catch (e: any) {
+      this.logger.error(`Error bootstrapping customer branches table: ${e?.message}`);
+    }
+  }
+
   async createCustomer(dto: CreateCustomerDto) {
+    await this.ensureTablesExist();
+
+    if (!dto.customer_name || !dto.customer_name.trim()) {
+      throw new BadRequestException('Customer name is required');
+    }
+    if (!dto.pan_card || !dto.pan_card.trim()) {
+      throw new BadRequestException('PAN Card is required');
+    }
+    if (!dto.address || !dto.address.trim()) {
+      throw new BadRequestException('Address is required');
+    }
+
     // Check PAN uniqueness
     const panCheck = await this.dataSource.query<{ id: string }[]>(
       `SELECT id FROM finance_customers WHERE pan_card = $1`,
-      [dto.pan_card.toUpperCase()],
+      [dto.pan_card.toUpperCase().trim()],
     );
     if (panCheck.length) {
       throw new ConflictException(`Customer with PAN ${dto.pan_card} already exists`);
     }
 
-    // Collect existing unit codes
-    const existing = await this.dataSource.query<{ unit_code: string }[]>(
-      `SELECT unit_code FROM finance_customers`,
-    );
-    const existingCodes = existing.map((r) => r.unit_code);
+    // Collect existing unit codes across customers and customer branches
+    let existingCustCodes: { unit_code: string }[] = [];
+    let existingBranchCodes: { unit_code: string }[] = [];
+    try {
+      existingCustCodes = await this.dataSource.query<{ unit_code: string }[]>(
+        `SELECT unit_code FROM finance_customers`,
+      );
+    } catch {
+      existingCustCodes = [];
+    }
 
-    const unitCode = generateUnitCode(dto.customer_name, existingCodes);
-    const unitName = generateUnitName(dto.customer_name);
+    try {
+      existingBranchCodes = await this.dataSource.query<{ unit_code: string }[]>(
+        `SELECT unit_code FROM finance_customer_branches`,
+      );
+    } catch {
+      existingBranchCodes = [];
+    }
+
+    const existingCodes = [
+      ...existingCustCodes.map((r) => r.unit_code),
+      ...existingBranchCodes.map((r) => r.unit_code),
+    ];
+
+    const primaryUnitCode = generateUnitCode(dto.customer_name, existingCodes);
+    const primaryUnitName = generateUnitName(dto.customer_name);
 
     const now = new Date();
     const billPrefix = buildBillPrefix(now.getMonth() + 1, now.getFullYear());
 
-    const result = await this.dataSource.query<{ id: string }[]>(
-      `INSERT INTO finance_customers
-         (id, customer_name, address, pan_card, gstn, bill_no_prefix, bill_seq,
-          unit_code, unit_name, status, metadata, created_at, updated_at)
-       VALUES
-         (gen_random_uuid(), $1, $2, $3, $4, $5, 1, $6, $7, 'ACTIVE', '{}', now(), now())
-       RETURNING id`,
-      [
-        dto.customer_name,
-        dto.address,
-        dto.pan_card.toUpperCase(),
-        dto.gstn ? dto.gstn.toUpperCase() : null,
-        billPrefix,
-        unitCode,
-        unitName,
-      ],
-    );
+    // Execute in transaction runner
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
 
-    const id = result[0].id;
-    return this.getCustomer(id);
+    try {
+      // 1. Insert Customer Master
+      const result: any = await queryRunner.query(
+        `INSERT INTO finance_customers
+           (id, customer_name, address, pan_card, gstn, bill_no_prefix, bill_seq,
+            unit_code, unit_name, status, metadata, created_at, updated_at)
+         VALUES
+           (gen_random_uuid(), $1, $2, $3, $4, $5, 1, $6, $7, 'ACTIVE', '{}', now(), now())
+         RETURNING id`,
+        [
+          dto.customer_name.trim(),
+          dto.address.trim(),
+          dto.pan_card.toUpperCase().trim(),
+          dto.gstn ? dto.gstn.toUpperCase().trim() : null,
+          billPrefix,
+          primaryUnitCode,
+          primaryUnitName,
+        ],
+      );
+
+      const customerId = result[0].id;
+
+      // 2. Insert Branch items into finance_customer_branches
+      const branchItems = (dto.branches && dto.branches.length > 0)
+        ? dto.branches
+        : [
+            {
+              unit_code: primaryUnitCode,
+              unit_name: primaryUnitName,
+              address: dto.address,
+              gstn: dto.gstn,
+            },
+          ];
+
+      for (const branch of branchItems) {
+        const uCode = (branch.unit_code || primaryUnitCode).toUpperCase().trim();
+        const uName = (branch.unit_name || primaryUnitName).trim();
+
+        await queryRunner.query(
+          `INSERT INTO finance_customer_branches (
+            customer_id, unit_code, unit_name, address, state, city, pincode, gstn, status
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE')`,
+          [
+            customerId,
+            uCode,
+            uName,
+            branch.address ? branch.address.trim() : dto.address.trim(),
+            branch.state ? branch.state.trim() : null,
+            branch.city ? branch.city.trim() : null,
+            branch.pincode ? branch.pincode.trim() : null,
+            branch.gstn ? branch.gstn.toUpperCase().trim() : (dto.gstn ? dto.gstn.toUpperCase().trim() : null),
+          ],
+        );
+      }
+
+      await queryRunner.commitTransaction();
+      return this.getCustomer(customerId);
+    } catch (err: any) {
+      await queryRunner.rollbackTransaction();
+      this.logger.error(`Error creating customer: ${err?.message}`);
+      if (err?.code === '23505') {
+        throw new ConflictException(`Duplicate record: PAN Card or Unit Code already exists`);
+      }
+      if (err instanceof ConflictException || err instanceof BadRequestException) {
+        throw err;
+      }
+      throw new BadRequestException(err?.message || 'Failed to create customer');
+    } finally {
+      await queryRunner.release();
+    }
   }
 
   async listCustomers(search?: string) {
     let sql = `
-      SELECT id, customer_name, address, pan_card, gstn,
-             bill_no_prefix, bill_seq, unit_code, unit_name,
-             status, created_at, updated_at
-      FROM finance_customers
+      SELECT c.id, c.customer_name, c.address, c.pan_card, c.gstn,
+             c.bill_no_prefix, c.bill_seq, c.unit_code, c.unit_name,
+             c.status, c.created_at, c.updated_at,
+             COALESCE(
+               json_agg(
+                 json_build_object(
+                   'id', b.id,
+                   'unit_code', b.unit_code,
+                   'unit_name', b.unit_name,
+                   'address', b.address,
+                   'state', b.state,
+                   'city', b.city,
+                   'pincode', b.pincode,
+                   'gstn', b.gstn,
+                   'status', b.status
+                 ) ORDER BY b.created_at ASC
+               ) FILTER (WHERE b.id IS NOT NULL), '[]'
+             ) as branches
+      FROM finance_customers c
+      LEFT JOIN finance_customer_branches b ON b.customer_id = c.id
     `;
     const params: unknown[] = [];
     if (search) {
       params.push(`%${search}%`);
-      sql += ` WHERE customer_name ILIKE $1 OR pan_card ILIKE $1 OR unit_code ILIKE $1`;
+      sql += ` WHERE c.customer_name ILIKE $1 OR c.pan_card ILIKE $1 OR c.unit_code ILIKE $1 OR b.unit_code ILIKE $1 OR b.unit_name ILIKE $1`;
     }
-    sql += ` ORDER BY created_at DESC`;
+    sql += ` GROUP BY c.id ORDER BY c.created_at DESC`;
     return this.dataSource.query(sql, params);
   }
 
   async getCustomer(id: string) {
     const rows = await this.dataSource.query(
-      `SELECT id, customer_name, address, pan_card, gstn,
-              bill_no_prefix, bill_seq, unit_code, unit_name,
-              status, created_at, updated_at
-       FROM finance_customers WHERE id = $1`,
+      `SELECT c.id, c.customer_name, c.address, c.pan_card, c.gstn,
+              c.bill_no_prefix, c.bill_seq, c.unit_code, c.unit_name,
+              c.status, c.created_at, c.updated_at,
+              COALESCE(
+                json_agg(
+                  json_build_object(
+                    'id', b.id,
+                    'unit_code', b.unit_code,
+                    'unit_name', b.unit_name,
+                    'address', b.address,
+                    'state', b.state,
+                    'city', b.city,
+                    'pincode', b.pincode,
+                    'gstn', b.gstn,
+                    'status', b.status
+                  ) ORDER BY b.created_at ASC
+                ) FILTER (WHERE b.id IS NOT NULL), '[]'
+              ) as branches
+       FROM finance_customers c
+       LEFT JOIN finance_customer_branches b ON b.customer_id = c.id
+       WHERE c.id = $1
+       GROUP BY c.id`,
       [id],
     );
     if (!rows.length) throw new NotFoundException(`Customer ${id} not found`);
     return rows[0];
+  }
+
+  async getCustomerBranches(customerId: string) {
+    return this.dataSource.query(
+      `SELECT * FROM finance_customer_branches WHERE customer_id = $1 AND status = 'ACTIVE' ORDER BY created_at ASC`,
+      [customerId],
+    );
+  }
+
+  async addCustomerBranch(customerId: string, dto: BranchItemDto) {
+    const customer = await this.getCustomer(customerId);
+
+    // Check unit_code uniqueness
+    const existing = await this.dataSource.query<{ id: string }[]>(
+      `SELECT id FROM finance_customer_branches WHERE unit_code = $1`,
+      [dto.unit_code.toUpperCase().trim()],
+    );
+    if (existing.length) {
+      throw new ConflictException(`Unit Code ${dto.unit_code} already exists`);
+    }
+
+    await this.dataSource.query(
+      `INSERT INTO finance_customer_branches (
+        customer_id, unit_code, unit_name, address, state, city, pincode, gstn, status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE')`,
+      [
+        customerId,
+        dto.unit_code.toUpperCase().trim(),
+        dto.unit_name.trim(),
+        dto.address || customer.address,
+        dto.state || null,
+        dto.city || null,
+        dto.pincode || null,
+        dto.gstn ? dto.gstn.toUpperCase().trim() : (customer.gstn || null),
+      ],
+    );
+
+    return this.getCustomer(customerId);
+  }
+
+  async listAllCustomerBranches() {
+    return this.dataSource.query(
+      `SELECT b.*, c.customer_name, c.pan_card
+       FROM finance_customer_branches b
+       JOIN finance_customers c ON b.customer_id = c.id
+       WHERE b.status = 'ACTIVE'
+       ORDER BY c.customer_name ASC, b.unit_code ASC`,
+    );
   }
 
   async updateCustomer(id: string, dto: Partial<CreateCustomerDto> & { status?: string }) {
@@ -142,7 +359,6 @@ export class FinanceCustomerService {
     let seq = rows[0].bill_seq;
     const prefix = rows[0].bill_no_prefix;
 
-    // Reset seq if month changed
     if (prefix !== newPrefix) {
       seq = 1;
     } else {
