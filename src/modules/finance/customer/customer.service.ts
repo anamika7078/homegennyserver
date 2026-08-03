@@ -16,6 +16,9 @@ export interface CreateCustomerDto {
   address: string;
   pan_card: string;
   gstn?: string;
+  city?: string;
+  state?: string;
+  pincode?: string;
   branches?: BranchItemDto[];
 }
 
@@ -80,6 +83,9 @@ export class FinanceCustomerService implements OnModuleInit {
       `);
       await this.dataSource.query(`
         DO $$ BEGIN ALTER TABLE finance_customer_branches ADD COLUMN pincode VARCHAR(20); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+        DO $$ BEGIN ALTER TABLE finance_customers ADD COLUMN city VARCHAR(100); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+        DO $$ BEGIN ALTER TABLE finance_customers ADD COLUMN state VARCHAR(100); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+        DO $$ BEGIN ALTER TABLE finance_customers ADD COLUMN pincode VARCHAR(20); EXCEPTION WHEN duplicate_column THEN NULL; END $$;
       `);
     } catch (e: any) {
       this.logger.error(`Error bootstrapping customer branches table: ${e?.message}`);
@@ -148,9 +154,9 @@ export class FinanceCustomerService implements OnModuleInit {
       const result: any = await queryRunner.query(
         `INSERT INTO finance_customers
            (id, customer_name, address, pan_card, gstn, bill_no_prefix, bill_seq,
-            unit_code, unit_name, status, metadata, created_at, updated_at)
+            unit_code, unit_name, status, metadata, city, state, pincode, created_at, updated_at)
          VALUES
-           (gen_random_uuid(), $1, $2, $3, $4, $5, 1, $6, $7, 'ACTIVE', '{}', now(), now())
+           (gen_random_uuid(), $1, $2, $3, $4, $5, 1, $6, $7, 'ACTIVE', '{}', $8, $9, $10, now(), now())
          RETURNING id`,
         [
           dto.customer_name.trim(),
@@ -160,6 +166,9 @@ export class FinanceCustomerService implements OnModuleInit {
           billPrefix,
           primaryUnitCode,
           primaryUnitName,
+          dto.city ? dto.city.trim() : null,
+          dto.state ? dto.state.trim() : null,
+          dto.pincode ? dto.pincode.trim() : null,
         ],
       );
 
@@ -174,6 +183,9 @@ export class FinanceCustomerService implements OnModuleInit {
               unit_name: primaryUnitName,
               address: dto.address,
               gstn: dto.gstn,
+              city: dto.city,
+              state: dto.state,
+              pincode: dto.pincode,
             },
           ];
 
@@ -190,9 +202,9 @@ export class FinanceCustomerService implements OnModuleInit {
             uCode,
             uName,
             branch.address ? branch.address.trim() : dto.address.trim(),
-            branch.state ? branch.state.trim() : null,
-            branch.city ? branch.city.trim() : null,
-            branch.pincode ? branch.pincode.trim() : null,
+            branch.state ? branch.state.trim() : (dto.state ? dto.state.trim() : null),
+            branch.city ? branch.city.trim() : (dto.city ? dto.city.trim() : null),
+            branch.pincode ? branch.pincode.trim() : (dto.pincode ? dto.pincode.trim() : null),
             branch.gstn ? branch.gstn.toUpperCase().trim() : (dto.gstn ? dto.gstn.toUpperCase().trim() : null),
           ],
         );
@@ -217,60 +229,27 @@ export class FinanceCustomerService implements OnModuleInit {
 
   async listCustomers(search?: string) {
     let sql = `
-      SELECT c.id, c.customer_name, c.address, c.pan_card, c.gstn,
+      SELECT c.id, c.customer_name, c.address, c.city, c.state, c.pincode, c.pan_card, c.gstn,
              c.bill_no_prefix, c.bill_seq, c.unit_code, c.unit_name,
-             c.status, c.created_at, c.updated_at,
-             COALESCE(
-               json_agg(
-                 json_build_object(
-                   'id', b.id,
-                   'unit_code', b.unit_code,
-                   'unit_name', b.unit_name,
-                   'address', b.address,
-                   'state', b.state,
-                   'city', b.city,
-                   'pincode', b.pincode,
-                   'gstn', b.gstn,
-                   'status', b.status
-                 ) ORDER BY b.created_at ASC
-               ) FILTER (WHERE b.id IS NOT NULL), '[]'
-             ) as branches
+             c.status, c.created_at, c.updated_at
       FROM finance_customers c
-      LEFT JOIN finance_customer_branches b ON b.customer_id = c.id
     `;
     const params: unknown[] = [];
     if (search) {
       params.push(`%${search}%`);
-      sql += ` WHERE c.customer_name ILIKE $1 OR c.pan_card ILIKE $1 OR c.unit_code ILIKE $1 OR b.unit_code ILIKE $1 OR b.unit_name ILIKE $1`;
+      sql += ` WHERE c.customer_name ILIKE $1 OR c.pan_card ILIKE $1 OR c.unit_code ILIKE $1`;
     }
-    sql += ` GROUP BY c.id ORDER BY c.created_at DESC`;
+    sql += ` ORDER BY c.created_at DESC`;
     return this.dataSource.query(sql, params);
   }
 
   async getCustomer(id: string) {
     const rows = await this.dataSource.query(
-      `SELECT c.id, c.customer_name, c.address, c.pan_card, c.gstn,
+      `SELECT c.id, c.customer_name, c.address, c.city, c.state, c.pincode, c.pan_card, c.gstn,
               c.bill_no_prefix, c.bill_seq, c.unit_code, c.unit_name,
-              c.status, c.created_at, c.updated_at,
-              COALESCE(
-                json_agg(
-                  json_build_object(
-                    'id', b.id,
-                    'unit_code', b.unit_code,
-                    'unit_name', b.unit_name,
-                    'address', b.address,
-                    'state', b.state,
-                    'city', b.city,
-                    'pincode', b.pincode,
-                    'gstn', b.gstn,
-                    'status', b.status
-                  ) ORDER BY b.created_at ASC
-                ) FILTER (WHERE b.id IS NOT NULL), '[]'
-              ) as branches
+              c.status, c.created_at, c.updated_at
        FROM finance_customers c
-       LEFT JOIN finance_customer_branches b ON b.customer_id = c.id
-       WHERE c.id = $1
-       GROUP BY c.id`,
+       WHERE c.id = $1`,
       [id],
     );
     if (!rows.length) throw new NotFoundException(`Customer ${id} not found`);

@@ -323,6 +323,8 @@ export class SchemaBootstrapService implements OnModuleInit {
       { name: 'relieving_applicable', def: `BOOLEAN NOT NULL DEFAULT true` },
       { name: 'nfh_applicable', def: `BOOLEAN NOT NULL DEFAULT true` },
       { name: 'shift_pattern', def: `VARCHAR(10) NOT NULL DEFAULT '8'` },
+      { name: 'gst_applicable', def: `BOOLEAN NOT NULL DEFAULT true` },
+      { name: 'gst_type', def: `VARCHAR(20) NOT NULL DEFAULT 'intra_state'` },
     ];
     for (const col of newCols) {
       await this.exec(`

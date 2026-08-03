@@ -38,6 +38,8 @@ export interface WageConfigDto {
   relieving_applicable?: boolean;
   nfh_applicable?: boolean;
   shift_pattern?: string; // '8' | '12'
+  gst_applicable?: boolean;
+  gst_type?: string; // 'intra_state' | 'inter_state'
 }
 
 export interface CalculationItemDto {
@@ -155,6 +157,8 @@ export class CommercialService {
         relieving_applicable: true,
         nfh_applicable: false,
         shift_pattern: '8',
+        gst_applicable: true,
+        gst_type: 'intra_state',
       };
     }
     return rows[0];
@@ -169,11 +173,12 @@ export class CommercialService {
         uniform_allowance, relieving_pct, management_pct, training_charges, gst_pct,
         professional_tax, nfh, status,
         pf_applicable, esic_applicable, bonus_applicable, bonus_frequency,
-        lwf_applicable, uniform_applicable, relieving_applicable, nfh_applicable, shift_pattern
+        lwf_applicable, uniform_applicable, relieving_applicable, nfh_applicable, shift_pattern,
+        gst_applicable, gst_type
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
         $19, $20, $21, $22, $23, $24, $25, 'ACTIVE',
-        $26, $27, $28, $29, $30, $31, $32, $33, $34
+        $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36
       ) RETURNING id`,
       [
         dto.state,
@@ -211,6 +216,8 @@ export class CommercialService {
         dto.relieving_applicable ?? true,
         dto.nfh_applicable ?? false,
         dto.shift_pattern ?? '8',
+        dto.gst_applicable ?? true,
+        dto.gst_type ?? 'intra_state',
       ]
     );
     return result[0];
@@ -228,27 +235,30 @@ export class CommercialService {
   // ─── CALCULATOR & CALCULATIONS ──────────────────────────────────────────
 
   calculateFormulas(config: any, noOfResources: number, workingHours: number) {
-    const basic = Number(config.basic_wage);
-    const da = Number(config.da);
-    const hra = Number(config.hra);
-    const skilledAllowance = Number(config.skilled_allowance);
-    const additionalHoursPct = Number(config.additional_hours_pct);
-    const employerPfPct = Number(config.employer_pf_pct);
-    const employerPfMax = Number(config.employer_pf_max);
-    const employeePfPct = Number(config.employee_pf_pct);
-    const employerEsicPct = Number(config.employer_esic_pct);
-    const employeeEsicPct = Number(config.employee_esic_pct);
-    const bonusPct = Number(config.bonus_pct);
-    const leaveDays = Number(config.leave_days);
-    const lwfPct = Number(config.lwf_pct);
-    const lwfMax = Number(config.lwf_max);
-    const uniformAllowance = Number(config.uniform_allowance);
-    const relievingPct = Number(config.relieving_pct);
-    const managementPct = Number(config.management_pct);
-    const trainingCharges = Number(config.training_charges);
-    const gstPct = Number(config.gst_pct);
-    const professionalTax = Number(config.professional_tax);
-    const nfhVal = Number(config.nfh);
+    const basic = Number(config.basic_wage) || 0;
+    const da = Number(config.da) || 0;
+    const hra = Number(config.hra) || 0;
+    const skilledAllowance = Number(config.skilled_allowance) || 0;
+    
+    // Additional Hours % determined ONLY by the workingHours parameter from Commercial Calculator
+    // (config.shift_pattern is stored config only, NOT used in calculation)
+    const is12HourShift = Number(workingHours) >= 12;
+    const additionalHoursPct = is12HourShift ? (Number(config.additional_hours_pct) || 50) : 0;
+
+    const employerPfPct = Number(config.employer_pf_pct) || 13;
+    const employerPfMax = Number(config.employer_pf_max) || 15000;
+    const employeePfPct = Number(config.employee_pf_pct) || 12;
+    const employerEsicPct = Number(config.employer_esic_pct) || 3.25;
+    const employeeEsicPct = Number(config.employee_esic_pct) || 0.75;
+    const bonusPct = Number(config.bonus_pct) || 8.33;
+    const leaveDays = Number(config.leave_days) || 32;
+    const uniformAllowance = Number(config.uniform_allowance) || 275;
+    const relievingPct = Number(config.relieving_pct) || 0;
+    const managementPct = Number(config.management_pct) || 0;
+    const trainingCharges = Number(config.training_charges) || 0;
+    const gstPct = Number(config.gst_pct) || 18;
+    const professionalTax = Number(config.professional_tax) || 0;
+    const nfhVal = Number(config.nfh) || 0;
 
     // Toggle flags (default to true for backward compat)
     const pfOn = config.pf_applicable !== false;
@@ -282,8 +292,9 @@ export class CommercialService {
     // ESIC Employer = (SubTotal2 + Leave + Bonus) × ESIC %
     const esic = esicOn ? (subtotal2 + leaveWages + bonus) * (employerEsicPct / 100) : 0;
 
-    // LWF & Uniform (fixed amounts when applicable)
-    const lwf = lwfOn ? Math.min(pfBase * (lwfPct / 100) || 0, lwfMax) : 0;
+    // LWF is a fixed statutory amount (stored in lwf_max), NOT a percentage calculation
+    const lwfAmount = Number(config.lwf_max) || 62;
+    const lwf = lwfOn ? lwfAmount : 0;
     const uniform = uniformOn ? uniformAllowance : 0;
     const nfh = nfhOn ? nfhVal : 0;
 
@@ -293,9 +304,9 @@ export class CommercialService {
     const subtotal4 = subtotal3 + relieving;
     const managementFee = subtotal4 * (managementPct / 100);
     const monthlyCostPerResource = subtotal4 + managementFee + trainingCharges;
-    const monthlyCost = monthlyCostPerResource * noOfResources;
+    const monthlyCost = monthlyCostPerResource * (noOfResources || 1);
     const dailyRate = monthlyCostPerResource / 30.45;
-    const hourlyRate = dailyRate / 8;
+    const hourlyRate = dailyRate / (workingHours || 8);
     const gst = monthlyCost * (gstPct / 100);
     const grandTotal = monthlyCost + gst;
 
@@ -312,12 +323,17 @@ export class CommercialService {
       hra,
       skilledAllowance,
       additionalHours,
+      additional_hours: additionalHours,
+      additionalHoursPct,
+      additional_hours_pct: additionalHoursPct,
       subtotal1,
       subtotal2,
       employerPf,
+      employer_pf: employerPf,
       bonus,
       bonusRaw,
       leaveWages,
+      leave_wages: leaveWages,
       esic,
       lwf,
       uniform,
@@ -326,16 +342,26 @@ export class CommercialService {
       relieving,
       subtotal4,
       managementFee,
+      management_fee: managementFee,
       trainingCharges,
       monthlyCost,
+      monthly_cost: monthlyCost,
       dailyRate,
+      daily_rate: dailyRate,
       hourlyRate,
+      hourly_rate: hourlyRate,
       gst,
+      grandTotal,
       grand_total: grandTotal,
+      grossSalary,
       gross_salary: grossSalary,
+      employeePf,
       employee_pf: employeePf,
+      employeeEsic,
       employee_esic: employeeEsic,
+      professionalTax,
       professional_tax: professionalTax,
+      netSalary,
       net_salary: netSalary,
     };
   }
