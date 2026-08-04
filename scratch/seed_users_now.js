@@ -1,9 +1,11 @@
+require('dotenv').config();
 const bcrypt = require('bcryptjs');
 const { Client } = require('pg');
 
 const BRANCH_ID = '00000000-0000-0000-0000-000000000001';
 const PASSWORD = 'HomeGenny@2024';
-const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:root@localhost:5432/homegenny';
+const rawUrl = process.env.DATABASE_URL || 'postgresql://postgres:hunesh@localhost:5432/homegenny';
+const DB_URL = rawUrl.replace(/\?schema=public/, '');
 
 const USERS = [
   { phone: '9800000001', role: 'BM', fullName: 'Amit Gupta', email: 'bm@homegenny.com' },

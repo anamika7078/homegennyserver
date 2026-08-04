@@ -27,6 +27,7 @@ const USERS: Array<{ phone: string; role: UserRole; fullName: string; email: str
   { phone: '9800000005', role: UserRole.TRAINER, fullName: 'Sunita Trainer', email: 'trainer@homegenny.com' },
   { phone: '9800000006', role: UserRole.ASSESSOR, fullName: 'Dr. Kavita Assessor', email: 'assessor@homegenny.com' },
   { phone: '9800000007', role: UserRole.SUPPORT, fullName: 'Ops Support', email: 'support@homegenny.com' },
+  { phone: '9800000008', role: UserRole.HR, fullName: 'HR Admin', email: 'hr@homegenny.com' },
 ];
 
 async function seedUsers() {

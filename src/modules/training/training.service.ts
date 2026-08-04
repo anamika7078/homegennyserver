@@ -155,9 +155,12 @@ export class TrainingService {
 
   async enrollStaff(batchId: string, staffId: string) {
     await this.ensureTables();
+    if (!batchId || batchId === 'undefined' || !batchId.match(/^[0-9a-fA-F-]{36}$/)) {
+      throw new BadRequestException('Invalid batch ID');
+    }
     const batches = await this.prisma.$queryRawUnsafe<any[]>(
       `SELECT id, start_date FROM training_batches WHERE id = $1::uuid`, batchId,
-    );
+    ).catch(() => []);
     if (!batches.length) throw new NotFoundException('Batch not found');
     const batchStartDate = batches[0].start_date;
 
