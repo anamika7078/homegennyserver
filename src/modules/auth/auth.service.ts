@@ -97,13 +97,19 @@ export class AuthService {
   // ────────────────────────────────────────────────────────────────────────────
 
   async recordFailedLogin(
-    phone: string,
+    phoneOrEmail: string,
     meta?: { ip?: string; userAgent?: string; failReason?: string },
   ): Promise<void> {
     try {
+      const identifier = String(phoneOrEmail || '').trim();
+      const cleanPhone = identifier.replace(/\D/g, '');
       const rows = await this.dataSource.query<{ id: string }[]>(
-        `SELECT id FROM users WHERE phone = $1 LIMIT 1`,
-        [phone],
+        `SELECT id FROM users 
+         WHERE phone = $1 
+            OR (LOWER(email) = LOWER($1) AND email IS NOT NULL AND email != '')
+            OR ($2 != '' AND phone = $2)
+         LIMIT 1`,
+        [identifier, cleanPhone],
       );
       if (rows[0]?.id) {
         await this.logLoginAttempt(rows[0].id, false, meta);
@@ -138,12 +144,19 @@ export class AuthService {
   // Credentials validation
   // ────────────────────────────────────────────────────────────────────────────
 
-  async validateUser(phone: string, password: string): Promise<UserRecord> {
+  async validateUser(phoneOrEmail: string, password: string): Promise<UserRecord> {
+    const identifier = String(phoneOrEmail || '').trim();
+    const cleanPhone = identifier.replace(/\D/g, '');
+
     const rows = await this.dataSource.query<UserRecord[]>(
       `SELECT id, phone, email, full_name, role, password_hash,
               is_active, branch_id, refresh_token_hash, active_session_id, last_login_at
-       FROM users WHERE phone = $1 LIMIT 1`,
-      [phone],
+       FROM users 
+       WHERE phone = $1 
+          OR (LOWER(email) = LOWER($1) AND email IS NOT NULL AND email != '')
+          OR ($2 != '' AND phone = $2)
+       LIMIT 1`,
+      [identifier, cleanPhone],
     );
     if (!rows.length)    throw new UnauthorizedException('Invalid credentials');
     const user = rows[0];

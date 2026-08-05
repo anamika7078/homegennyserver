@@ -4,6 +4,7 @@ import {
   BadRequestException,
   ForbiddenException,
   NotFoundException,
+  ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { MonitoringService } from '../monitoring/monitoring.service';
@@ -77,6 +78,38 @@ export class AdminService {
    * Returns either the created user or an approval record.
    */
   async createUser(data: any, requesterId: string) {
+    if (!data.fullName || !String(data.fullName).trim()) {
+      throw new BadRequestException('Full name is required');
+    }
+    if (!data.phone || !String(data.phone).trim()) {
+      throw new BadRequestException('Phone number is required');
+    }
+    if (!data.role) {
+      throw new BadRequestException('Role is required');
+    }
+
+    const cleanPhone = String(data.phone).trim();
+    const branchId = data.branchId && String(data.branchId).trim() !== '' ? String(data.branchId).trim() : null;
+    const email = data.email && String(data.email).trim() !== '' ? String(data.email).trim() : null;
+
+    // Check if phone already exists
+    const existingPhone = await this.prisma.user.findUnique({
+      where: { phone: cleanPhone },
+    });
+    if (existingPhone) {
+      throw new ConflictException(`User with phone ${cleanPhone} already exists.`);
+    }
+
+    // Check if email already exists
+    if (email) {
+      const existingEmail = await this.prisma.user.findUnique({
+        where: { email },
+      });
+      if (existingEmail) {
+        throw new ConflictException(`User with email ${email} already exists.`);
+      }
+    }
+
     if (data.role === 'ADMIN') {
       // Prevent self-approval: queue for a second Admin
       const approval = await this.prisma.adminApproval.create({
@@ -101,19 +134,26 @@ export class AdminService {
       ? await bcrypt.hash(String(data.password), 12)
       : await bcrypt.hash('HomeGenny@2024', 12);
 
-    const branchId = data.branchId && String(data.branchId).trim() !== '' ? String(data.branchId).trim() : null;
-    const email = data.email && String(data.email).trim() !== '' ? String(data.email).trim() : null;
-
-    return this.prisma.user.create({
-      data: {
-        fullName:     data.fullName,
-        phone:        data.phone,
-        email:        email,
-        role:         data.role,
-        branchId:     branchId,
-        passwordHash: hash,
-      },
-    });
+    try {
+      return await this.prisma.user.create({
+        data: {
+          fullName:     data.fullName.trim(),
+          phone:        cleanPhone,
+          email:        email,
+          role:         data.role,
+          branchId:     branchId,
+          passwordHash: hash,
+        },
+      });
+    } catch (error: any) {
+      if (error?.code === 'P2002') {
+        throw new ConflictException('A user with this phone or email already exists.');
+      }
+      if (error?.code === 'P2003') {
+        throw new BadRequestException('The specified Branch ID does not exist.');
+      }
+      throw error;
+    }
   }
 
   /**

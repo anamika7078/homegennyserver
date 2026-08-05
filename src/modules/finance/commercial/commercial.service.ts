@@ -366,15 +366,41 @@ export class CommercialService {
     };
   }
 
+  private buildEffectiveConfig(item: any, activeConfig: any = {}) {
+    return {
+      ...activeConfig,
+      ...item,
+      basic_wage: item.basic_wage !== undefined ? item.basic_wage : (item.basic !== undefined ? item.basic : activeConfig.basic_wage),
+      da: item.da !== undefined ? item.da : activeConfig.da,
+      hra: item.hra !== undefined ? item.hra : activeConfig.hra,
+      skilled_allowance: item.skilled_allowance !== undefined ? item.skilled_allowance : activeConfig.skilled_allowance,
+      additional_hours_pct: item.additional_hours_pct !== undefined ? item.additional_hours_pct : activeConfig.additional_hours_pct,
+      employer_pf_pct: item.employer_pf_pct !== undefined ? item.employer_pf_pct : activeConfig.employer_pf_pct,
+      employer_pf_max: item.employer_pf_max !== undefined ? item.employer_pf_max : activeConfig.employer_pf_max,
+      employee_pf_pct: item.employee_pf_pct !== undefined ? item.employee_pf_pct : activeConfig.employee_pf_pct,
+      employer_esic_pct: item.employer_esic_pct !== undefined ? item.employer_esic_pct : activeConfig.employer_esic_pct,
+      employee_esic_pct: item.employee_esic_pct !== undefined ? item.employee_esic_pct : activeConfig.employee_esic_pct,
+      bonus_pct: item.bonus_pct !== undefined ? item.bonus_pct : activeConfig.bonus_pct,
+      leave_days: item.leave_days !== undefined ? item.leave_days : activeConfig.leave_days,
+      lwf_max: item.lwf_amount !== undefined ? item.lwf_amount : (item.lwf_max !== undefined ? item.lwf_max : activeConfig.lwf_max),
+      uniform_allowance: item.uniform_allowance !== undefined ? item.uniform_allowance : activeConfig.uniform_allowance,
+      relieving_pct: item.relieving_pct !== undefined ? item.relieving_pct : activeConfig.relieving_pct,
+      management_pct: item.management_pct !== undefined ? item.management_pct : activeConfig.management_pct,
+      professional_tax: item.professional_tax !== undefined ? item.professional_tax : activeConfig.professional_tax,
+      gst_pct: item.gst_pct !== undefined ? item.gst_pct : activeConfig.gst_pct,
+    };
+  }
+
   async runCalculationOnTheFly(dto: { state: string; zone: string; items: CalculationItemDto[] }) {
     const results: any[] = [];
     for (const item of dto.items) {
-      const config = await this.getActiveWageConfig(dto.state, dto.zone, item.category);
+      const activeConfig = await this.getActiveWageConfig(dto.state, dto.zone, item.category).catch(() => ({}));
+      const config = this.buildEffectiveConfig(item, activeConfig);
       const calc = this.calculateFormulas(config, item.no_of_resources, item.working_hours);
       results.push({
         ...item,
         ...calc,
-        wage_config_id: config.id,
+        wage_config_id: activeConfig?.id || null,
       });
     }
     return results;
@@ -433,9 +459,10 @@ export class CommercialService {
       let totalGrandTotal = 0;
       let totalResources = 0;
 
-      // 2. Insert items and run formulas
+      // 2. Insert items and run formulas using EXACT user-submitted inputs
       for (const item of dto.items) {
-        const config = await this.getActiveWageConfig(dto.state, dto.zone, item.category);
+        const activeConfig = await this.getActiveWageConfig(dto.state, dto.zone, item.category).catch(() => ({}));
+        const config = this.buildEffectiveConfig(item, activeConfig);
         const calc = this.calculateFormulas(config, item.no_of_resources, item.working_hours);
 
         await queryRunner.query(
@@ -454,7 +481,7 @@ export class CommercialService {
             item.no_of_resources,
             item.working_hours,
             item.shift_type,
-            config.id,
+            activeConfig?.id || null,
             calc.basic,
             calc.da,
             calc.hra,
@@ -530,7 +557,23 @@ export class CommercialService {
       params.push(`%${search}%`);
     }
     sql += ` ORDER BY created_at DESC`;
-    return this.dataSource.query(sql, params);
+    const calcs = await this.dataSource.query(sql, params);
+
+    if (!calcs || !calcs.length) return [];
+
+    const ids = calcs.map((c: any) => c.id);
+    const items = await this.dataSource.query(
+      `SELECT * FROM finance_commercial_items WHERE calculation_id = ANY($1)`,
+      [ids]
+    );
+
+    return calcs.map((c: any) => {
+      const calcItems = items.filter((it: any) => it.calculation_id === c.id);
+      return {
+        ...c,
+        items: calcItems,
+      };
+    });
   }
 
   async getCalculation(id: string) {

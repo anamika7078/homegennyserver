@@ -16,16 +16,17 @@ export class AuthController {
   }
 
   @Post('login')
-  @ApiOperation({ summary: 'Login with phone + password. Returns access_token, refresh_token, user.' })
+  @ApiOperation({ summary: 'Login with phone or email + password. Returns access_token, refresh_token, user.' })
   async login(
-    @Body() body: { phone: string; password: string; totp?: string; remember_me?: boolean },
+    @Body() body: { phone?: string; email?: string; identifier?: string; password: string; totp?: string; remember_me?: boolean },
     @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> },
   ) {
+    const loginTarget = body.phone || body.email || body.identifier || '';
     try {
-      const user = await this.authService.validateUser(body.phone, body.password);
+      const user = await this.authService.validateUser(loginTarget, body.password);
       return this.authService.login(user, { ...this.clientMeta(req), totp: body.totp });
     } catch (e) {
-      await this.authService.recordFailedLogin(body.phone, {
+      await this.authService.recordFailedLogin(loginTarget, {
         ...this.clientMeta(req),
         failReason: 'INVALID_CREDENTIALS',
       });
