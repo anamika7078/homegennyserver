@@ -8,11 +8,15 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RbacModule } from '../rbac/rbac.module';
 import { PrismaModule } from '../../prisma/prisma.module';
+import { FinanceCustomerModule } from '../finance/customer/customer.module';
+import { EmployeesModule } from '../employees/employees.module';
 
 @Module({
   imports: [
     PrismaModule,
     RbacModule,
+    FinanceCustomerModule,
+    EmployeesModule,
     PassportModule.register({ defaultStrategy: 'jwt' }),
     // Must use registerAsync: JwtModule.register() ran before ConfigModule loaded .env → secret was undefined → login 500
     JwtModule.registerAsync({

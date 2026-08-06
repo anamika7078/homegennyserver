@@ -77,6 +77,8 @@ model User {
   assignedStaff      StaffApplicant[] @relation("AssignedRm")
   supportTickets     SupportTicket[]
   branch             Branch?          @relation(fields: [branchId], references: [id])
+  financeCustomer    FinanceCustomer?
+  employeeProfile    Employee?
 
   @@index([role])
   @@index([branchId])
@@ -979,6 +981,7 @@ model EmployeeCategory {
 
 model Employee {
   id               String               @id @default(uuid()) @db.Uuid
+  userId           String?              @unique @map("user_id") @db.Uuid
   employeeId       String               @unique @map("employee_id") @db.VarChar(50)
   fullName         String               @map("full_name") @db.VarChar(200)
   profilePhoto     String?              @map("profile_photo")
@@ -1012,6 +1015,7 @@ model Employee {
   payrolls         EmployeePayroll[]
   branch           Branch               @relation(fields: [branchId], references: [id])
   category         EmployeeCategory     @relation(fields: [categoryId], references: [id])
+  user             User?                @relation(fields: [userId], references: [id])
   salaryProfile    EmployeeSalaryProfile?
   salaryRevisions  SalaryRevision[]
   bonusRecords     BonusRecord[]
@@ -1085,6 +1089,7 @@ model EmployeePayroll {
 
 model FinanceCustomer {
   id                              String                            @id @default(uuid()) @db.Uuid
+  userId                          String?                           @unique @map("user_id") @db.Uuid
   customerName                    String                            @map("customer_name") @db.VarChar(255)
   address                         String
   panCard                         String                            @map("pan_card") @db.VarChar(20)
@@ -1097,6 +1102,7 @@ model FinanceCustomer {
   metadata                        Json                              @default("{}")
   createdAt                       DateTime                          @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt                       DateTime                          @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user                            User?                             @relation(fields: [userId], references: [id])
   finance_commercial_calculations finance_commercial_calculations[]
   finance_quotations              finance_quotations[]
   finance_rate_cards              finance_rate_cards[]

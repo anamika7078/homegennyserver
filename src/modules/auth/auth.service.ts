@@ -3,6 +3,7 @@ import {
   UnauthorizedException,
   BadRequestException,
   ForbiddenException,
+  ConflictException,
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -14,6 +15,10 @@ import { AuditService } from '../audit/audit.service';
 import { RbacService } from '../rbac/rbac.service';
 import { AuditAction } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { FinanceCustomerService } from '../finance/customer/customer.service';
+import { EmployeesService } from '../employees/employees.service';
+import { RegisterCustomerDto } from './dto/register-customer.dto';
+import { RegisterStaffDto } from './dto/register-staff.dto';
 import {
   generateOtp,
   generateTotpSecret,
@@ -23,6 +28,9 @@ import {
   isOtpExpired,
 } from './auth-otp.util';
 import { PORTAL_ADMIN_PHONE } from '../../database/seeds/portal-users.constants';
+
+/** bcrypt cost factor for self-serve (app) account passwords */
+const APP_PASSWORD_BCRYPT_ROUNDS = 12;
 
 /** Maximum admin session lifetime: 8 hours (in seconds) */
 const ADMIN_SESSION_MAX_SECONDS = 8 * 60 * 60;
@@ -90,7 +98,164 @@ export class AuthService {
     private readonly audit: AuditService,
     private readonly rbac: RbacService,
     private readonly prisma: PrismaService,
+    private readonly financeCustomer: FinanceCustomerService,
+    private readonly employees: EmployeesService,
   ) {}
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // App self-registration — Customer (CLIENT) and Staff (STAFF)
+  //
+  // Both paths write straight into the same tables the Admin Panel uses
+  // (finance_customers / employees) so the person shows up in Finance's
+  // customer list / HR's employee list immediately — no separate "app user"
+  // table. Each is linked back to `users` via the new nullable `user_id` FK.
+  // ────────────────────────────────────────────────────────────────────────────
+
+  private async assertPhoneAndEmailAvailable(phone: string, email?: string): Promise<void> {
+    const existing = await this.prisma.user.findFirst({
+      where: { OR: [{ phone }, ...(email ? [{ email }] : [])] },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new ConflictException('An account with this phone number or email already exists');
+    }
+  }
+
+  private toUserRecord(u: {
+    id: string;
+    phone: string;
+    email: string | null;
+    fullName: string;
+    role: string;
+    passwordHash: string | null;
+    isActive: boolean;
+    branchId: string | null;
+    refreshTokenHash: string | null;
+    activeSessionId: string | null;
+    lastLoginAt: Date | null;
+  }): UserRecord {
+    return {
+      id: u.id,
+      phone: u.phone,
+      email: u.email,
+      full_name: u.fullName,
+      role: u.role,
+      password_hash: u.passwordHash,
+      is_active: u.isActive,
+      branch_id: u.branchId,
+      refresh_token_hash: u.refreshTokenHash,
+      active_session_id: u.activeSessionId,
+      last_login_at: u.lastLoginAt ? u.lastLoginAt.toISOString() : null,
+    };
+  }
+
+  /**
+   * Public self-registration for a Customer. Creates the login account (role
+   * CLIENT) AND a linked `finance_customers` row in the same flow, so the
+   * customer appears in Finance's customer list right away. If the finance
+   * record fails to create (e.g. duplicate PAN), the just-created user is
+   * rolled back so we never leave an orphaned login with no business record.
+   */
+  async registerCustomer(
+    dto: RegisterCustomerDto,
+    meta?: { ip?: string; userAgent?: string },
+  ): Promise<LoginResponse | { requires_2fa: true; user_id: string } | TotpSetupRequired> {
+    await this.assertPhoneAndEmailAvailable(dto.phone, dto.email);
+    const passwordHash = await bcrypt.hash(dto.password, APP_PASSWORD_BCRYPT_ROUNDS);
+
+    const user = await this.prisma.user.create({
+      data: {
+        role:         'CLIENT',
+        fullName:     dto.full_name,
+        phone:        dto.phone,
+        email:        dto.email ?? null,
+        passwordHash,
+        isActive:     true,
+        metadata:     { registration_source: 'APP', phone_verified: false },
+      },
+    });
+
+    try {
+      const customer = await this.financeCustomer.createCustomer({
+        customer_name: dto.business_name?.trim() || dto.full_name,
+        address:       dto.address,
+        pan_card:      dto.pan_card,
+        gstn:          dto.gstn,
+        city:          dto.city,
+        state:         dto.state,
+        pincode:       dto.pincode,
+      });
+      await this.prisma.financeCustomer.update({
+        where: { id: customer.id },
+        data:  { userId: user.id },
+      });
+    } catch (err) {
+      await this.prisma.user.delete({ where: { id: user.id } }).catch(() => undefined);
+      throw err;
+    }
+
+    this.logger.log(`[AUTH] Registered CLIENT ${user.phone} — linked to finance_customers`);
+    return this.login(this.toUserRecord(user), meta);
+  }
+
+  /**
+   * Public self-registration for Staff. Creates the login account (role
+   * STAFF) AND a linked `employees` row with placeholder branch/category and
+   * status PENDING_HR_REVIEW — so the person shows up in HR's employee list
+   * immediately, flagged for HR to fill in branch/category/salary/designation.
+   * Rolled back the same way as registerCustomer if the employee row fails.
+   */
+  async registerStaff(
+    dto: RegisterStaffDto,
+    meta?: { ip?: string; userAgent?: string },
+  ): Promise<LoginResponse | { requires_2fa: true; user_id: string } | TotpSetupRequired> {
+    await this.assertPhoneAndEmailAvailable(dto.phone, dto.email);
+    const passwordHash = await bcrypt.hash(dto.password, APP_PASSWORD_BCRYPT_ROUNDS);
+
+    const user = await this.prisma.user.create({
+      data: {
+        role:         'STAFF',
+        fullName:     dto.full_name,
+        phone:        dto.phone,
+        email:        dto.email ?? null,
+        passwordHash,
+        isActive:     true,
+        metadata:     { registration_source: 'APP', phone_verified: false },
+      },
+    });
+
+    try {
+      const employee = await this.employees.create({
+        fullName:         dto.full_name,
+        mobile:           dto.phone,
+        alternateMobile:  dto.alternate_phone,
+        email:            dto.email,
+        dateOfBirth:      dto.date_of_birth,
+        gender:           dto.gender,
+        address:          dto.address,
+        city:             dto.city,
+        state:            dto.state,
+        pincode:          dto.pincode,
+        emergencyContact: {},
+        joiningDate:      new Date().toISOString(),
+        department:       'Not Assigned',
+        designation:      'Not Assigned',
+        employmentType:   'Not Assigned',
+        salary:           0,
+        status:           'PENDING_HR_REVIEW',
+      });
+      await this.prisma.employee.update({
+        where: { id: employee.id },
+        data:  { userId: user.id },
+      });
+    } catch (err) {
+      await this.prisma.user.delete({ where: { id: user.id } }).catch(() => undefined);
+      throw err;
+    }
+
+    this.logger.log(`[AUTH] Registered STAFF ${user.phone} — linked to employees (PENDING_HR_REVIEW)`);
+    return this.login(this.toUserRecord(user), meta);
+  }
 
   // ────────────────────────────────────────────────────────────────────────────
   // Login audit helpers
@@ -542,6 +707,18 @@ export class AuthService {
     if (!rows.length) throw new UnauthorizedException('User not found');
     const u = rows[0];
     const permissions = await this.rbac.getPermissionsForRole(u.role);
+
+    const [customer, employee] = await Promise.all([
+      this.prisma.financeCustomer.findUnique({
+        where:  { userId },
+        select: { id: true, unitCode: true, status: true },
+      }),
+      this.prisma.employee.findFirst({
+        where:  { userId },
+        select: { id: true, employeeId: true, status: true },
+      }),
+    ]);
+
     return {
       id:        u.id,
       full_name: u.full_name,
@@ -551,6 +728,12 @@ export class AuthService {
       is_active: u.is_active,
       branch_id: u.branch_id,
       permissions,
+      customer_profile: customer
+        ? { id: customer.id, unit_code: customer.unitCode, status: customer.status }
+        : null,
+      employee_profile: employee
+        ? { id: employee.id, employee_id: employee.employeeId, status: employee.status }
+        : null,
     };
   }
 }

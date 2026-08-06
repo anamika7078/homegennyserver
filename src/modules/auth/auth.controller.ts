@@ -1,7 +1,13 @@
 import { Controller, Post, Body, Request, UseGuards, Get, Req } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { RegisterCustomerDto } from './dto/register-customer.dto';
+import { RegisterStaffDto } from './dto/register-staff.dto';
+
+/** 5 attempts/min per IP on public, unauthenticated auth endpoints (register/login) */
+const AUTH_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
 
 @ApiTags('Auth')
 @Controller({ path: 'auth', version: '1' })
@@ -15,7 +21,41 @@ export class AuthController {
     };
   }
 
+  @Post('register/customer')
+  @UseGuards(ThrottlerGuard)
+  @Throttle(AUTH_THROTTLE)
+  @ApiOperation({
+    summary:
+      'Self-register as a Customer via the mobile app. Creates the login account AND a linked ' +
+      'finance_customers record in one step (appears in Finance’s customer list immediately). ' +
+      'Returns tokens — the app is logged in right after registering.',
+  })
+  registerCustomer(
+    @Body() dto: RegisterCustomerDto,
+    @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> },
+  ) {
+    return this.authService.registerCustomer(dto, this.clientMeta(req));
+  }
+
+  @Post('register/staff')
+  @UseGuards(ThrottlerGuard)
+  @Throttle(AUTH_THROTTLE)
+  @ApiOperation({
+    summary:
+      'Self-register as Staff via the mobile app. Creates the login account AND a linked ' +
+      'employees record (status PENDING_HR_REVIEW) in one step (appears in HR’s employee list ' +
+      'immediately, flagged for HR to complete branch/category/salary). Returns tokens.',
+  })
+  registerStaff(
+    @Body() dto: RegisterStaffDto,
+    @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> },
+  ) {
+    return this.authService.registerStaff(dto, this.clientMeta(req));
+  }
+
   @Post('login')
+  @UseGuards(ThrottlerGuard)
+  @Throttle(AUTH_THROTTLE)
   @ApiOperation({ summary: 'Login with phone or email + password. Returns access_token, refresh_token, user.' })
   async login(
     @Body() body: { phone?: string; email?: string; identifier?: string; password: string; totp?: string; remember_me?: boolean },
