@@ -5,6 +5,8 @@ import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RegisterCustomerDto } from './dto/register-customer.dto';
 import { RegisterStaffDto } from './dto/register-staff.dto';
+import { Public } from './decorators/public.decorator';
+import { AnyAuthenticatedRole } from './decorators/roles.decorator';
 
 /** 5 attempts/min per IP on public, unauthenticated auth endpoints (register/login) */
 const AUTH_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
@@ -21,7 +23,13 @@ export class AuthController {
     };
   }
 
+  // ── SPEC CONFLICT (flagged, not resolved here — Phase 1 is auth/authz only) ──
+  // HomeGenny Platform v1.0 — User Roles & Permissions Reference states Staff do
+  // NOT self-register (RM-created) and Clients are RM-created at placement setup.
+  // These two endpoints contradict that. Left public and unchanged per instruction
+  // not to silently remove them; needs a product decision before Phase 2+.
   @Post('register/customer')
+  @Public()
   @UseGuards(ThrottlerGuard)
   @Throttle(AUTH_THROTTLE)
   @ApiOperation({
@@ -38,6 +46,7 @@ export class AuthController {
   }
 
   @Post('register/staff')
+  @Public()
   @UseGuards(ThrottlerGuard)
   @Throttle(AUTH_THROTTLE)
   @ApiOperation({
@@ -54,6 +63,7 @@ export class AuthController {
   }
 
   @Post('login')
+  @Public()
   @UseGuards(ThrottlerGuard)
   @Throttle(AUTH_THROTTLE)
   @ApiOperation({ summary: 'Login with phone or email + password. Returns access_token, refresh_token, user.' })
@@ -75,24 +85,28 @@ export class AuthController {
   }
 
   @Post('forgot-password')
+  @Public()
   @ApiOperation({ summary: 'Send password reset OTP to registered phone' })
   forgotPassword(@Body() body: { phone: string }) {
     return this.authService.forgotPassword(body.phone);
   }
 
   @Post('verify-otp')
+  @Public()
   @ApiOperation({ summary: 'Verify password reset OTP' })
   verifyOtp(@Body() body: { phone: string; otp: string }) {
     return this.authService.verifyOtp(body.phone, body.otp);
   }
 
   @Post('reset-password')
+  @Public()
   @ApiOperation({ summary: 'Reset password with verified OTP' })
   resetPassword(@Body() body: { phone: string; otp: string; new_password: string }) {
     return this.authService.resetPassword(body.phone, body.otp, body.new_password);
   }
 
   @Post('2fa/reset-setup')
+  @Public()
   @ApiOperation({ summary: 'Admin: generate a new TOTP secret during login setup (phone + password)' })
   async reset2faSetup(
     @Body() body: { phone: string; password: string },
@@ -112,6 +126,7 @@ export class AuthController {
   @Post('2fa/setup')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @AnyAuthenticatedRole()
   @ApiOperation({ summary: 'Generate TOTP secret for 2FA enrollment' })
   setup2fa(@Request() req: { user: { id: string } }) {
     return this.authService.setup2fa(req.user.id);
@@ -120,6 +135,7 @@ export class AuthController {
   @Post('2fa/confirm')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @AnyAuthenticatedRole()
   @ApiOperation({ summary: 'Confirm 2FA with authenticator code' })
   confirm2fa(@Request() req: { user: { id: string } }, @Body() body: { code: string }) {
     return this.authService.confirm2fa(req.user.id, body.code);
@@ -128,12 +144,14 @@ export class AuthController {
   @Post('logout-all')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @AnyAuthenticatedRole()
   @ApiOperation({ summary: 'Invalidate refresh tokens on all devices' })
   logoutAll(@Request() req: { user: { id: string } }) {
     return this.authService.logoutAllDevices(req.user.id);
   }
 
   @Post('refresh')
+  @Public()
   @ApiOperation({ summary: 'Refresh access token using userId + refresh_token' })
   async refresh(@Body() body: { userId: string; refresh_token: string }) {
     return this.authService.refreshTokens(body.userId, body.refresh_token);
@@ -142,6 +160,7 @@ export class AuthController {
   @Post('logout')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @AnyAuthenticatedRole()
   async logout(@Request() req: any) {
     await this.authService.logout(req.user.id);
     return { success: true };
@@ -150,6 +169,7 @@ export class AuthController {
   @Get('me')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @AnyAuthenticatedRole()
   @ApiOperation({ summary: 'Get full user record from DB (includes full_name, email, branch_id)' })
   async getMe(@Request() req: any) {
     // FIX 2: call service.getMe(id) to get full record from DB

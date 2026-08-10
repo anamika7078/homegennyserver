@@ -1,12 +1,20 @@
 import { Controller, Get, Post, Patch, Param, Body, Query, UseGuards, Req, ForbiddenException } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { StaffService } from './staff.service';
 import { resolveStaffScope, AuthUser } from '../../common/guards/branch-scope.util';
 
+// RM-facing staff applicant CRUD (create/list/update pipeline records) — not the
+// same as the STAFF role's own mobile-app onboarding view. Spec: RM operates the
+// pipeline directly, BM has branch oversight, Admin platform-wide. Finance must
+// not access pipeline/staff records; confirmed live in the audit (GET /staff
+// returned 200 for a FINANCE token before this fix).
 @ApiTags('Staff Onboarding')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN)
 @Controller({ path: 'staff', version: '1' })
 export class StaffController {
   constructor(private readonly service: StaffService) {}
@@ -64,9 +72,17 @@ export class StaffController {
     @Body() body: Record<string, unknown>,
     @Req() req: { user: AuthUser },
   ) {
-    if (req.user.role === 'RM' && body.pipeline_stage) {
+    // FSM-owned fields must never be settable via this generic PATCH, for any
+    // role — they must only change through POST /pipeline/:staffId/advance,
+    // which validates transition legality, business/deployment gates, and
+    // persists scenario routing atomically. This previously only blocked RM
+    // specifically, leaving BM/Admin able to PATCH pipeline_stage directly
+    // and skip every FSM/business check entirely.
+    const fsmOwnedFields = ['pipeline_stage', 'current_scenario_code', 'terminal_outcome'];
+    const attempted = fsmOwnedFields.filter((f) => body[f] !== undefined);
+    if (attempted.length) {
       throw new ForbiddenException(
-        'RM cannot bypass FSM — use POST /rm/pipeline/:staffId/advance',
+        `${attempted.join(', ')} cannot be changed via PATCH /staff/:id — use POST /pipeline/:staffId/advance`,
       );
     }
     return this.service.update(id, body, req.user.id);

@@ -1,203 +1,161 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Assessment } from './entities/assessment.entity';
-import { AssessmentAuditLog } from './entities/assessment-audit-log.entity';
 import { PrismaService } from '../../prisma/prisma.service';
+import { AuditService } from '../audit/audit.service';
+import { AuditAction, AssessmentResult } from '@prisma/client';
 
 const MAX_PRACTICAL_ATTEMPTS = 3;
-const DRIVER_SERIES_TYPE = 'DRIVER';
-const TERMINAL_OUTCOME_DR09 = 'DR-09';
+export const DRIVER_PRACTICAL_ASSESSMENT_TYPE = 'DRIVER_PRACTICAL';
+const TERMINAL_SCENARIO_DR09 = 'DR-09';
 
+/**
+ * NOTE (Phase 3 fix): this service previously used a TypeORM entity
+ * (`./entities/assessment.entity.ts`, table `assessments`) whose columns
+ * (`candidate_id`, `assessment_type`, `series`, `scenario_code`, `score`,
+ * `updated_at`) do not exist on the live `assessments` table — the table was
+ * actually created by Prisma's schema (`staff_id`, `skill_scores` jsonb,
+ * `overreach_flags` jsonb, `approved_at`, `result` enum). Every call here
+ * would have failed with a Postgres "column does not exist" error; the
+ * referenced `assessment_audit_logs` table didn't exist in the database at
+ * all. This rewrite targets the real schema via Prisma and reuses the app's
+ * actual audit trail (AuditService/AuditLog) instead of the missing table.
+ * "Assessment type" (e.g. the DR practical test) has no dedicated column in
+ * the live schema, so it's stored as `skillScores.assessmentType` — the
+ * `skillScores` JSON field already exists for exactly this kind of flexible,
+ * per-assessment data.
+ */
 @Injectable()
 export class AssessmentsService {
   constructor(
-    @InjectRepository(Assessment)
-    private readonly assessmentRepo: Repository<Assessment>,
-    @InjectRepository(AssessmentAuditLog)
-    private readonly auditRepo: Repository<AssessmentAuditLog>,
     private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
   ) {}
 
   async findAll() {
-    return this.assessmentRepo.find();
+    return this.prisma.assessment.findMany({ orderBy: { createdAt: 'desc' } });
   }
 
   async findOne(id: string) {
-    const assessment = await this.assessmentRepo.findOne({ where: { id } });
+    const assessment = await this.prisma.assessment.findUnique({ where: { id } });
     if (!assessment) throw new NotFoundException('Assessment not found');
     return assessment;
   }
 
-  async create(data: any) {
-    try {
-      if (data.candidate_id) {
-        let applicant = await this.prisma.staffApplicant.findFirst({
-          where: {
-            OR: [
-              { id: data.candidate_id },
-              { staffCode: { equals: data.candidate_id, mode: 'insensitive' } },
-              { fullName: { contains: data.candidate_id, mode: 'insensitive' } },
-            ],
-          },
-        });
-        if (!applicant) {
-          const emp = await this.prisma.employee.findFirst({
-            where: {
-              OR: [
-                { id: data.candidate_id },
-                { employeeId: { equals: data.candidate_id, mode: 'insensitive' } },
-                { fullName: { contains: data.candidate_id, mode: 'insensitive' } },
-              ],
-            },
-          });
-          if (emp) {
-            applicant = await this.prisma.staffApplicant.findFirst({
-              where: { OR: [{ mobile: emp.mobile }, { staffCode: emp.employeeId }] },
-            });
-            if (!applicant) {
-              applicant = await this.prisma.staffApplicant.create({
-                data: {
-                  id: emp.id,
-                  staffCode: emp.employeeId,
-                  fullName: emp.fullName,
-                  mobile: emp.mobile,
-                  dateOfBirth: emp.dateOfBirth ?? '1995-01-01',
-                  address: emp.address ?? 'Delhi',
-                  series: 'DRIVER',
-                  branchId: emp.branchId || null,
-                  pipelineStage: 'S1_INTAKE',
-                  languageTier: 'T1' as any,
-                  pvStatus: 'CLEAR',
-                },
-              }).catch(async () => {
-                return await this.prisma.staffApplicant.create({
-                  data: {
-                    staffCode: emp.employeeId,
-                    fullName: emp.fullName,
-                    mobile: emp.mobile,
-                    dateOfBirth: emp.dateOfBirth ?? '1995-01-01',
-                    address: emp.address ?? 'Delhi',
-                    series: 'DRIVER',
-                    branchId: emp.branchId || null,
-                    pipelineStage: 'S1_INTAKE',
-                    languageTier: 'T1' as any,
-                    pvStatus: 'CLEAR',
-                  },
-                });
-              });
-            }
-          }
-        }
-        if (!applicant) {
-          throw new BadRequestException(`Candidate not found matching ID/Name: ${data.candidate_id}`);
-        }
-        data.candidate_id = applicant.id;
-      }
-
-    let attemptCount = 0;
-    if (data.candidate_id && data.assessment_type) {
-      attemptCount = await this.assessmentRepo.count({
-        where: {
-          candidate_id: data.candidate_id,
-          assessment_type: data.assessment_type,
-        },
-      });
-      
-      // Enforce 3-attempt limit before creating a new attempt for DRIVER
-      if (data.assessment_type === DRIVER_SERIES_TYPE && attemptCount >= MAX_PRACTICAL_ATTEMPTS) {
-        throw new BadRequestException(
-          `DR series practical test limit of ${MAX_PRACTICAL_ATTEMPTS} attempts reached. Candidate must be terminated (${TERMINAL_OUTCOME_DR09}).`,
-        );
-      }
-    }
-
-    data.attempt_number = attemptCount + 1;
-
-    if (!data.assessor_id || data.assessor_id === 'system') {
-      data.assessor_id = null;
-    }
-
-    const assessment = this.assessmentRepo.create(data as Partial<Assessment>);
-    const saved = await this.assessmentRepo.save(assessment);
-    await this.auditRepo.save({
-      assessment_id: saved.id,
-      actor_id: data.assessor_id,
-      action: 'CREATED',
-      payload: data,
+  private async resolveStaff(candidateRef: string) {
+    const applicant = await this.prisma.staffApplicant.findFirst({
+      where: {
+        OR: [
+          { id: candidateRef },
+          { staffCode: { equals: candidateRef, mode: 'insensitive' } },
+        ],
+      },
     });
-    return saved;
-    } catch (err) {
-      console.error('Error creating assessment:', err);
-      throw new BadRequestException(err instanceof Error ? err.message : String(err));
-    }
+    if (!applicant) throw new BadRequestException(`Staff applicant not found: ${candidateRef}`);
+    return applicant;
   }
 
-  async update(id: string, data: any) {
-    await this.assessmentRepo.update(id, data);
-    const updated = await this.findOne(id);
-    await this.auditRepo.save({
-      assessment_id: id,
-      actor_id: data.assessor_id || 'system',
-      action: 'UPDATED',
-      payload: data,
-    });
-    return updated;
+  /** Attempts already recorded for this staff + assessment type. */
+  private async countAttempts(staffId: string, assessmentType: string): Promise<number> {
+    const existing = await this.prisma.assessment.findMany({ where: { staffId } });
+    return existing.filter((a) => (a.skillScores as Record<string, unknown> | null)?.assessmentType === assessmentType).length;
   }
 
-  async submit(data: any) {
-    const { id, score, result, remarks, scenario_code } = data;
+  async create(data: Record<string, unknown>) {
+    const candidateRef = String(data.staff_id ?? data.candidate_id ?? '');
+    if (!candidateRef) throw new BadRequestException('staff_id is required');
+    const applicant = await this.resolveStaff(candidateRef);
+
+    const assessmentType = String(data.assessment_type ?? 'GENERAL').toUpperCase();
+    const attemptCount = await this.countAttempts(applicant.id, assessmentType);
+
+    // Enforce the 3-attempt limit BEFORE creating a new attempt for the DR
+    // practical test — this is the actual server-side enforcement the audit
+    // required; the button-hiding alone was never a control.
+    if (assessmentType === DRIVER_PRACTICAL_ASSESSMENT_TYPE && attemptCount >= MAX_PRACTICAL_ATTEMPTS) {
+      throw new BadRequestException(
+        `DR series practical test limit of ${MAX_PRACTICAL_ATTEMPTS} attempts reached. Candidate must be terminated (${TERMINAL_SCENARIO_DR09}).`,
+      );
+    }
+
+    const assessorId = data.assessor_id && data.assessor_id !== 'system' ? String(data.assessor_id) : null;
+    const skillScoresInput = (data.skill_scores as Record<string, unknown>) ?? {};
+
+    const created = await this.prisma.assessment.create({
+      data: {
+        staffId: applicant.id,
+        assessorId,
+        attemptNumber: attemptCount + 1,
+        skillScores: { ...skillScoresInput, assessmentType },
+        status: 'PENDING',
+        remarks: data.remarks ? String(data.remarks) : null,
+      },
+    });
+
+    await this.audit.log({
+      actorId: assessorId ?? undefined,
+      action: AuditAction.STAGE_TRANSITION,
+      entityType: 'assessment',
+      entityId: created.id,
+      metadata: { staffId: applicant.id, assessmentType, attemptNumber: created.attemptNumber },
+    });
+
+    return created;
+  }
+
+  async update(id: string, data: Record<string, unknown>) {
+    await this.findOne(id);
+    const patch: Record<string, unknown> = {};
+    if (data.status) patch.status = String(data.status);
+    if (data.remarks !== undefined) patch.remarks = data.remarks ? String(data.remarks) : null;
+    if (data.assessor_id) patch.assessorId = String(data.assessor_id);
+    return this.prisma.assessment.update({ where: { id }, data: patch });
+  }
+
+  async submit(data: { id: string; score?: number; result: AssessmentResult; remarks?: string }) {
+    const { id, score, result, remarks } = data;
     const assessment = await this.findOne(id);
 
-    assessment.score = score;
-    assessment.result = result;
-    assessment.remarks = remarks;
-    if (scenario_code) assessment.scenario_code = scenario_code;
-    assessment.status = 'COMPLETED';
-
-    const saved = await this.assessmentRepo.save(assessment);
-
-    await this.auditRepo.save({
-      assessment_id: id,
-      actor_id: assessment.assessor_id,
-      action: 'SUBMITTED',
-      payload: { score, result, remarks, scenario_code },
+    const skillScores = { ...(assessment.skillScores as Record<string, unknown> | null), score };
+    const updated = await this.prisma.assessment.update({
+      where: { id },
+      data: { skillScores, result, remarks: remarks ?? assessment.remarks, status: 'COMPLETED' },
     });
 
-    // ── Pillar 2: 3-attempt hard limit for DR series ────────────────────────
-    if (assessment.assessment_type === DRIVER_SERIES_TYPE && result === 'FAIL' && assessment.candidate_id) {
-      const totalFails = await this.assessmentRepo.count({
-        where: {
-          candidate_id: assessment.candidate_id,
-          assessment_type: DRIVER_SERIES_TYPE,
-          result: 'FAIL',
-        },
-      });
+    await this.audit.log({
+      actorId: assessment.assessorId ?? undefined,
+      action: AuditAction.STAGE_TRANSITION,
+      entityType: 'assessment',
+      entityId: id,
+      metadata: { score, result },
+    });
+
+    // ── Pillar 2: 3-attempt hard limit for DR practical test ────────────────
+    const assessmentType = (assessment.skillScores as Record<string, unknown> | null)?.assessmentType;
+    if (assessmentType === DRIVER_PRACTICAL_ASSESSMENT_TYPE && result === 'FAIL') {
+      const all = await this.prisma.assessment.findMany({ where: { staffId: assessment.staffId } });
+      const totalFails = all.filter(
+        (a) => (a.skillScores as Record<string, unknown> | null)?.assessmentType === DRIVER_PRACTICAL_ASSESSMENT_TYPE
+          && a.result === 'FAIL',
+      ).length;
 
       if (totalFails >= MAX_PRACTICAL_ATTEMPTS) {
-        // Auto-terminate: move staff to TERMINAL with DR-09 scenario code
         await this.prisma.staffApplicant.update({
-          where: { id: assessment.candidate_id },
+          where: { id: assessment.staffId },
           data: {
             pipelineStage: 'TERMINAL',
             terminalOutcome: 'DENIED',
-            currentScenarioCode: TERMINAL_OUTCOME_DR09,
+            currentScenarioCode: TERMINAL_SCENARIO_DR09,
           },
-        }).catch(async () => {
-          await this.prisma.employee.update({
-            where: { id: assessment.candidate_id },
-            data: { status: 'Inactive' },
-          }).catch(() => {});
         });
 
         await this.prisma.pipelineEvent.create({
           data: {
-            staffId: assessment.candidate_id,
+            staffId: assessment.staffId,
             eventType: 'AUTO_TERMINAL',
             fromStage: 'S2_5_ASSESS',
             toStage: 'TERMINAL',
-            actorId: assessment.assessor_id,
-            reasonCode: TERMINAL_OUTCOME_DR09,
+            actorId: assessment.assessorId,
+            scenarioCode: TERMINAL_SCENARIO_DR09,
+            reasonCode: TERMINAL_SCENARIO_DR09,
             payload: {
               reason: 'Exceeded maximum 3 practical test attempts',
               fail_count: totalFails,
@@ -207,7 +165,7 @@ export class AssessmentsService {
         });
 
         return {
-          ...saved,
+          ...updated,
           autoTerminated: true,
           terminalOutcome: 'DENIED',
           message: `Staff auto-terminated after ${MAX_PRACTICAL_ATTEMPTS} failed DR practical tests.`,
@@ -215,6 +173,6 @@ export class AssessmentsService {
       }
     }
 
-    return saved;
+    return updated;
   }
 }

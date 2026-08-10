@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -6,6 +7,8 @@ import { BullModule } from '@nestjs/bull';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { EventEmitterModule } from '@nestjs/event-emitter';
+import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
+import { RolesGuard } from './modules/auth/guards/roles.guard';
 
 // Core Modules
 import { AuthModule } from './modules/auth/auth.module';
@@ -59,6 +62,10 @@ import { PrivacyModule } from './modules/privacy/privacy.module';
 import { QueuesModule } from './modules/queues/queues.module';
 import { ComplianceModule } from './modules/compliance/compliance.module';
 import { SystemHealthModule } from './modules/system-health/system-health.module';
+import { SowModule } from './modules/sow/sow.module';
+import { IndemnityModule } from './modules/indemnity/indemnity.module';
+import { RightToRefuseModule } from './modules/right-to-refuse/right-to-refuse.module';
+import { IncidentsModule } from './modules/incidents/incidents.module';
 import { RmPortalModule } from './modules/rm-portal/rm-portal.module';
 
 import databaseConfig from './config/database.config';
@@ -155,7 +162,19 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     ComplianceModule,
     SystemHealthModule,
     RmPortalModule,
+    SowModule,
+    IndemnityModule,
+    RightToRefuseModule,
+    IncidentsModule,
   ],
   controllers: [AppController],
+  providers: [
+    // Order matters: JwtAuthGuard runs first (populates req.user), then RolesGuard
+    // reads req.user.role. Applied globally so every endpoint requires a declared
+    // authorization policy (@Public / @AnyAuthenticatedRole / @Roles) by default —
+    // see RolesGuard for the fail-closed rationale.
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: RolesGuard },
+  ],
 })
 export class AppModule {}

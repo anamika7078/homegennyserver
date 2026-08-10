@@ -5,9 +5,9 @@
   "scripts": {
     "prebuild": "npx prisma generate && npx prisma db push --accept-data-loss",
     "build": "nest build",
-    "start": "npx prisma db push --accept-data-loss && node dist/main",
+    "start": "npx prisma db push --accept-data-loss && node scratch/apply_security_triggers.js && node dist/main",
     "start:dev": "nest start --watch",
-    "start:prod": "npx prisma db push --accept-data-loss && node dist/main",
+    "start:prod": "npx prisma db push --accept-data-loss && node scratch/apply_security_triggers.js && node dist/main",
     "test": "jest",
     "test:cov": "jest --coverage",
     "migration:run": "typeorm-ts-node-esm -d src/database/data-source.ts migration:run",
@@ -15,13 +15,14 @@
     "migration:show": "typeorm-ts-node-esm -d src/database/data-source.ts migration:show",
     "seed:run": "ts-node src/database/seeds/admin.seed.ts",
     "seed:users": "node scratch/seed_users_now.js",
+    "db:apply-triggers": "node scratch/apply_security_triggers.js",
     "prisma:generate": "prisma generate",
     "prisma:fix": "npx prisma migrate resolve --rolled-back 20260518000000_enterprise_extensions || true; npx prisma migrate resolve --rolled-back 20260528000000_admin_security_triggers || true; npx prisma migrate resolve --rolled-back 20260710112100_add_employee_tables || true",
     "prisma:migrate": "npm run prisma:fix; npx prisma db push --accept-data-loss",
     "prisma:seed": "ts-node prisma/seed.ts",
     "seed:demo": "ts-node scratch/seed_demo_data.ts",
     "prisma:studio": "prisma studio",
-    "render:start": "node scratch/render_pre_migrate.js && npx prisma db push --accept-data-loss && node scratch/seed_users_now.js && node dist/main"
+    "render:start": "node scratch/render_pre_migrate.js && npx prisma db push --accept-data-loss && node scratch/apply_security_triggers.js && node scratch/seed_users_now.js && node dist/main"
   },
   "dependencies": {
     "@google-cloud/logging": "^11.0.0",

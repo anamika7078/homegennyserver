@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { Prisma, PipelineStage } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
@@ -15,7 +15,30 @@ export class StaffService {
 
   async create(data: Record<string, unknown>, actorId?: string) {
     const input = parseCreateStaffBody(data);
-    
+
+    // Restricted-list check — "always first, before any other action" per
+    // spec. Previously this check only existed as an advisory endpoint
+    // (POST /staff/check-restricted) the caller could simply not call, or as
+    // a branch inside the standalone scenario router that advanceStage()
+    // never invoked — neither actually blocked anything. This is intake, so
+    // aadhaar usually isn't collected yet (that's S2_VERIFY); phone is
+    // always available and is checked. Aadhaar is also checked when supplied.
+    const aadhaarNumber = data.aadhaar_number ? String(data.aadhaar_number) : '';
+    if (input.mobile) {
+      const hit = await this.checkRestrictedList(aadhaarNumber, input.mobile);
+      if (hit.found) {
+        await this.audit.log({
+          actorId,
+          action: AuditAction.RESTRICTED_LIST,
+          entityType: 'staff_applicant_intake',
+          metadata: { phone: input.mobile, reason: hit.reason, blocked: 'intake' },
+        });
+        throw new ForbiddenException(
+          `Intake blocked — this applicant matches the restricted list (${hit.reason ?? 'reason withheld'}).`,
+        );
+      }
+    }
+
     if (!data.staff_code) {
       const firstName = input.fullName
         ? input.fullName.split(' ')[0].toLowerCase().replace(/[^a-z0-9]/g, '')

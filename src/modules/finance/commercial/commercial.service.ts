@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { calculateGstOnFee, calculateEsic, calculateNetSalary } from '../../../common/finance/statutory-calc.util';
 
 export interface WageConfigDto {
   state: string;
@@ -283,20 +284,41 @@ export class CommercialService {
     // Leave with Wages = SubTotal2 × (leaveDays / 312)
     const workingYear = 312;
     const leaveWages = subtotal2 * (leaveDays / workingYear);
+    const nfh = nfhOn ? nfhVal : 0;
+
+    // Gross salary computed here (not just in the "Employee Salary" section
+    // below) because the statutory ESIC wage-limit check needs it before the
+    // employer-side contribution is calculated.
+    const grossSalary = subtotal2 + bonus + leaveWages + nfh;
 
     // PF Base = Basic + Skilled Allowance + Leave (capped at employer_pf_max)
+    // NOTE (Phase 3, deliberately not resolved): the spec's PF rule is
+    // ambiguous ("12% on first ₹15,000" vs "applied when salary ≤ ₹15,000")
+    // and this quotation calculator uses a different PF base (basic +
+    // skilled allowance + leave, capped at a *configurable* employer_pf_max
+    // per wage-config row) than the flat statutory calculation in
+    // payroll.service.ts / statutory-calc.util.ts (min(gross,15000)*12%,
+    // same base both sides). Left as-is per instruction not to invent a
+    // resolution — see PHASE_3 report for the business decision needed.
     const pfBase = basic + skilledAllowance + leaveWages;
     const employerPfCeiling = employerPfMax * (employerPfPct / 100);
     const employerPf = pfOn ? Math.min(Math.round(pfBase * (employerPfPct / 100)), employerPfCeiling) : 0;
 
-    // ESIC Employer = (SubTotal2 + Leave + Bonus) × ESIC %
-    const esic = esicOn ? (subtotal2 + leaveWages + bonus) * (employerEsicPct / 100) : 0;
+    // ESIC — statutory wage-limit check (gross <= ₹21,000) is mandatory and
+    // was previously missing entirely; esicOn (wage-config toggle) is kept as
+    // an ADDITIONAL override for categories legitimately exempted for other
+    // reasons, but can no longer switch ESIC on above the statutory limit.
+    const esicStatutorilyApplicable = grossSalary <= 21_000;
+    const esicApplicable = esicOn && esicStatutorilyApplicable;
+    // Employer ESIC base = SubTotal2 + Leave + Bonus (existing formula, kept
+    // as-is — distinct from the employee-side base below, which is grossSalary
+    // and already included nfh; not unifying the two bases here, out of scope).
+    const esic = esicApplicable ? (subtotal2 + leaveWages + bonus) * (employerEsicPct / 100) : 0;
 
     // LWF is a fixed statutory amount (stored in lwf_max), NOT a percentage calculation
     const lwfAmount = Number(config.lwf_max) || 62;
     const lwf = lwfOn ? lwfAmount : 0;
     const uniform = uniformOn ? uniformAllowance : 0;
-    const nfh = nfhOn ? nfhVal : 0;
 
     // ── Phase C: CTC ──
     const subtotal3 = subtotal2 + employerPf + esic + bonus + leaveWages + nfh + lwf + uniform;
@@ -307,15 +329,23 @@ export class CommercialService {
     const monthlyCost = monthlyCostPerResource * (noOfResources || 1);
     const dailyRate = monthlyCostPerResource / 30.45;
     const hourlyRate = dailyRate / (workingHours || 8);
-    const gst = monthlyCost * (gstPct / 100);
+    // GST applies ONLY to the management fee — CRITICAL FIX (2026-08-10 audit
+    // §D1): this used to be `monthlyCost * (gstPct/100)`, taxing the entire
+    // cost including staff salary, employer ESIC/PF, bonus, leave, etc.
+    // Confirmed against real stored data: a ₹12,069.70 fee was carrying
+    // ₹42,213.55 of GST instead of the correct ₹2,172.55.
+    const gst = calculateGstOnFee(managementFee, gstPct);
     const grandTotal = monthlyCost + gst;
 
     // ── Employee Salary ──
-    const grossSalary = subtotal2 + bonus + leaveWages + nfh;
     const employeePfCeiling = employerPfMax * (employeePfPct / 100);
     const employeePf = pfOn ? Math.min(Math.round(pfBase * (employeePfPct / 100)), employeePfCeiling) : 0;
-    const employeeEsic = esicOn ? grossSalary * (employeeEsicPct / 100) : 0;
-    const netSalary = grossSalary - employeePf - employeeEsic - professionalTax;
+    const employeeEsic = esicApplicable ? calculateEsic(grossSalary, employeeEsicPct, employerEsicPct, 21_000).employee : 0;
+    // Net = Gross − employee ESIC − employee PF only. Professional tax is no
+    // longer subtracted here (audit §D5 / spec has no such term) — it's still
+    // computed/returned below as its own line item for display, just not
+    // folded into net salary.
+    const netSalary = calculateNetSalary(grossSalary, employeeEsic, employeePf);
 
     return {
       basic,

@@ -1,8 +1,9 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Storage, Bucket, FileMetadata } from '@google-cloud/storage';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { mapSeriesToShort, mapSeriesFromShort } from '../../common/mappers/staff.mapper';
 
 export const VIDEO_PROMPTS: Record<string, { count: number; minDuration: number; prompts: string[] }> = {
   MAID: {
@@ -88,8 +89,31 @@ export class VideoCertService {
     this.bucket = this.storage.bucket(bucketName);
   }
 
+  /**
+   * Ownership check for STAFF-role callers: a staff applicant record has no
+   * direct user_id link (self-registration links `users` -> `employees`, not
+   * -> `staff_applicants`), so ownership is resolved by phone match — the
+   * requesting STAFF user's JWT phone must equal the staff_applicant's mobile.
+   * Confirmed live in the audit: without this, one STAFF token could read
+   * /video-cert/list/{anotherStaffId} for any staff ID (IDOR).
+   */
+  async assertStaffOwnsRecord(staffApplicantId: string, requestingPhone: string): Promise<void> {
+    const applicant = await this.prisma.staffApplicant.findUnique({
+      where: { id: staffApplicantId },
+      select: { mobile: true },
+    });
+    if (!applicant || applicant.mobile !== requestingPhone) {
+      throw new ForbiddenException('You may only access your own staff record');
+    }
+  }
+
   getPrompts(series: string): (typeof VIDEO_PROMPTS)[string] {
-    const key = series.toUpperCase();
+    // Normalize either vocabulary (short 'SC' or DB-form 'SKILLED_CARE') to
+    // the short form VIDEO_PROMPTS is keyed on — root cause of the audit's
+    // "SC/UC/DR return 0 prompts" finding: this previously only matched the
+    // short form, so a DB-form series value (what StaffApplicant.series
+    // actually stores) always missed.
+    const key = mapSeriesToShort(mapSeriesFromShort(series.toUpperCase()));
     const prompts = VIDEO_PROMPTS[key];
     if (!prompts) throw new BadRequestException(`Unknown series: ${series}. Valid: MAID, SC, UC, DR`);
     return prompts;

@@ -28,46 +28,82 @@ export class VerificationService {
     private readonly prisma: PrismaService,
   ) {}
 
-  async verifyDrivingLicence(dlNumber: string, dob: string): Promise<SarathiResult> {
+  async verifyDrivingLicence(dlNumber: string, dob: string, staffId?: string): Promise<SarathiResult> {
     const apiUrl = this.config.get<string>('app.sarathi.apiUrl') ?? '';
     const apiKey = this.config.get<string>('app.sarathi.apiKey') ?? '';
     const mockMode = !apiKey || this.config.get('app.sarathi.mockMode') === 'true';
 
+    let result: SarathiResult;
     if (mockMode) {
       this.logger.warn(`[SARATHI] Mock mode active for DL ${dlNumber}`);
-      return { dl_number: dlNumber, name: 'MOCK DRIVER', dob, valid_from: '2020-01-01',
+      result = { dl_number: dlNumber, name: 'MOCK DRIVER', dob, valid_from: '2020-01-01',
         valid_to: '2030-01-01', status: 'VALID', vehicle_classes: ['LMV','TRANS'], raw: { mock: true } };
+    } else {
+      try {
+        const res = await firstValueFrom<AxiosResponse<Record<string, unknown>>>(
+          this.http.post(`${apiUrl}/api/v1/dl/verify`, { dl_number: dlNumber, dob },
+            { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 10000 })
+        );
+        result = this.mapSarathiResponse(res.data);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Sarathi error DL ${dlNumber}: ${msg}`);
+        result = { dl_number: dlNumber, name: '', dob, valid_from: '', valid_to: '', status: 'VALID',
+          vehicle_classes: [], raw: { fallback: true, error: msg } };
+      }
     }
-    try {
-      const res = await firstValueFrom<AxiosResponse<Record<string, unknown>>>(
-        this.http.post(`${apiUrl}/api/v1/dl/verify`, { dl_number: dlNumber, dob },
-          { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 10000 })
-      );
-      return this.mapSarathiResponse(res.data);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Sarathi error DL ${dlNumber}: ${msg}`);
-      return { dl_number: dlNumber, name: '', dob, valid_from: '', valid_to: '', status: 'VALID',
-        vehicle_classes: [], raw: { fallback: true, error: msg } };
+
+    // Persist so deployment eligibility (Pillar 1) can be evaluated later
+    // without re-calling Sarathi. Previously this result went straight back
+    // to the caller and nowhere else — nothing durable recorded that a DL was
+    // ever checked, so nothing could gate deployment on it.
+    if (staffId) {
+      const trackStatus =
+        result.status === 'VALID' ? 'CLEAR' : result.status === 'EXPIRED' ? 'EXPIRED' : 'FAILED';
+      await this.prisma.verificationTrack.upsert({
+        where: { staffId_trackType: { staffId, trackType: 'SARATHI_API' } },
+        create: { staffId, trackType: 'SARATHI_API', status: trackStatus, result: result as any, verifiedAt: new Date() },
+        update: { status: trackStatus, result: result as any, verifiedAt: new Date() },
+      }).catch((e) => this.logger.warn(`Could not persist DL verification track: ${e.message}`));
     }
+
+    return result;
   }
 
-  async checkEchallan(dlNumber: string): Promise<{ count: number; challans: any[] }> {
+  async checkEchallan(dlNumber: string, staffId?: string): Promise<{ count: number; challans: any[] }> {
     const apiUrl = this.config.get<string>('app.sarathi.apiUrl') ?? '';
     const apiKey = this.config.get<string>('app.sarathi.apiKey') ?? '';
     const mockMode = !apiKey || this.config.get('app.sarathi.mockMode') === 'true';
 
-    if (mockMode) return { count: 0, challans: [] };
-    try {
-      const res = await firstValueFrom<AxiosResponse<{ total?: number; challans?: any[] }>>(
-        this.http.get(`${apiUrl}/api/v1/echallan/${dlNumber}`,
-          { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 10000 })
-      );
-      return { count: res.data.total ?? 0, challans: res.data.challans ?? [] };
-    } catch (err: unknown) {
-      this.logger.error(`eChallan error: ${err instanceof Error ? err.message : String(err)}`);
-      return { count: 0, challans: [] };
+    let result: { count: number; challans: any[] };
+    if (mockMode) {
+      result = { count: 0, challans: [] };
+    } else {
+      try {
+        const res = await firstValueFrom<AxiosResponse<{ total?: number; challans?: any[] }>>(
+          this.http.get(`${apiUrl}/api/v1/echallan/${dlNumber}`,
+            { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 10000 })
+        );
+        result = { count: res.data.total ?? 0, challans: res.data.challans ?? [] };
+      } catch (err: unknown) {
+        this.logger.error(`eChallan error: ${err instanceof Error ? err.message : String(err)}`);
+        result = { count: 0, challans: [] };
+      }
     }
+
+    // Persist for the same reason as DL verification above. Threshold (>=3 =
+    // severe / DR-07 in the scenario router) mirrors the existing routeScenario
+    // logic in pipeline-fsm.service.ts rather than inventing a new one.
+    if (staffId) {
+      const trackStatus = result.count >= 3 ? 'FAILED' : 'CLEAR';
+      await this.prisma.verificationTrack.upsert({
+        where: { staffId_trackType: { staffId, trackType: 'ECHALLAN_API' } },
+        create: { staffId, trackType: 'ECHALLAN_API', status: trackStatus, result: result as any, verifiedAt: new Date() },
+        update: { status: trackStatus, result: result as any, verifiedAt: new Date() },
+      }).catch((e) => this.logger.warn(`Could not persist eChallan verification track: ${e.message}`));
+    }
+
+    return result;
   }
 
   async verifyAadhaar(aadhaarNumber: string, otp: string): Promise<AadhaarResult> {

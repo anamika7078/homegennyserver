@@ -502,7 +502,7 @@ export class AuthService {
 
   async refreshTokens(userId: string, refreshToken: string): Promise<RefreshResponse> {
     const rows = await this.dataSource.query<UserRecord[]>(
-      `SELECT id, phone, role, branch_id, refresh_token_hash, last_login_at
+      `SELECT id, phone, role, branch_id, refresh_token_hash, active_session_id, last_login_at
        FROM users WHERE id = $1 LIMIT 1`,
       [userId],
     );
@@ -541,6 +541,10 @@ export class AuthService {
       phone:    user.phone,
       role:     user.role,
       branchId: user.branch_id,
+      // Carry the current session forward so the reissued access token still
+      // matches active_session_id in JwtStrategy.validate() — without this,
+      // every refreshed token would immediately fail the session check below.
+      sid:      user.active_session_id,
       loginAt,
     };
 

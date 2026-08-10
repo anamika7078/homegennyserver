@@ -1,11 +1,14 @@
 import { Controller, Get, Post, Param, Body, Query, UseGuards, DefaultValuePipe } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../../auth/guards/roles.guard';
+import { Roles, UserRole } from '../../auth/decorators/roles.decorator';
 import { DepositService } from './deposit.service';
 
 @ApiTags('Finance — Deposits')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.RM, UserRole.BM, UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/deposits', version: '1' })
 export class DepositController {
   constructor(private readonly service: DepositService) {}

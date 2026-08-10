@@ -1,11 +1,15 @@
 import { Controller, Get, Post, Param, Body, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { PlacementService, PlacementRow, PlacementList } from './placement.service';
 
+// Spec: Matching & Placement — RM=Y, BM=Y, Admin=Y, Staff/Client/Finance=no access.
 @ApiTags('Placements')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN)
 @Controller({ path: 'placements', version: '1' })
 export class PlacementController {
   constructor(private readonly service: PlacementService) {}

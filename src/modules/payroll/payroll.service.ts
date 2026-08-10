@@ -1,16 +1,24 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
+import {
+  calculateGstOnFee,
+  calculateEsic,
+  calculatePfFlat,
+  calculateNetSalary,
+  calculateClientTotal,
+  round2,
+} from '../../common/finance/statutory-calc.util';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const Razorpay = require('razorpay');
 
-// ── Statutory rates ───────────────────────────────────────────────────────────
-const GST_RATE = 0.18;    // GST on management fee ONLY — never on salary
-const ESIC_EMPLOYEE_RATE = 0.0075;  // 0.75% employee contribution (wages <= 21,000)
-const ESIC_EMPLOYER_RATE = 0.0325;  // 3.25% employer contribution
-const PF_RATE = 0.12;    // 12% each side on first 15,000
-const PF_WAGE_CEILING = 15_000;
+// Statutory rate constants now live in ../../common/finance/statutory-calc.util.ts
+// — this file's calculatePayroll*() was the audit-confirmed baseline
+// implementation, so the shared constants were extracted from here, not
+// invented, and this service now delegates to them instead of holding its
+// own copy (so commercial/enterprise-payroll/esic services can't quietly
+// diverge from it again).
 
 export interface PayrollCalculation {
   grossSalary: number;
@@ -134,52 +142,36 @@ export class PayrollService {
   }
 
   calculatePayrollWithAbsoluteFee(grossSalary: number, managementFee: number): PayrollCalculation {
-    const r2 = (n: number) => Math.round(n * 100) / 100;
-
-    const esicApplicable = grossSalary <= 21_000;
-    const esicEmployee = esicApplicable ? r2(grossSalary * ESIC_EMPLOYEE_RATE) : 0;
-    const esicEmployer = esicApplicable ? r2(grossSalary * ESIC_EMPLOYER_RATE) : 0;
-
-    const pfBase = Math.min(grossSalary, PF_WAGE_CEILING);
-    const pfEmployee = r2(pfBase * PF_RATE);
-    const pfEmployer = r2(pfBase * PF_RATE);
-
-    const netSalary = r2(grossSalary - esicEmployee - pfEmployee);
-    const gstOnFee = r2(managementFee * GST_RATE);
-    const clientTotalCharge = r2(grossSalary + esicEmployer + pfEmployer + managementFee + gstOnFee);
+    const esic = calculateEsic(grossSalary);
+    const pf = calculatePfFlat(grossSalary);
+    const netSalary = calculateNetSalary(grossSalary, esic.employee, pf.employee);
+    const gstOnFee = calculateGstOnFee(managementFee);
+    const clientTotalCharge = calculateClientTotal(grossSalary, esic.employer, pf.employer, managementFee, gstOnFee);
 
     return {
       grossSalary,
-      esicEmployee,
-      esicEmployer,
-      pfEmployee,
-      pfEmployer,
+      esicEmployee: esic.employee,
+      esicEmployer: esic.employer,
+      pfEmployee: pf.employee,
+      pfEmployer: pf.employer,
       netSalary,
-      managementFee: r2(managementFee),
+      managementFee: round2(managementFee),
       gstOnFee,
       clientTotalCharge,
     };
   }
 
   calculatePayroll(grossSalary: number, managementFeePercent: number): PayrollCalculation {
-    const r2 = (n: number) => Math.round(n * 100) / 100;
-
-    const esicApplicable = grossSalary <= 21_000;
-    const esicEmployee = esicApplicable ? r2(grossSalary * ESIC_EMPLOYEE_RATE) : 0;
-    const esicEmployer = esicApplicable ? r2(grossSalary * ESIC_EMPLOYER_RATE) : 0;
-
-    const pfBase = Math.min(grossSalary, PF_WAGE_CEILING);
-    const pfEmployee = r2(pfBase * PF_RATE);
-    const pfEmployer = r2(pfBase * PF_RATE);
-
-    const netSalary = r2(grossSalary - esicEmployee - pfEmployee);
-    const managementFee = r2(grossSalary * (managementFeePercent / 100));
-    const gstOnFee = r2(managementFee * GST_RATE);
-    const clientTotalCharge = r2(grossSalary + esicEmployer + pfEmployer + managementFee + gstOnFee);
+    const esic = calculateEsic(grossSalary);
+    const pf = calculatePfFlat(grossSalary);
+    const netSalary = calculateNetSalary(grossSalary, esic.employee, pf.employee);
+    const managementFee = round2(grossSalary * (managementFeePercent / 100));
+    const gstOnFee = calculateGstOnFee(managementFee);
+    const clientTotalCharge = calculateClientTotal(grossSalary, esic.employer, pf.employer, managementFee, gstOnFee);
 
     return {
-      grossSalary, esicEmployee, esicEmployer,
-      pfEmployee, pfEmployer, netSalary,
+      grossSalary, esicEmployee: esic.employee, esicEmployer: esic.employer,
+      pfEmployee: pf.employee, pfEmployer: pf.employer, netSalary,
       managementFee, gstOnFee, clientTotalCharge,
     };
   }
@@ -450,17 +442,14 @@ export class PayrollService {
     );
 
     // Basic calculation for internal staff (no management fee, no client charge)
-    const r2 = (n: number) => Math.round(n * 100) / 100;
-    const esicApplicable = proratedGross <= 21_000;
-    const esicEmployee = esicApplicable ? r2(proratedGross * ESIC_EMPLOYEE_RATE) : 0;
-    const pfBase = Math.min(proratedGross, PF_WAGE_CEILING);
-    const pfEmployee = r2(pfBase * PF_RATE);
-    const netSalary = r2(proratedGross - esicEmployee - pfEmployee);
+    const esic = calculateEsic(proratedGross);
+    const pf = calculatePfFlat(proratedGross);
+    const netSalary = calculateNetSalary(proratedGross, esic.employee, pf.employee);
 
     const calculation = {
       grossSalary: proratedGross,
-      esicEmployee,
-      pfEmployee,
+      esicEmployee: esic.employee,
+      pfEmployee: pf.employee,
       netSalary,
     };
 

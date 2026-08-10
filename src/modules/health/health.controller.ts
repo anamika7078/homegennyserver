@@ -5,8 +5,13 @@ import { PortalBootstrapService } from './portal-bootstrap.service';
 import { SchemaBootstrapService } from './schema-bootstrap.service';
 import { countPortalUsers } from '../../database/seeds/portal-users.seed';
 import { PORTAL_USERS } from '../../database/seeds/portal-users.constants';
+import { Public } from '../auth/decorators/public.decorator';
 
+// Infra health-check + deploy-time bootstrap endpoints. Must stay reachable with
+// no JWT (Render/monitoring probes call these). The two POST endpoints already
+// have their own x-seed-secret header check, independent of the JWT layer.
 @ApiTags('Health')
+@Public()
 @Controller({ path: 'health', version: '1' })
 export class HealthController {
   constructor(

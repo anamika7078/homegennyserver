@@ -565,6 +565,7 @@ model Incident {
   description  String?
   evidenceUrls String[]          @default([]) @map("evidence_urls")
   resolution   String?
+  legalHold    Boolean           @default(false) @map("legal_hold")
   metadata     Json              @default("{}")
   resolvedAt   DateTime?         @map("resolved_at") @db.Timestamptz(6)
   createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -575,6 +576,88 @@ model Incident {
   @@index([staffId])
   @@index([rmId, status])
   @@map("incidents")
+}
+
+// ── Phase 4 — Liability Pillars 6, 7, 8 ─────────────────────────────────────
+// Loose (non-relational) FK columns to placementId/clientId/staffId/actor ids,
+// matching the existing convention already used above on Incident itself
+// (staffId is the only hard Prisma relation there too) — avoids touching the
+// User/ClientProfile/StaffApplicant/Placement models to add back-relation
+// arrays for four new one-directional consumers.
+
+model ScopeOfWork {
+  id             String    @id @default(uuid()) @db.Uuid
+  placementId    String    @map("placement_id") @db.Uuid
+  clientId       String    @map("client_id") @db.Uuid
+  staffId        String    @map("staff_id") @db.Uuid
+  content        String
+  version        Int       @default(1)
+  /// DRAFT | SENT | ACKNOWLEDGED | SUPERSEDED
+  status         String    @default("DRAFT") @db.VarChar(20)
+  isNonStandard  Boolean   @default(false) @map("is_non_standard")
+  bmApprovedBy   String?   @map("bm_approved_by") @db.Uuid
+  bmApprovedAt   DateTime? @map("bm_approved_at") @db.Timestamptz(6)
+  createdBy      String    @map("created_by") @db.Uuid
+  amendedBy      String?   @map("amended_by") @db.Uuid
+  sentAt         DateTime? @map("sent_at") @db.Timestamptz(6)
+  acknowledgedBy String?   @map("acknowledged_by") @db.Uuid
+  acknowledgedAt DateTime? @map("acknowledged_at") @db.Timestamptz(6)
+  /// Points at the prior version this one replaces — set only when a new
+  /// version is created to amend an already-ACKNOWLEDGED one, so the
+  /// acknowledged version is never edited in place, only superseded.
+  supersedesId   String?   @unique @map("supersedes_id") @db.Uuid
+  metadata       Json      @default("{}")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([placementId])
+  @@index([clientId])
+  @@map("scope_of_work")
+}
+
+model ClientIndemnity {
+  id             String    @id @default(uuid()) @db.Uuid
+  placementId    String    @map("placement_id") @db.Uuid
+  clientId       String    @map("client_id") @db.Uuid
+  clauseVersion  String    @map("clause_version") @db.VarChar(40)
+  clauseText     String    @map("clause_text")
+  sentBy         String    @map("sent_by") @db.Uuid
+  sentAt         DateTime  @default(now()) @map("sent_at") @db.Timestamptz(6)
+  acknowledgedBy String?   @map("acknowledged_by") @db.Uuid
+  acknowledgedAt DateTime? @map("acknowledged_at") @db.Timestamptz(6)
+  contested      Boolean   @default(false)
+  bmReviewedBy   String?   @map("bm_reviewed_by") @db.Uuid
+  bmReviewNotes  String?   @map("bm_review_notes")
+  bmReviewedAt   DateTime? @map("bm_reviewed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([placementId])
+  @@index([clientId])
+  @@map("client_indemnities")
+}
+
+// Pure append-only EVENT log — same shape as PipelineEvent, deliberately:
+// this table gets the hard Phase 2 UPDATE/DELETE trigger, so a BM decision
+// can never be a mutation of the RM's original invocation row, only a new
+// row referencing it via refusalId. "Current status" is derived by reading
+// the latest event for a refusalId, the same way pipeline_stage lives on
+// staff_applicants rather than being mutated on pipeline_events itself.
+model RightToRefuseLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  refusalId   String   @map("refusal_id") @db.Uuid
+  staffId     String   @map("staff_id") @db.Uuid
+  placementId String?  @map("placement_id") @db.Uuid
+  /// INVOKED | BM_REVIEWING | UPHELD | OVERTURNED
+  eventType   String   @map("event_type") @db.VarChar(20)
+  actorId     String   @map("actor_id") @db.Uuid
+  reason      String?
+  notes       String?
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([staffId])
+  @@index([refusalId])
+  @@map("right_to_refuse_log")
 }
 
 model IncidentComment {

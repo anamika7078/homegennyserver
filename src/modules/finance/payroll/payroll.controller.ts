@@ -5,11 +5,16 @@ import {
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../../auth/guards/roles.guard';
+import { Roles, UserRole } from '../../auth/decorators/roles.decorator';
 import { FinancePayrollService } from './payroll.service';
 
+// Spec: EOR Payroll — RM=Y, BM=Y, Finance=Y, Admin=Y, Staff/Client=no access.
+// Confirmed live in the audit: GET /finance/payroll returned 200 for STAFF and CLIENT.
 @ApiTags('Finance — Payroll')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.RM, UserRole.BM, UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/payroll', version: '1' })
 export class FinancePayrollController {
   constructor(private readonly service: FinancePayrollService) {}

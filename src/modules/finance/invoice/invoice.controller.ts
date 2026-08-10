@@ -2,11 +2,18 @@ import { Controller, Get, Post, Param, Query, UseGuards, DefaultValuePipe, Res }
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../../auth/guards/roles.guard';
+import { Roles, UserRole } from '../../auth/decorators/roles.decorator';
 import { FinanceInvoiceService } from './invoice.service';
 
+// Spec: Client Invoicing — RM=R, BM=R, Finance=Y, Admin=Y. (Client=Y refers to a
+// client-facing "view my invoices" capability that has no endpoint in this
+// controller today — see audit §NOT IMPLEMENTED; not added here, Phase 1 is
+// authz-only.) Staff has no access.
 @ApiTags('Finance — Invoices')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.RM, UserRole.BM, UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/invoices', version: '1' })
 export class FinanceInvoiceController {
   constructor(private readonly service: FinanceInvoiceService) {}

@@ -7,6 +7,9 @@ node scratch/render_pre_migrate.js
 echo "[render_start] Applying pending migrations..."
 npx prisma migrate deploy
 
+echo "[render_start] Applying DB-level security triggers (append-only audit tables)..."
+node scratch/apply_security_triggers.js
+
 echo "[render_start] Seeding portal users (if needed)..."
 node scratch/seed_users_now.js || true
 

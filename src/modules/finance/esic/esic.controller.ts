@@ -2,11 +2,14 @@ import { Controller, Get, Post, Query, Res, UseGuards, ParseIntPipe, DefaultValu
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../../auth/guards/roles.guard';
+import { Roles, UserRole } from '../../auth/decorators/roles.decorator';
 import { EsicService } from './esic.service';
 
 @ApiTags('Finance — ESIC & PF')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/esic', version: '1' })
 export class EsicController {
   constructor(private readonly service: EsicService) {}

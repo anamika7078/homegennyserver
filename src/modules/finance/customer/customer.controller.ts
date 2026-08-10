@@ -3,11 +3,17 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../../auth/guards/roles.guard';
+import { Roles, UserRole } from '../../auth/decorators/roles.decorator';
 import { FinanceCustomerService, CreateCustomerDto } from './customer.service';
 
+// Finance-console customer master (billing entities), admin-panel only.
+// Not the same path a self-registering Customer touches (that goes through
+// AuthService directly). RM/BM/Finance/Admin per Client Invoicing matrix row.
 @ApiTags('Finance — Customers')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.RM, UserRole.BM, UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/customers', version: '1' })
 export class FinanceCustomerController {
   constructor(private readonly service: FinanceCustomerService) {}

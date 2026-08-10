@@ -18,8 +18,8 @@ export class RestrictedListService {
       ? crypto.createHash('sha256').update(data.phone).digest('hex') : null;
 
     const [row] = await this.dataSource.query<Record<string, unknown>[]>(
-      `INSERT INTO restricted_list (staff_id, aadhaar_hash, phone_hash, reason, added_by, notes)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      `INSERT INTO restricted_list (id, staff_id, aadhaar_hash, phone_hash, reason, added_by, notes)
+       VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6) RETURNING *`,
       [data.staff_id ?? null, aadhaarHash, phoneHash, data.reason, data.added_by, data.notes ?? null],
     );
     return row;

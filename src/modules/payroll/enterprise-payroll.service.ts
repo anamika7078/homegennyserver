@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { calculateEsic } from '../../common/finance/statutory-calc.util';
 import {
   ProcessEnterpriseBatchDto,
   ApproveBatchTierDto,
@@ -148,8 +149,8 @@ export class EnterprisePayrollService {
       const pfBase = Math.min(basicSalary, 15000);
       const pfDeduction = Math.round(pfBase * 0.12 * 100) / 100;
 
-      // ESIC: 0.75% if gross <= 21,000
-      const esicDeduction = grossSalary <= 21000 ? Math.round(grossSalary * 0.0075 * 100) / 100 : 0;
+      // ESIC: employee-side, statutory threshold + rate from the shared util
+      const esicDeduction = calculateEsic(grossSalary).employee;
 
       // PT (Professional Tax standard approximation)
       const ptDeduction = grossSalary > 15000 ? 200 : 0;

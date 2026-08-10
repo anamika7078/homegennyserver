@@ -1,11 +1,15 @@
 import { Controller, Get, Post, Param, Body, Query, UseGuards, DefaultValuePipe } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../../auth/guards/roles.guard';
+import { Roles, UserRole } from '../../auth/decorators/roles.decorator';
+import { Public } from '../../auth/decorators/public.decorator';
 import { FinanceSettlementService } from './settlement.service';
 
 @ApiTags('Finance — Settlements')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.RM, UserRole.BM, UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/settlements', version: '1' })
 export class FinanceSettlementController {
   constructor(private readonly service: FinanceSettlementService) {}
@@ -23,7 +27,12 @@ export class FinanceSettlementController {
     return this.service.getSettlementStats();
   }
 
+  // Razorpay's servers call this, not a logged-in user — cannot carry a Bearer
+  // JWT, so it must stay public. NOTE (residual gap, not fixed in Phase 1): this
+  // handler has no Razorpay webhook signature verification, so @Public() here is
+  // weaker than ideal — see Phase 1 report.
   @Post('webhook')
+  @Public()
   @ApiOperation({ summary: 'Razorpay webhook handler — match payment to invoice' })
   handleWebhook(@Body() body: any) {
     return this.service.matchWebhookEvent(body);

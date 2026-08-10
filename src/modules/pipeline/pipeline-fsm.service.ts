@@ -1,6 +1,9 @@
 import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
+import { TerminalOutcome } from '@prisma/client';
+import * as crypto from 'crypto';
+import { mapSeriesToShort, mapSeriesFromShort } from '../../common/mappers/staff.mapper';
 
 // Pipeline Stages
 export enum PipelineStage {
@@ -14,6 +17,13 @@ export enum PipelineStage {
   TERMINAL = 'TERMINAL',
 }
 
+// Local short-form vocabulary this file's routing functions switch on.
+// The database enum (Prisma StaffSeries) uses MAID/SKILLED_CARE/
+// UNSKILLED_CARE/DRIVER — callers may pass either form; routeScenario()
+// normalizes via the canonical mapper in common/mappers/staff.mapper.ts
+// before dispatching, which is the same mapping staff.service.ts already
+// uses. This was the root cause of the audit's "0 video prompts for
+// SC/UC/DR" finding (video-cert.service.ts had the identical gap).
 export enum StaffSeries {
   MAID = 'MAID',
   SC = 'SC',
@@ -21,15 +31,13 @@ export enum StaffSeries {
   DR = 'DR',
 }
 
-export enum TerminalOutcome {
-  PLACED = 'PLACED',
-  REJECTED = 'REJECTED',
-  ABANDONED = 'ABANDONED',
-  RESTRICTED = 'RESTRICTED',
-  DEFERRED = 'DEFERRED',
-  CANCELLED = 'CANCELLED',
-  LATE_EXIT = 'LATE_EXIT',
-}
+// NOTE: this file used to also declare its own local `TerminalOutcome` enum
+// here (PLACED/REJECTED/ABANDONED/RESTRICTED/DEFERRED/CANCELLED/LATE_EXIT) —
+// values that don't match the real database enum at all (Prisma's
+// TerminalOutcome, imported above, is ENROLLED/CONDITIONAL/DEFERRED/DENIED/
+// ABANDONED/LATE_EXIT). It was unused outside this file, so removed rather
+// than reconciled — the Prisma import is now the only TerminalOutcome here,
+// and it's the one that actually matches staff_applicants.terminal_outcome.
 
 // Valid FSM transitions
 const VALID_TRANSITIONS: Record<PipelineStage, PipelineStage[]> = {
@@ -49,7 +57,14 @@ export interface StageTransitionInput {
   actorId: string;
   reasonCode?: string;
   payload?: Record<string, any>;
+  /** Required when toStage === TERMINAL — see advanceStage(). */
+  terminalOutcome?: TerminalOutcome;
 }
+
+const VALID_TERMINAL_OUTCOMES = new Set(Object.values(TerminalOutcome));
+
+/** Video prompt counts per series — mirrors video-cert.service.ts's VIDEO_PROMPTS keys. */
+const REQUIRED_VIDEO_PROMPTS: Record<string, number> = { MAID: 9, SC: 10, UC: 10, DR: 12 };
 
 @Injectable()
 export class PipelineFsmService {
@@ -61,8 +76,12 @@ export class PipelineFsmService {
    * Scenario Router — pure function of flags → scenario code
    * Evaluates flags in strict priority order per series
    */
-  routeScenario(series: StaffSeries, flags: Record<string, any>): string {
-    switch (series) {
+  routeScenario(series: StaffSeries | string, flags: Record<string, any>): string {
+    // Normalize whichever vocabulary the caller used (short 'SC'/'UC'/'DR' or
+    // DB-form 'SKILLED_CARE'/'UNSKILLED_CARE'/'DRIVER') to the short form
+    // this file's switch statements are written against.
+    const shortSeries = mapSeriesToShort(mapSeriesFromShort(String(series)));
+    switch (shortSeries) {
       case StaffSeries.DR:
         return this.routeDriverScenario(flags);
       case StaffSeries.SC:
@@ -163,42 +182,222 @@ export class PipelineFsmService {
   private routeAbandonmentMaid(f: Record<string, any>): string { return f.abandoned_pre_deposit ? 'M3X-06A' : 'M3X-06B'; }
 
   /**
-   * Advance pipeline stage with full audit trail
+   * Deployment eligibility (S4_AGREEMENTS → S5_DEPLOY). Uses only what's
+   * actually implemented (Pillars 1–5); Pillars 6–9 have no dedicated
+   * workflow yet and are out of Phase 3 scope. Returns both the pass/fail
+   * decision AND the flags, so the same evaluation can also feed
+   * routeScenario() for a documented "why" — the gate itself never derives
+   * its decision from a scenario-code string, only from these direct checks.
    */
-  async advanceStage(input: StageTransitionInput): Promise<void> {
+  private async checkDeploymentEligibility(
+    manager: { query: (sql: string, params?: any[]) => Promise<any[]> },
+    staffId: string,
+    seriesShort: string,
+    pvStatus: string,
+  ): Promise<{ eligible: boolean; blockers: string[]; flags: Record<string, any> }> {
+    const blockers: string[] = [];
+    const flags: Record<string, any> = { aadhaar_verified: true };
+
+    // Pillar 4 — Police Verification. Maid has a documented exception:
+    // pending PV does not block deployment, only an adverse (failed) result does.
+    if (seriesShort === 'MAID') {
+      flags.pv_pending = pvStatus === 'NOT_INITIATED' || pvStatus === 'IN_PROGRESS';
+      flags.pv_failed = pvStatus === 'ADVERSE';
+      if (flags.pv_failed) blockers.push(`Police verification failed (Pillar 4) — pv_status=${pvStatus}`);
+    } else {
+      flags.pv_pending = pvStatus !== 'CLEAR';
+      flags.pv_failed = pvStatus === 'ADVERSE';
+      if (pvStatus !== 'CLEAR') {
+        blockers.push(`Police verification not CLEAR (Pillar 4) — pv_status=${pvStatus}, ${seriesShort} requires CLEAR before deployment`);
+      }
+    }
+
+    // Pillar 5 — Video Certification: every required prompt must have an
+    // RM-approved submission (Pillar 5 doc: "RM: reviews and signs off").
+    const requiredPrompts = REQUIRED_VIDEO_PROMPTS[seriesShort] ?? 0;
+    const videoRows = await manager.query(
+      `SELECT COUNT(DISTINCT prompt_key)::int AS cnt FROM video_certifications WHERE staff_id = $1 AND review_status = 'APPROVED'`,
+      [staffId],
+    );
+    const approvedPrompts = videoRows[0]?.cnt ?? 0;
+    flags.video_cert_complete = approvedPrompts >= requiredPrompts;
+    if (!flags.video_cert_complete) {
+      blockers.push(`Video certification incomplete (Pillar 5) — ${approvedPrompts}/${requiredPrompts} prompts RM-approved`);
+    }
+
+    // Agreement requirement (all series).
+    const agreementRows = await manager.query(
+      `SELECT COUNT(*)::int AS cnt FROM agreements WHERE staff_id = $1 AND status = 'SIGNED'`,
+      [staffId],
+    );
+    const agreementSigned = (agreementRows[0]?.cnt ?? 0) > 0;
+    flags.agreement_rejected = !agreementSigned;
+    if (!agreementSigned) blockers.push('No signed agreement on file');
+
+    // Pillar 3 — Medical/Sobriety, required for SC/UC/DR (not MAID).
+    if (seriesShort === 'SC' || seriesShort === 'UC' || seriesShort === 'DR') {
+      const medRows = await manager.query(
+        `SELECT status FROM verification_tracks WHERE staff_id = $1 AND track_type = 'HEALTH_SCREENING'`,
+        [staffId],
+      );
+      const medStatus = medRows[0]?.status;
+      flags.medical_failed = medStatus === 'FAILED';
+      if (medStatus !== 'CLEAR') {
+        blockers.push(`Medical/sobriety not CLEAR (Pillar 3) — status=${medStatus ?? 'NOT_SUBMITTED'}`);
+      }
+    }
+
+    // DR-specific: Pillar 1 (Licence), eChallan, Pillar 2 (practical test).
+    if (seriesShort === 'DR') {
+      const dlRows = await manager.query(
+        `SELECT status FROM verification_tracks WHERE staff_id = $1 AND track_type = 'SARATHI_API'`,
+        [staffId],
+      );
+      const dlStatus = dlRows[0]?.status;
+      flags.dl_expired = dlStatus === 'EXPIRED';
+      flags.dl_suspended = dlStatus === 'FAILED';
+      if (dlStatus !== 'CLEAR') {
+        blockers.push(`Driving licence not verified CLEAR (Pillar 1) — status=${dlStatus ?? 'NOT_CHECKED'}`);
+      }
+
+      const echallanRows = await manager.query(
+        `SELECT status, result FROM verification_tracks WHERE staff_id = $1 AND track_type = 'ECHALLAN_API'`,
+        [staffId],
+      );
+      if (!echallanRows.length) {
+        blockers.push('eChallan not checked');
+      } else {
+        flags.challan_count = echallanRows[0].result?.count ?? null;
+        if (echallanRows[0].status === 'FAILED') {
+          blockers.push(`eChallan check shows severe violation count (>=3, DR-07) — count=${flags.challan_count}`);
+        }
+      }
+
+      const practicalRows = await manager.query(
+        `SELECT id FROM assessments WHERE staff_id = $1 AND skill_scores->>'assessmentType' = 'DRIVER_PRACTICAL' AND result = 'PASS' LIMIT 1`,
+        [staffId],
+      );
+      flags.practical_passed = practicalRows.length > 0;
+      if (!flags.practical_passed) blockers.push('Practical driving test not passed (Pillar 2)');
+    }
+
+    return { eligible: blockers.length === 0, blockers, flags };
+  }
+
+  /**
+   * Advance pipeline stage with full audit trail.
+   *
+   * Phase 3 adds business validation on top of the FSM's existing transition-
+   * validity check: restricted-list re-check (first, before anything else,
+   * per spec), deployment eligibility gates at S5_DEPLOY, connected scenario
+   * routing with persistence, and a required terminal outcome when moving to
+   * TERMINAL. Everything stays inside the same transaction as before — if any
+   * gate fails, the whole thing rolls back: no stage change, no event, no
+   * scenario persisted.
+   */
+  async advanceStage(input: StageTransitionInput): Promise<{ scenarioCode?: string }> {
     const { staffId, toStage, actorId, reasonCode, payload } = input;
 
-    await this.dataSource.transaction(async (manager) => {
+    return this.dataSource.transaction(async (manager) => {
       const staff = await manager.query(
-        `SELECT id, pipeline_stage, series FROM staff_applicants WHERE id = $1 FOR UPDATE`,
+        `SELECT id, pipeline_stage, series, mobile, pv_status, restricted_list AS restricted_list_flag
+         FROM staff_applicants WHERE id = $1 FOR UPDATE`,
         [staffId]
       );
 
       if (!staff.length) throw new BadRequestException(`Staff ${staffId} not found`);
-
       const current: PipelineStage = staff[0].pipeline_stage;
-      const validNext = VALID_TRANSITIONS[current];
+      const seriesShort = mapSeriesToShort(mapSeriesFromShort(String(staff[0].series)));
 
+      // ── Restricted list — "always first, before any other action" ─────────
+      // Re-checked here (not just at intake) so a match added retroactively by
+      // BM still blocks further progression. TERMINAL is exempted — a
+      // restricted applicant must still be movable to a formal exit, or
+      // they'd be permanently stuck mid-pipeline.
+      if (toStage !== PipelineStage.TERMINAL) {
+        const phoneHash = crypto.createHash('sha256').update(staff[0].mobile).digest('hex');
+        const restrictedRows = await manager.query(
+          `SELECT reason FROM restricted_list WHERE phone_hash = $1 LIMIT 1`,
+          [phoneHash],
+        );
+        if (restrictedRows.length || staff[0].restricted_list_flag) {
+          throw new BadRequestException(
+            `Blocked — this staff applicant is on the restricted list${restrictedRows[0]?.reason ? ` (${restrictedRows[0].reason})` : ''}. Only a move to TERMINAL is permitted.`,
+          );
+        }
+      }
+
+      const validNext = VALID_TRANSITIONS[current];
       if (!validNext.includes(toStage)) {
         throw new BadRequestException(
           `Invalid transition: ${current} → ${toStage}. Allowed: ${validNext.join(', ')}`
         );
       }
 
-      // Update stage
-      await manager.query(
-        `UPDATE staff_applicants SET pipeline_stage = $1, updated_at = NOW() WHERE id = $2`,
-        [toStage, staffId]
-      );
+      // ── TERMINAL requires an explicit, validated outcome ────────────────────
+      if (toStage === PipelineStage.TERMINAL) {
+        if (!input.terminalOutcome || !VALID_TERMINAL_OUTCOMES.has(input.terminalOutcome)) {
+          throw new BadRequestException(
+            `terminalOutcome is required when moving to TERMINAL — one of: ${Array.from(VALID_TERMINAL_OUTCOMES).join(', ')}`,
+          );
+        }
+      }
+
+      // ── S5_DEPLOY business/liability gates (Phase 3 critical fix) ──────────
+      let scenarioCode: string | undefined;
+      if (toStage === PipelineStage.S5_DEPLOY) {
+        const { eligible, blockers, flags } = await this.checkDeploymentEligibility(
+          manager, staffId, seriesShort, staff[0].pv_status,
+        );
+        flags.placed_confirmed = eligible;
+
+        try {
+          scenarioCode = this.routeScenario(seriesShort, flags);
+        } catch {
+          scenarioCode = undefined;
+        }
+
+        if (!eligible) {
+          throw new BadRequestException(
+            `Deployment blocked — ${blockers.length} prerequisite(s) not met: ${blockers.join('; ')}`,
+          );
+        }
+
+        await manager.query(
+          `UPDATE staff_applicants SET current_scenario = $1 WHERE id = $2`,
+          [scenarioCode ?? null, staffId],
+        );
+        if (scenarioCode) {
+          await manager.query(
+            `INSERT INTO scenario_logs (id, staff_id, scenario_code, triggered_by, flags, actions_taken, escalated_to_bm, pipeline_stage)
+             VALUES (gen_random_uuid(), $1, $2, $3, $4, '[]', false, $5)`,
+            [staffId, scenarioCode, actorId, JSON.stringify(flags), toStage],
+          );
+        }
+      }
+
+      // Update stage (+ terminal_outcome when applicable)
+      if (toStage === PipelineStage.TERMINAL) {
+        await manager.query(
+          `UPDATE staff_applicants SET pipeline_stage = $1, terminal_outcome = $2, updated_at = NOW() WHERE id = $3`,
+          [toStage, input.terminalOutcome, staffId]
+        );
+      } else {
+        await manager.query(
+          `UPDATE staff_applicants SET pipeline_stage = $1, updated_at = NOW() WHERE id = $2`,
+          [toStage, staffId]
+        );
+      }
 
       // Append event (id must be supplied explicitly — Prisma @default(uuid()) is ORM-only, not a DB-level default)
       await manager.query(
-        `INSERT INTO pipeline_events (id, staff_id, event_type, from_stage, to_stage, actor_id, reason_code, payload)
-         VALUES (gen_random_uuid(), $1, 'STAGE_ADVANCE', $2, $3, $4, $5, $6)`,
-        [staffId, current, toStage, actorId, reasonCode || null, JSON.stringify(payload || {})]
+        `INSERT INTO pipeline_events (id, staff_id, event_type, from_stage, to_stage, actor_id, scenario_code, reason_code, payload)
+         VALUES (gen_random_uuid(), $1, 'STAGE_ADVANCE', $2, $3, $4, $5, $6, $7)`,
+        [staffId, current, toStage, actorId, scenarioCode ?? null, reasonCode || null, JSON.stringify(payload || {})]
       );
 
-      this.logger.log(`[FSM] ${staffId}: ${current} → ${toStage} by ${actorId}`);
+      this.logger.log(`[FSM] ${staffId}: ${current} → ${toStage} by ${actorId}${scenarioCode ? ` (scenario ${scenarioCode})` : ''}`);
+      return { scenarioCode };
     });
   }
 }
