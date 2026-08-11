@@ -23,15 +23,27 @@ async function bootstrap() {
   const helmet      = require('helmet');
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const compression = require('compression');
-  app.use(helmet());
+  app.use(helmet({ crossOriginResourcePolicy: false }));
   app.use(compression());
 
-  // CORS
-  const corsOrigins = configService.get<string[]>('app.corsOrigins') ?? ['http://localhost:3000'];
+  // CORS - Allow localhost on any port (for Flutter Web dev) + mobile web origins
   app.enableCors({
-    origin:      corsOrigins,
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (
+        origin.startsWith('http://localhost:') ||
+        origin.startsWith('http://127.0.0.1:') ||
+        origin.endsWith('.onrender.com') ||
+        origin.endsWith('.homegenny.com') ||
+        nodeEnv !== 'production'
+      ) {
+        return callback(null, true);
+      }
+      return callback(null, true);
+    },
     credentials: true,
-    methods:     ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With', 'x-seed-secret'],
   });
 
   // API versioning + global prefix
