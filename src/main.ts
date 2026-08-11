@@ -52,28 +52,26 @@ async function bootstrap() {
   // WebSocket adapter
   app.useWebSocketAdapter(new IoAdapter(app));
 
-  // Swagger docs (non-production only)
-  if (nodeEnv !== 'production') {
-    const swaggerConfig = new DocumentBuilder()
-      .setTitle('HomeGenny API')
-      .setDescription('HomeGenny Domestic Staffing Platform — Full API Reference')
-      .setVersion('1.0')
-      .addBearerAuth()
-      .addTag('Auth')
-      .addTag('Staff Onboarding')
-      .addTag('Pipeline')
-      .addTag('Verification')
-      .addTag('Video Certification')
-      .addTag('Payroll')
-      .addTag('Placements')
-      .addTag('Matching & Placement')
-      .addTag('Notifications')
-      .addTag('Restricted List')
-      .build();
-    const document = SwaggerModule.createDocument(app, swaggerConfig);
-    SwaggerModule.setup('api/docs', app, document);
-    logger.log(`Swagger docs: http://localhost:${port}/api/docs`);
-  }
+  // Swagger docs (accessible at /api/docs for Web & Mobile App Developers)
+  const swaggerConfig = new DocumentBuilder()
+    .setTitle('HomeGenny Platform API')
+    .setDescription('HomeGenny Domestic Staffing Platform — Complete API Reference for Web & Mobile App Developers')
+    .setVersion('2.0')
+    .addBearerAuth()
+    .addTag('Auth')
+    .addTag('Staff Onboarding')
+    .addTag('Pipeline')
+    .addTag('Verification')
+    .addTag('Video Certification')
+    .addTag('Payroll')
+    .addTag('Placements')
+    .addTag('Matching & Placement')
+    .addTag('Notifications')
+    .addTag('Restricted List')
+    .build();
+  const document = SwaggerModule.createDocument(app, swaggerConfig);
+  SwaggerModule.setup('api/docs', app, document);
+  logger.log(`Swagger docs available at: /api/docs`);
 
   await app.listen(port);
   logger.log(`HomeGenny API running on http://localhost:${port}/api/v1`);
