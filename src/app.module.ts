@@ -67,6 +67,7 @@ import { IndemnityModule } from './modules/indemnity/indemnity.module';
 import { RightToRefuseModule } from './modules/right-to-refuse/right-to-refuse.module';
 import { IncidentsModule } from './modules/incidents/incidents.module';
 import { RmPortalModule } from './modules/rm-portal/rm-portal.module';
+import { ClientMobileController } from './modules/client/client-mobile.controller';
 
 import databaseConfig from './config/database.config';
 import appConfig from './config/app.config';
@@ -167,7 +168,7 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     RightToRefuseModule,
     IncidentsModule,
   ],
-  controllers: [AppController],
+  controllers: [AppController, ClientMobileController],
   providers: [
     // Order matters: JwtAuthGuard runs first (populates req.user), then RolesGuard
     // reads req.user.role. Applied globally so every endpoint requires a declared
