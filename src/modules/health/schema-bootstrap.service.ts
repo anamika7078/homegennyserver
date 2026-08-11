@@ -41,7 +41,42 @@ export class SchemaBootstrapService implements OnModuleInit {
     return Boolean(rows[0]?.batches);
   }
 
+  private async ensureBranchColumns(): Promise<void> {
+    try {
+      await this.exec(`DO $$ BEGIN ALTER TABLE branches ADD COLUMN fee_structure JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;`);
+      await this.exec(`DO $$ BEGIN ALTER TABLE branches ADD COLUMN agreement_template TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$;`);
+    } catch (e: any) {
+      this.logger.error(`Error bootstrapping branch columns: ${e?.message}`);
+    }
+  }
+
+  private async ensureAppendOnlyTriggers(): Promise<void> {
+    try {
+      await this.exec(`
+        CREATE OR REPLACE FUNCTION prevent_pipeline_events_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+          RAISE EXCEPTION 'pipeline_events is an immutable append-only table. UPDATE and DELETE operations are strictly forbidden at database level.';
+        END;
+        $$ LANGUAGE plpgsql;
+      `);
+      await this.exec(`
+        DO $$ BEGIN
+          CREATE TRIGGER check_pipeline_events_append_only
+          BEFORE UPDATE OR DELETE ON pipeline_events
+          FOR EACH ROW EXECUTE FUNCTION prevent_pipeline_events_mutation();
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+      `);
+      this.logger.log('Pipeline events append-only DB trigger enforced.');
+    } catch (e: any) {
+      this.logger.error(`Error bootstrapping append-only triggers: ${e?.message}`);
+    }
+  }
+
   private async runBootstrap(): Promise<void> {
+    await this.ensureAppendOnlyTriggers();
+    await this.ensureBranchColumns();
     await this.ensureFinanceColumns();
     await this.ensureHrTables();
     await this.ensureCommercialTables();

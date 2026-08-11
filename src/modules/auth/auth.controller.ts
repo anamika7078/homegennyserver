@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Request, UseGuards, Get, Req } from '@nestjs/common';
+import { Controller, Post, Body, Request, UseGuards, Get, Req, BadRequestException } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
@@ -51,15 +51,17 @@ export class AuthController {
   @Throttle(AUTH_THROTTLE)
   @ApiOperation({
     summary:
-      'Self-register as Staff via the mobile app. Creates the login account AND a linked ' +
-      'employees record (status PENDING_HR_REVIEW) in one step (appears in HR’s employee list ' +
-      'immediately, flagged for HR to complete branch/category/salary). Returns tokens.',
+      'Staff Registration Notice: Staff Applicants do NOT self-register via mobile app. ' +
+      'Accounts are onboarded exclusively by Admin, HR, or RM. Mobile App provides Login Only.',
   })
   registerStaff(
     @Body() dto: RegisterStaffDto,
     @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> },
   ) {
-    return this.authService.registerStaff(dto, this.clientMeta(req));
+    throw new BadRequestException(
+      'Staff Applicants do NOT self-register via the mobile app per HomeGenny Platform v1.0 specifications. ' +
+      'Staff accounts are onboarded by an Admin, HR, or Relationship Manager (RM) who assigns their staff code. Please log in using your assigned credentials.',
+    );
   }
 
   @Post('login')

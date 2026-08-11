@@ -141,6 +141,34 @@ export class AdminController {
     });
   }
 
+  @Get('audit-logs/pipeline-events')
+  @ApiOperation({ summary: 'Full access to append-only pipeline_events log across all branches' })
+  async getPipelineEventsAudit(
+    @Query('staffId') staffId?: string,
+    @Query('actorId') actorId?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('eventType') eventType?: string,
+    @Query('scenarioCode') scenarioCode?: string,
+    @Query('branchId') branchId?: string,
+    @Query('search') search?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.adminService.getPipelineEventsAudit({
+      staffId,
+      actorId,
+      startDate,
+      endDate,
+      eventType,
+      scenarioCode,
+      branchId,
+      search,
+      page: page ? parseInt(page, 10) : 1,
+      limit: limit ? parseInt(limit, 10) : 100,
+    });
+  }
+
   @Get('audit-logs/:id')
   @ApiOperation({ summary: 'Get a single Admin audit log entry' })
   async getAuditLogDetails(@Param('id') id: string) {
@@ -179,6 +207,18 @@ export class AdminController {
   @ApiOperation({ summary: 'Cron job status' })
   async getCronStatus() {
     return this.adminService.getCronStatus();
+  }
+
+  @Post('cron-jobs/:jobId/trigger')
+  @ApiOperation({ summary: 'Trigger manual cron run for catch-up' })
+  async triggerManualCronRun(@Param('jobId') jobId: string) {
+    return this.adminService.triggerManualCronRun(jobId);
+  }
+
+  @Get('telemetry/api')
+  @ApiOperation({ summary: 'API telemetry, error rates, and response times' })
+  async getApiTelemetry() {
+    return this.adminService.getApiTelemetry();
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -253,5 +293,22 @@ export class AdminController {
     @Req() req: any,
   ) {
     return this.adminService.reviewVideoCertification(id, req.user.id, body);
+  }
+
+  @Put('video-certifications/:id/override')
+  @ApiOperation({ summary: 'Override video cert metadata / flag never_delete for fraud or legal cases' })
+  async overrideVideoCertification(
+    @Param('id') id: string,
+    @Body() body: {
+      neverDelete?: boolean;
+      reviewNotes?: string;
+      fraudFlag?: boolean;
+      legalHold?: boolean;
+      legalReason?: string;
+      metadata?: Record<string, unknown>;
+    },
+    @Req() req: any,
+  ) {
+    return this.adminService.overrideVideoCertification(id, req.user?.id || req.user?.sub || 'system', body);
   }
 }

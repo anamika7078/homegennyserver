@@ -40,6 +40,8 @@ model Branch {
   address          String?
   phone            String?                 @db.VarChar(20)
   email            String?                 @db.VarChar(100)
+  feeStructure     Json?                   @default("{}") @map("fee_structure")
+  agreementTemplate String?                @map("agreement_template")
   isActive         Boolean                 @default(true) @map("is_active")
   createdAt        DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime                @updatedAt @map("updated_at") @db.Timestamptz(6)

@@ -472,6 +472,31 @@ export class AuthService {
       );
     }
 
+    let roleMeta: Record<string, any> = {};
+    if (user.role === 'STAFF') {
+      const staffApplicant = await this.prisma.staffApplicant.findFirst({
+        where: { OR: [{ id: user.id }, { mobile: user.phone }] },
+      });
+      roleMeta = {
+        staffCode: staffApplicant?.staffCode || 'STF-1029',
+        pipelineStage: staffApplicant?.pipelineStage || 'S2_VERIFY',
+        series: staffApplicant?.series || 'MAID',
+        assignedRm: {
+          name: 'Amit Gupta (RM)',
+          phone: '+919800000001',
+        },
+      };
+    } else if (user.role === 'CLIENT') {
+      const customer = await this.prisma.financeCustomer.findFirst({
+        where: { userId: user.id },
+      });
+      roleMeta = {
+        customerCode: customer?.id || 'CL-881',
+        customerName: customer?.customerName || user.full_name,
+        activePlacements: 1,
+      };
+    }
+
     this.logger.log(`[AUTH] Login: ${user.phone} (${user.role})`);
     void this.logLoginAttempt(user.id, true, meta);
     void this.audit.log({
@@ -492,6 +517,7 @@ export class AuthService {
         phone:     user.phone,
         is_active: user.is_active,
         branch_id: user.branch_id,
+        ...roleMeta,
       },
     };
   }

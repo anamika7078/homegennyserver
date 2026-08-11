@@ -382,5 +382,68 @@ export class VideoCertService {
     this.logger.log(`[VIDEO-CERT] Cert ${certId} reviewed as ${status} by ${reviewerId}`);
     return updated;
   }
+
+  /**
+   * Admin Video Cert Override for exceptional fraud/legal cases.
+   * Flag never_delete = true and set metadata flags.
+   * Content (videoUrl, sha256Hash, attemptNumber) remains strictly immutable.
+   */
+  async overrideVideoCertMetadata(
+    certId: string,
+    reviewerId: string,
+    body: {
+      neverDelete?: boolean;
+      reviewNotes?: string;
+      fraudFlag?: boolean;
+      legalHold?: boolean;
+      legalReason?: string;
+      metadata?: Record<string, unknown>;
+    },
+  ) {
+    const cert = await this.prisma.videoCertification.findUnique({ where: { id: certId } });
+    if (!cert) throw new NotFoundException(`Video certification ${certId} not found`);
+
+    const currentMeta = typeof cert.metadata === 'object' && cert.metadata ? cert.metadata : {};
+    const updatedMeta = {
+      ...(currentMeta as Record<string, unknown>),
+      ...(body.metadata || {}),
+      ...(body.fraudFlag !== undefined ? { fraudFlag: body.fraudFlag } : {}),
+      ...(body.legalHold !== undefined ? { legalHold: body.legalHold } : {}),
+      ...(body.legalReason ? { legalReason: body.legalReason } : {}),
+      overrideBy: reviewerId,
+      overrideAt: new Date().toISOString(),
+    };
+
+    const updated = await this.prisma.videoCertification.update({
+      where: { id: certId },
+      data: {
+        neverDelete: body.neverDelete !== undefined ? body.neverDelete : true,
+        ...(body.reviewNotes !== undefined ? { reviewNotes: body.reviewNotes } : {}),
+        metadata: updatedMeta,
+      },
+      include: {
+        staff: { select: { id: true, fullName: true, staffCode: true, series: true } },
+      },
+    });
+
+    this.logger.log(`[VIDEO-CERT] Cert ${certId} override updated by ${reviewerId}. never_delete=${updated.neverDelete}`);
+    return updated;
+  }
+
+  /**
+   * Protection check: cannot delete if neverDelete === true
+   */
+  async deleteCertification(certId: string) {
+    const cert = await this.prisma.videoCertification.findUnique({ where: { id: certId } });
+    if (!cert) throw new NotFoundException(`Video certification ${certId} not found`);
+
+    if (cert.neverDelete) {
+      throw new ForbiddenException(
+        'Video certification is flagged as never_delete=true for legal/fraud compliance and cannot be deleted.',
+      );
+    }
+
+    return this.prisma.videoCertification.delete({ where: { id: certId } });
+  }
 }
 
