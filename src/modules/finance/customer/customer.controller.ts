@@ -6,6 +6,7 @@ import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guards/roles.guard';
 import { Roles, UserRole } from '../../auth/decorators/roles.decorator';
 import { FinanceCustomerService, CreateCustomerDto } from './customer.service';
+import { UserProvisioningService } from '../../auth/user-provisioning.service';
 
 // Finance-console customer master (billing entities), admin-panel only.
 // Not the same path a self-registering Customer touches (that goes through
@@ -16,7 +17,10 @@ import { FinanceCustomerService, CreateCustomerDto } from './customer.service';
 @Roles(UserRole.RM, UserRole.BM, UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/customers', version: '1' })
 export class FinanceCustomerController {
-  constructor(private readonly service: FinanceCustomerService) {}
+  constructor(
+    private readonly service: FinanceCustomerService,
+    private readonly userProvisioning: UserProvisioningService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'List all finance customers with branches' })
@@ -32,9 +36,24 @@ export class FinanceCustomerController {
   }
 
   @Post()
-  @ApiOperation({ summary: 'Create a new finance customer with multi-branch support' })
-  createCustomer(@Body() body: CreateCustomerDto) {
-    return this.service.createCustomer(body);
+  @ApiOperation({
+    summary:
+      'Create a new finance customer with multi-branch support. If a phone is supplied, ' +
+      'a login-capable CLIENT account is provisioned and linked (default password unless ' +
+      'the request omits one — see UserProvisioningService).',
+  })
+  async createCustomer(@Body() body: CreateCustomerDto) {
+    if (body.phone) {
+      await this.userProvisioning.assertPhoneAvailable(body.phone, body.email);
+    }
+    const customer = await this.service.createCustomer(body);
+    await this.userProvisioning.linkClientAccount({
+      financeCustomerId: customer.id,
+      fullName: body.customer_name,
+      phone: body.phone,
+      email: body.email,
+    });
+    return this.service.getCustomer(customer.id);
   }
 
   @Get(':id')

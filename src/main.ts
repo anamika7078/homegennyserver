@@ -72,6 +72,7 @@ async function bootstrap() {
       .setVersion('1.0')
       .addBearerAuth()
       .addTag('Auth')
+      .addTag('Mobile App Auth APIs')
       .addTag('Staff Onboarding')
       .addTag('Pipeline')
       .addTag('Verification')

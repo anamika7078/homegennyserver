@@ -4,12 +4,14 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
+import { UserController } from './user.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RbacModule } from '../rbac/rbac.module';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { FinanceCustomerModule } from '../finance/customer/customer.module';
 import { EmployeesModule } from '../employees/employees.module';
+import { UserProvisioningModule } from './user-provisioning.module';
 
 @Module({
   imports: [
@@ -17,6 +19,7 @@ import { EmployeesModule } from '../employees/employees.module';
     RbacModule,
     FinanceCustomerModule,
     EmployeesModule,
+    UserProvisioningModule,
     PassportModule.register({ defaultStrategy: 'jwt' }),
     // Must use registerAsync: JwtModule.register() ran before ConfigModule loaded .env → secret was undefined → login 500
     JwtModule.registerAsync({
@@ -31,7 +34,7 @@ import { EmployeesModule } from '../employees/employees.module';
     }),
   ],
   providers:   [AuthService, JwtStrategy, JwtAuthGuard],
-  controllers: [AuthController],
+  controllers: [AuthController, UserController],
   exports:     [AuthService, JwtAuthGuard],
 })
 export class AuthModule {}

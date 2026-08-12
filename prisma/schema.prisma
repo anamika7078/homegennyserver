@@ -81,6 +81,7 @@ model User {
   branch             Branch?          @relation(fields: [branchId], references: [id])
   financeCustomer    FinanceCustomer?
   employeeProfile    Employee?
+  staffApplicant     StaffApplicant?  @relation("StaffApplicantUser")
 
   @@index([role])
   @@index([branchId])
@@ -112,6 +113,7 @@ model StaffApplicant {
   deletedAt              DateTime?              @map("deleted_at")
   branchId               String?                @map("branch_id") @db.Uuid
   assignedRmId           String?                @map("assigned_rm_id") @db.Uuid
+  userId                 String?                @unique @map("user_id") @db.Uuid
   roleTypes              String[]               @default([]) @map("role_types")
   pipelineStage          PipelineStage          @default(S1_INTAKE) @map("pipeline_stage")
   deposit_paid           Boolean                @default(false)
@@ -132,6 +134,7 @@ model StaffApplicant {
   shiftLogs              ShiftLog[]
   assignedRm             User?                  @relation("AssignedRm", fields: [assignedRmId], references: [id])
   branch                 Branch?                @relation(fields: [branchId], references: [id])
+  user                   User?                  @relation("StaffApplicantUser", fields: [userId], references: [id])
   dailyAttendance        StaffDailyAttendance[]
   trainingSessions       TrainingSession[]
   upgradeRequests        UpgradeRequest[]

@@ -20,6 +20,9 @@ export interface CreateCustomerDto {
   state?: string;
   pincode?: string;
   branches?: BranchItemDto[];
+  /** Optional — if supplied, a login-capable CLIENT account is provisioned and linked. */
+  phone?: string;
+  email?: string;
 }
 
 function generateUnitCode(name: string, existing: string[]): string {

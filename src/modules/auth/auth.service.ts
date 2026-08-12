@@ -17,10 +17,10 @@ import { AuditAction } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { FinanceCustomerService } from '../finance/customer/customer.service';
 import { EmployeesService } from '../employees/employees.service';
+import { UserProvisioningService } from './user-provisioning.service';
 import { RegisterCustomerDto } from './dto/register-customer.dto';
 import { RegisterStaffDto } from './dto/register-staff.dto';
 import {
-  generateOtp,
   generateTotpSecret,
   buildOtpauthUrl,
   verifyTotp,
@@ -28,9 +28,17 @@ import {
   isOtpExpired,
 } from './auth-otp.util';
 import { PORTAL_ADMIN_PHONE } from '../../database/seeds/portal-users.constants';
+import { assertStrongPassword } from '../../common/utils/password.util';
 
 /** bcrypt cost factor for self-serve (app) account passwords */
 const APP_PASSWORD_BCRYPT_ROUNDS = 12;
+
+/**
+ * Temporary hardcoded OTP gating the first-time password change for accounts
+ * provisioned with the default password (mustChangePassword=true).
+ * TODO: replace with a real OTP/SMS provider.
+ */
+const MOCK_OTP = '123456';
 
 /** Maximum admin session lifetime: 8 hours (in seconds) */
 const ADMIN_SESSION_MAX_SECONDS = 8 * 60 * 60;
@@ -52,6 +60,7 @@ export interface UserRecord {
 export interface LoginResponse {
   access_token:  string;
   refresh_token: string;
+  must_change_password: boolean;
   user: {
     id:        string;
     full_name: string;
@@ -100,6 +109,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly financeCustomer: FinanceCustomerService,
     private readonly employees: EmployeesService,
+    private readonly userProvisioning: UserProvisioningService,
   ) {}
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -161,37 +171,25 @@ export class AuthService {
     meta?: { ip?: string; userAgent?: string },
   ): Promise<LoginResponse | { requires_2fa: true; user_id: string } | TotpSetupRequired> {
     await this.assertPhoneAndEmailAvailable(dto.phone, dto.email);
-    const passwordHash = await bcrypt.hash(dto.password, APP_PASSWORD_BCRYPT_ROUNDS);
 
-    const user = await this.prisma.user.create({
-      data: {
-        role:         'CLIENT',
-        fullName:     dto.full_name,
-        phone:        dto.phone,
-        email:        dto.email ?? null,
-        passwordHash,
-        isActive:     true,
-        metadata:     { registration_source: 'APP', phone_verified: false },
-      },
+    const customer = await this.financeCustomer.createCustomer({
+      customer_name: dto.business_name?.trim() || dto.full_name,
+      address:       dto.address,
+      pan_card:      dto.pan_card,
+      gstn:          dto.gstn,
+      city:          dto.city,
+      state:         dto.state,
+      pincode:       dto.pincode,
     });
-
-    try {
-      const customer = await this.financeCustomer.createCustomer({
-        customer_name: dto.business_name?.trim() || dto.full_name,
-        address:       dto.address,
-        pan_card:      dto.pan_card,
-        gstn:          dto.gstn,
-        city:          dto.city,
-        state:         dto.state,
-        pincode:       dto.pincode,
-      });
-      await this.prisma.financeCustomer.update({
-        where: { id: customer.id },
-        data:  { userId: user.id },
-      });
-    } catch (err) {
-      await this.prisma.user.delete({ where: { id: user.id } }).catch(() => undefined);
-      throw err;
+    const user = await this.userProvisioning.linkClientAccount({
+      financeCustomerId: customer.id,
+      fullName:           dto.full_name,
+      phone:              dto.phone,
+      email:              dto.email,
+      password:           dto.password, // self-registered — always explicit, never the default
+    });
+    if (!user) {
+      throw new BadRequestException('A phone number is required to register.');
     }
 
     this.logger.log(`[AUTH] Registered CLIENT ${user.phone} — linked to finance_customers`);
@@ -210,48 +208,33 @@ export class AuthService {
     meta?: { ip?: string; userAgent?: string },
   ): Promise<LoginResponse | { requires_2fa: true; user_id: string } | TotpSetupRequired> {
     await this.assertPhoneAndEmailAvailable(dto.phone, dto.email);
-    const passwordHash = await bcrypt.hash(dto.password, APP_PASSWORD_BCRYPT_ROUNDS);
 
-    const user = await this.prisma.user.create({
-      data: {
-        role:         'STAFF',
-        fullName:     dto.full_name,
-        phone:        dto.phone,
-        email:        dto.email ?? null,
-        passwordHash,
-        isActive:     true,
-        metadata:     { registration_source: 'APP', phone_verified: false },
-      },
+    const employee = await this.employees.create({
+      fullName:         dto.full_name,
+      mobile:           dto.phone,
+      alternateMobile:  dto.alternate_phone,
+      email:            dto.email,
+      dateOfBirth:      dto.date_of_birth,
+      gender:           dto.gender,
+      address:          dto.address,
+      city:             dto.city,
+      state:            dto.state,
+      pincode:          dto.pincode,
+      emergencyContact: {},
+      joiningDate:      new Date().toISOString(),
+      department:       'Not Assigned',
+      designation:      'Not Assigned',
+      employmentType:   'Not Assigned',
+      salary:           0,
+      status:           'PENDING_HR_REVIEW',
     });
-
-    try {
-      const employee = await this.employees.create({
-        fullName:         dto.full_name,
-        mobile:           dto.phone,
-        alternateMobile:  dto.alternate_phone,
-        email:            dto.email,
-        dateOfBirth:      dto.date_of_birth,
-        gender:           dto.gender,
-        address:          dto.address,
-        city:             dto.city,
-        state:            dto.state,
-        pincode:          dto.pincode,
-        emergencyContact: {},
-        joiningDate:      new Date().toISOString(),
-        department:       'Not Assigned',
-        designation:      'Not Assigned',
-        employmentType:   'Not Assigned',
-        salary:           0,
-        status:           'PENDING_HR_REVIEW',
-      });
-      await this.prisma.employee.update({
-        where: { id: employee.id },
-        data:  { userId: user.id },
-      });
-    } catch (err) {
-      await this.prisma.user.delete({ where: { id: user.id } }).catch(() => undefined);
-      throw err;
-    }
+    const user = await this.userProvisioning.linkStaffAccount({
+      employeeId: employee.id,
+      mobile:     dto.phone,
+      fullName:   dto.full_name,
+      email:      dto.email,
+      password:   dto.password, // self-registered — always explicit, never the default
+    });
 
     this.logger.log(`[AUTH] Registered STAFF ${user.phone} — linked to employees (PENDING_HR_REVIEW)`);
     return this.login(this.toUserRecord(user), meta);
@@ -510,6 +493,7 @@ export class AuthService {
     return {
       access_token:  accessToken,
       refresh_token: refreshToken,
+      must_change_password: metadata.mustChangePassword === true,
       user: {
         id:        user.id,
         full_name: user.full_name,
@@ -613,7 +597,9 @@ export class AuthService {
     if (!rows.length) {
       return { sent: true, expires_at: otpExpiresAt().toISOString() };
     }
-    const otp = generateOtp();
+    // TEMPORARY: hardcoded to MOCK_OTP (same as /auth/change-password) until a real
+    // OTP/SMS provider is wired in — was `generateOtp()` (real, random) before this.
+    const otp = MOCK_OTP;
     const expires = otpExpiresAt();
     const metadata = {
       ...((rows[0] as UserRecord & { metadata?: Record<string, unknown> }).metadata ?? {}),
@@ -653,6 +639,31 @@ export class AuthService {
         refresh_token_hash = NULL, active_session_id = NULL
        WHERE phone = $2`,
       [hash, phone],
+    );
+    return { success: true };
+  }
+
+  /**
+   * Authenticated password change — used to clear `mustChangePassword` after
+   * a user provisioned with the default password (Finance/HR/Admin onboarding)
+   * logs in for the first time. Gated by a temporary hardcoded OTP until a
+   * real OTP/SMS provider is wired in.
+   */
+  async changePassword(userId: string, otp: string, newPassword: string): Promise<{ success: boolean }> {
+    if (otp !== MOCK_OTP) {
+      throw new UnauthorizedException('Invalid OTP');
+    }
+    assertStrongPassword(newPassword);
+    const hash = await bcrypt.hash(newPassword, 12);
+    const rows = await this.dataSource.query<{ metadata: unknown }[]>(
+      `SELECT metadata FROM users WHERE id = $1`,
+      [userId],
+    );
+    if (!rows.length) throw new UnauthorizedException('Account not found');
+    const metadata = { ...parseUserMetadata(rows[0].metadata), mustChangePassword: false };
+    await this.dataSource.query(
+      `UPDATE users SET password_hash = $1, metadata = $2::jsonb WHERE id = $3`,
+      [hash, JSON.stringify(metadata), userId],
     );
     return { success: true };
   }

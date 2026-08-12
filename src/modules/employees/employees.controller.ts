@@ -16,13 +16,17 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { UserProvisioningService } from '../auth/user-provisioning.service';
 
 @ApiTags('Employees')
 @ApiBearerAuth()
 @Controller({ path: 'employees', version: '1' })
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class EmployeesController {
-  constructor(private readonly service: EmployeesService) {}
+  constructor(
+    private readonly service: EmployeesService,
+    private readonly userProvisioning: UserProvisioningService,
+  ) {}
 
   @Get()
   @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.TRAINER, UserRole.FINANCE)
@@ -70,13 +74,28 @@ export class EmployeesController {
 
   @Post()
   @Roles(UserRole.HR, UserRole.ADMIN)
-  @ApiOperation({ summary: 'Add a new employee (generates ID automatically)' })
+  @ApiOperation({
+    summary:
+      'Add a new employee (generates ID automatically). Also provisions a login-capable ' +
+      'STAFF account linked to this employee (and its synced staff_applicants row) — ' +
+      'default password unless the request supplies one.',
+  })
   async create(@Body() body: any) {
     // Basic validation
     if (!body.fullName || !body.mobile || !body.dateOfBirth || !body.gender || !body.address || !body.city || !body.state || !body.pincode || !body.joiningDate || !body.branchId || !body.categoryId || !body.department || !body.designation || !body.employmentType || body.salary === undefined) {
       throw new BadRequestException('Missing required fields for employee creation');
     }
-    return this.service.create(body);
+    await this.userProvisioning.assertPhoneAvailable(body.mobile, body.email);
+    const employee = await this.service.create(body);
+    await this.userProvisioning.linkStaffAccount({
+      employeeId: employee.id,
+      mobile: body.mobile,
+      fullName: body.fullName,
+      email: body.email,
+      branchId: body.branchId,
+      password: body.password,
+    });
+    return this.service.findOne(employee.id);
   }
 
   @Put(':id')

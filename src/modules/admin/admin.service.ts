@@ -12,16 +12,8 @@ import { MonitoringService } from '../monitoring/monitoring.service';
 import { VideoCertService } from '../video-cert/video-cert.service';
 import { ApprovalStatus, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
-
-const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&#\-_])[A-Za-z\d@$!%*?&#\-_]{8,72}$/;
-
-function assertStrongPassword(password: string): void {
-  if (!STRONG_PASSWORD_REGEX.test(password)) {
-    throw new BadRequestException(
-      'Password must be 8-72 characters long and contain at least one uppercase letter, one lowercase letter, one number, and one special symbol (@, $, !, %, *, ?, &, #, -, _)',
-    );
-  }
-}
+import { assertStrongPassword } from '../../common/utils/password.util';
+import { UserProvisioningService } from '../auth/user-provisioning.service';
 
 const PIPELINE_STAGES = [
   'S1_INTAKE',
@@ -42,6 +34,7 @@ export class AdminService {
     private readonly prisma: PrismaService,
     private readonly monitoringService: MonitoringService,
     private readonly videoCertService: VideoCertService,
+    private readonly userProvisioning: UserProvisioningService,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -146,54 +139,76 @@ export class AdminService {
       };
     }
 
-    // Non-admin users can be created immediately
-    const hash = data.password
-      ? await bcrypt.hash(String(data.password), 12)
-      : await bcrypt.hash('HomeGenny@2024', 12);
+    // Non-admin users can be created immediately. If Admin supplied a password
+    // it's used as-is; otherwise UserProvisioningService assigns the default
+    // password and flags the account so the app forces a change on first login.
+    const password = data.password ? String(data.password) : undefined;
 
     try {
-      const user = await this.prisma.user.create({
-        data: {
-          fullName:     data.fullName.trim(),
-          phone:        cleanPhone,
-          email:        email,
-          role:         data.role,
-          branchId:     branchId,
-          passwordHash: hash,
-        },
-      });
-
       if (data.role === 'STAFF') {
+        // Admin's quick-add screen doesn't collect full HR data (gender/salary/
+        // city/etc), so this stays a lightweight staff_applicants pipeline row —
+        // not a payroll-grade `employees` record — same table this endpoint has
+        // always written to, just now linked to a login.
         const staffCode = `STF-${Math.floor(1000 + Math.random() * 9000)}`;
-        await this.prisma.staffApplicant.create({
+        const staffApplicant = await this.prisma.staffApplicant.create({
           data: {
             staffCode,
             fullName: data.fullName.trim(),
             mobile: cleanPhone,
             email: email || undefined,
-            dateOfBirth: data.dateOfBirth || '1995-01-01',
+            dateOfBirth: new Date(data.dateOfBirth || '1995-01-01'),
             address: data.address || 'Delhi NCR',
             series: data.series || 'MAID',
             branchId: branchId || null,
             pipelineStage: 'S1_INTAKE',
             verifiedDocs: {},
           },
-        }).catch(() => undefined);
-      } else if (data.role === 'CLIENT') {
-        await this.prisma.financeCustomer.create({
+        });
+        return this.userProvisioning.linkLightweightStaffAccount({
+          staffApplicantId: staffApplicant.id,
+          phone: cleanPhone,
+          fullName: data.fullName.trim(),
+          email: email || undefined,
+          branchId,
+          password,
+        });
+      }
+
+      if (data.role === 'CLIENT') {
+        // unitCode/panCard must be unique across finance_customers — random
+        // suffixes here (was a hardcoded 'MAIN' before, which meant only the
+        // very first Admin-created client could ever succeed).
+        const uniqueSuffix = Math.floor(100000 + Math.random() * 900000);
+        const customer = await this.prisma.financeCustomer.create({
           data: {
-            userId: user.id,
             customerName: data.fullName.trim(),
             address: data.address || 'Delhi NCR',
             panCard: data.pan_card || `ABCDE${Math.floor(1000 + Math.random() * 9000)}F`,
             billNoPrefix: 'INV',
-            unitCode: 'MAIN',
-            unitName: 'Main Branch',
+            unitCode: `UNIT-${uniqueSuffix}`,
+            unitName: data.fullName.trim().slice(0, 50) || 'Main Branch',
           },
-        }).catch(() => undefined);
+        });
+        return this.userProvisioning.linkClientAccount({
+          financeCustomerId: customer.id,
+          fullName: data.fullName.trim(),
+          phone: cleanPhone,
+          email: email || undefined,
+          password,
+        });
       }
 
-      return user;
+      // RM (and any other non-admin role with no dedicated business table) —
+      // just a bare login-capable users row.
+      return this.userProvisioning.createUserRow({
+        phone: cleanPhone,
+        fullName: data.fullName.trim(),
+        email,
+        role: data.role,
+        branchId,
+        password,
+      });
     } catch (error: any) {
       if (error?.code === 'P2002') {
         throw new ConflictException('A user with this phone or email already exists.');
