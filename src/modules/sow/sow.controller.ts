@@ -5,7 +5,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { SowService } from './sow.service';
 import { PrismaService } from '../../prisma/prisma.service';
-import { resolveClientProfile, assertClientOwns } from '../../common/guards/client-ownership.util';
+import { resolveFinanceCustomer, assertClientOwns } from '../../common/guards/client-ownership.util';
 
 interface AuthedRequest { user: { id: string; role: string; phone: string } }
 
@@ -35,7 +35,7 @@ export class SowController {
   async list(@Query('placement_id') placementId: string, @Request() req: AuthedRequest) {
     const rows = await this.sow.findForPlacement(placementId);
     if (req.user.role === 'CLIENT') {
-      const client = await resolveClientProfile(this.prisma, req.user.phone);
+      const client = await resolveFinanceCustomer(this.prisma, req.user.id);
       return rows.filter((r) => r.clientId === client.id);
     }
     return rows;
@@ -47,7 +47,7 @@ export class SowController {
   async findOne(@Param('id') id: string, @Request() req: AuthedRequest) {
     const sow = await this.sow.findOne(id);
     if (req.user.role === 'CLIENT') {
-      const client = await resolveClientProfile(this.prisma, req.user.phone);
+      const client = await resolveFinanceCustomer(this.prisma, req.user.id);
       assertClientOwns(client.id, sow.clientId);
     }
     return sow;
@@ -73,7 +73,7 @@ export class SowController {
   async acknowledge(@Param('id') id: string, @Request() req: AuthedRequest) {
     const [sow, client] = await Promise.all([
       this.sow.findOne(id),
-      resolveClientProfile(this.prisma, req.user.phone),
+      resolveFinanceCustomer(this.prisma, req.user.id),
     ]);
     assertClientOwns(client.id, sow.clientId);
     return this.sow.acknowledge(id, req.user.id);

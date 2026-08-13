@@ -106,28 +106,44 @@ export class VerificationService {
     return result;
   }
 
-  async verifyAadhaar(aadhaarNumber: string, otp: string): Promise<AadhaarResult> {
+  async verifyAadhaar(aadhaarNumber: string, otp: string, staffId?: string): Promise<AadhaarResult> {
     const apiUrl = this.config.get<string>('app.uidai.apiUrl') ?? '';
     const apiKey = this.config.get<string>('app.uidai.licenseKey') ?? '';
     const mockMode = !apiKey || this.config.get('app.uidai.mockMode') === 'true';
 
+    let result: AadhaarResult;
     if (mockMode) {
       this.logger.warn('[UIDAI] Mock mode active');
-      return { aadhaar_number_last4: aadhaarNumber.slice(-4), name: 'MOCK APPLICANT',
+      result = { aadhaar_number_last4: aadhaarNumber.slice(-4), name: 'MOCK APPLICANT',
         dob: '1990-01-01', gender: 'M', address: 'Mumbai, Maharashtra',
         verified: true, raw: { mock: true } };
+    } else {
+      try {
+        const res = await firstValueFrom<AxiosResponse<Record<string, unknown>>>(
+          this.http.post(`${apiUrl}/v3/aadhaar/ekyc`, { uid: aadhaarNumber, otp },
+            { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 15000 })
+        );
+        result = this.mapAadhaarResponse(res.data);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.error(`UIDAI error: ${msg}`);
+        throw new Error(`Aadhaar verification failed: ${msg}`);
+      }
     }
-    try {
-      const res = await firstValueFrom<AxiosResponse<Record<string, unknown>>>(
-        this.http.post(`${apiUrl}/v3/aadhaar/ekyc`, { uid: aadhaarNumber, otp },
-          { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 15000 })
-      );
-      return this.mapAadhaarResponse(res.data);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.error(`UIDAI error: ${msg}`);
-      throw new Error(`Aadhaar verification failed: ${msg}`);
+
+    // Persist for the same reason DL/eChallan do — without this, an RM
+    // "verifying" Aadhaar left no durable trace anything else (incl.
+    // deployment-eligibility checks) could read back.
+    if (staffId) {
+      const trackStatus = result.verified ? 'CLEAR' : 'FAILED';
+      await this.prisma.verificationTrack.upsert({
+        where: { staffId_trackType: { staffId, trackType: 'AADHAAR_EKYC' } },
+        create: { staffId, trackType: 'AADHAAR_EKYC', status: trackStatus, result: result as any, verifiedAt: new Date() },
+        update: { status: trackStatus, result: result as any, verifiedAt: new Date() },
+      }).catch((e) => this.logger.warn(`Could not persist Aadhaar verification track: ${e.message}`));
     }
+
+    return result;
   }
 
   async submitPoliceVerification(staffId: string, details: Record<string, any>): Promise<PoliceVerificationResult> {

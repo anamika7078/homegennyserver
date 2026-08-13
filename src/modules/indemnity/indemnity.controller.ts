@@ -5,7 +5,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { IndemnityService } from './indemnity.service';
 import { PrismaService } from '../../prisma/prisma.service';
-import { resolveClientProfile, assertClientOwns } from '../../common/guards/client-ownership.util';
+import { resolveFinanceCustomer, assertClientOwns } from '../../common/guards/client-ownership.util';
 
 interface AuthedRequest { user: { id: string; role: string; phone: string } }
 
@@ -32,7 +32,7 @@ export class IndemnityController {
   async list(@Query('placement_id') placementId: string, @Request() req: AuthedRequest) {
     const rows = await this.indemnity.findForPlacement(placementId);
     if (req.user.role === 'CLIENT') {
-      const client = await resolveClientProfile(this.prisma, req.user.phone);
+      const client = await resolveFinanceCustomer(this.prisma, req.user.id);
       return rows.filter((r) => r.clientId === client.id);
     }
     return rows;
@@ -43,7 +43,7 @@ export class IndemnityController {
   async findOne(@Param('id') id: string, @Request() req: AuthedRequest) {
     const row = await this.indemnity.findOne(id);
     if (req.user.role === 'CLIENT') {
-      const client = await resolveClientProfile(this.prisma, req.user.phone);
+      const client = await resolveFinanceCustomer(this.prisma, req.user.id);
       assertClientOwns(client.id, row.clientId);
     }
     return row;
@@ -55,7 +55,7 @@ export class IndemnityController {
   async acknowledge(@Param('id') id: string, @Request() req: AuthedRequest) {
     const [row, client] = await Promise.all([
       this.indemnity.findOne(id),
-      resolveClientProfile(this.prisma, req.user.phone),
+      resolveFinanceCustomer(this.prisma, req.user.id),
     ]);
     assertClientOwns(client.id, row.clientId);
     return this.indemnity.acknowledge(id, req.user.id);
@@ -67,7 +67,7 @@ export class IndemnityController {
   async contest(@Param('id') id: string, @Body() body: { reason?: string }, @Request() req: AuthedRequest) {
     const [row, client] = await Promise.all([
       this.indemnity.findOne(id),
-      resolveClientProfile(this.prisma, req.user.phone),
+      resolveFinanceCustomer(this.prisma, req.user.id),
     ]);
     assertClientOwns(client.id, row.clientId);
     return this.indemnity.contest(id, req.user.id, body.reason);

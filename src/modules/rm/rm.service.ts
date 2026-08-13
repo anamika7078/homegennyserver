@@ -5,13 +5,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Prisma, PipelineStage, UserRole, StaffAttendanceStatus } from '@prisma/client';
+import { Prisma, PipelineStage, UserRole, StaffAttendanceStatus, TerminalOutcome } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PipelineFsmService, PipelineStage as FsmStage } from '../pipeline/pipeline-fsm.service';
 import { AuthUser, resolveStaffScope, assertStaffAccess } from '../../common/guards/branch-scope.util';
 import { toStaffDto, parseCreateStaffBody } from '../../common/mappers/staff.mapper';
 import { StaffService } from '../staff/staff.service';
 import { PayrollService } from '../payroll/payroll.service';
+import { UserProvisioningService } from '../auth/user-provisioning.service';
 import {
   BRANCH_AREA_CONFIG,
   DELHI_BRANCH_ID,
@@ -39,6 +40,7 @@ export class RmService {
     private readonly staffService: StaffService,
     private readonly events: EventEmitter2,
     private readonly payroll: PayrollService,
+    private readonly userProvisioning: UserProvisioningService,
   ) {}
 
   private staffWhere(scope: ReturnType<typeof resolveStaffScope>): Prisma.StaffApplicantWhereInput {
@@ -236,6 +238,7 @@ export class RmService {
     toStage: string,
     reasonCode?: string,
     payload?: Record<string, unknown>,
+    terminalOutcome?: string,
   ) {
     const staff = await this.prisma.staffApplicant.findFirst({
       where: { id: staffId, deletedAt: null },
@@ -251,6 +254,7 @@ export class RmService {
       actorId: user.id,
       reasonCode,
       payload,
+      terminalOutcome: terminalOutcome as TerminalOutcome | undefined,
     });
 
     if (toStage === 'DEFERRED' && payload?.deferred_reason) {
@@ -316,7 +320,20 @@ export class RmService {
       return { outcome: 'RESTRICTED', staff: toStaffDto(row) };
     }
 
+    if (phone) {
+      await this.userProvisioning.assertPhoneAvailable(phone, body.email ? String(body.email) : undefined);
+    }
+
     const created = await this.staffService.create(intakeBody, user.id);
+    if (created.mobile) {
+      await this.userProvisioning.linkLightweightStaffAccount({
+        staffApplicantId: created.id as string,
+        phone: created.mobile as string,
+        fullName: created.full_name as string,
+        email: created.email as string | undefined,
+        branchId: created.branch_id as string | null,
+      });
+    }
     if (body.deposit_amount) {
       await this.prisma.deposit.create({
         data: {

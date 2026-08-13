@@ -1,5 +1,5 @@
 import { Controller, Get, Post, Patch, Param, Body, UseGuards, Request } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
@@ -11,7 +11,11 @@ interface AuthedRequest { user: { id: string; role: string; phone: string } }
 // reviews/signs-off, BM read-only, Admin platform-wide, Client=no access,
 // Finance=no access. Confirmed live in the audit: a CLIENT token could list any
 // staff's certs, and a STAFF token could read another staff member's certs (IDOR).
-@ApiTags('Video Certification')
+//
+// ⚠️ KNOWN GAP: the actual approve/reject action is PUT /trainer/video-certifications/:id/review
+// (trainer.controller.ts), which is TRAINER/ADMIN-only today — RM is NOT permitted to approve/reject
+// despite the spec above saying "RM reviews/signs-off". Not fixed in this pass — flagging for later.
+@ApiTags('Video Certification', 'Mobile App RM APIs')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller({ path: 'video-cert', version: '1' })
@@ -28,6 +32,18 @@ export class VideoCertController {
   @Post('upload-url')
   @Roles(UserRole.STAFF, UserRole.ADMIN)
   @ApiOperation({ summary: 'Generate GCS signed upload URL for video self-certification' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['staffId', 'series', 'filename'],
+      properties: {
+        staffId: { type: 'string', example: 'b0116bc6-b2db-45e3-a6af-530b285a777e' },
+        series: { type: 'string', enum: ['DR', 'SC', 'UC', 'MAID'], example: 'MAID' },
+        filename: { type: 'string', example: 'prompt2.mp4' },
+        sha256Hash: { type: 'string', description: 'Optional — app may compute this after recording, before finalize' },
+      },
+    },
+  })
   async getUploadUrl(
     @Body() body: { staffId: string; series: string; filename: string; sha256Hash?: string },
     @Request() req: AuthedRequest,
@@ -42,6 +58,7 @@ export class VideoCertController {
   @Post('view-url')
   @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN)
   @ApiOperation({ summary: 'Generate GCS signed playback URL (15-minute expiry) — reviewer use' })
+  @ApiBody({ schema: { type: 'object', required: ['key'], properties: { key: { type: 'string', description: 'GCS object key from the finalize/register response' } } } })
   async getViewUrl(@Body() body: { key: string }) {
     const url = await this.service.generateViewUrl(body.key);
     return { url };
@@ -50,6 +67,16 @@ export class VideoCertController {
   @Post('verify-hash')
   @Roles(UserRole.STAFF, UserRole.RM, UserRole.ADMIN)
   @ApiOperation({ summary: 'Verify SHA-256 hash of stored video — confirms tamper-free integrity' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['key', 'expectedHash'],
+      properties: {
+        key: { type: 'string', description: 'GCS object key' },
+        expectedHash: { type: 'string', example: 'a3f8c92d4b1e7f6a...' },
+      },
+    },
+  })
   async verifyHash(@Body() body: { key: string; expectedHash: string }) {
     const valid = await this.service.verifyVideoHash(body.key, body.expectedHash);
     return { valid };
@@ -58,6 +85,19 @@ export class VideoCertController {
   @Post('finalize')
   @Roles(UserRole.STAFF, UserRole.ADMIN)
   @ApiOperation({ summary: 'Finalize video upload: verify SHA-256 and persist record (Pillar 5)' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['staffId', 'promptKey', 'gcsKey', 'expectedHash'],
+      properties: {
+        staffId: { type: 'string' },
+        promptKey: { type: 'string', example: 'prompt_2' },
+        gcsKey: { type: 'string', description: 'Object key returned by upload-url' },
+        expectedHash: { type: 'string' },
+        attemptNumber: { type: 'number', example: 1 },
+      },
+    },
+  })
   async finalizeUpload(
     @Body() body: { staffId: string; promptKey: string; gcsKey: string; expectedHash: string; attemptNumber?: number },
     @Request() req: AuthedRequest,
@@ -71,6 +111,19 @@ export class VideoCertController {
   @Post('register')
   @Roles(UserRole.STAFF, UserRole.ADMIN)
   @ApiOperation({ summary: 'Register a completed video upload in DB with SHA-256 hash (Pillar 5)' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['staffId', 'promptKey', 'gcsKey', 'sha256Hash'],
+      properties: {
+        staffId: { type: 'string' },
+        promptKey: { type: 'string', example: 'prompt_2' },
+        gcsKey: { type: 'string' },
+        sha256Hash: { type: 'string' },
+        attemptNumber: { type: 'number', example: 1 },
+      },
+    },
+  })
   async registerUpload(
     @Body() body: { staffId: string; promptKey: string; gcsKey: string; sha256Hash: string; attemptNumber?: number },
     @Request() req: AuthedRequest,
@@ -95,6 +148,7 @@ export class VideoCertController {
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiOperation({ summary: '[Admin] Override never_delete flag on a video certification (Pillar 5 fraud lock)' })
+  @ApiBody({ schema: { type: 'object', required: ['neverDelete'], properties: { neverDelete: { type: 'boolean' } } } })
   async setNeverDelete(
     @Param('certId') certId: string,
     @Body() body: { neverDelete: boolean },

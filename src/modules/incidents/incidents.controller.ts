@@ -6,7 +6,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { IncidentsService } from './incidents.service';
 import { PrismaService } from '../../prisma/prisma.service';
-import { resolveClientProfile, assertClientOwns } from '../../common/guards/client-ownership.util';
+import { resolveFinanceCustomer, assertClientOwns } from '../../common/guards/client-ownership.util';
 
 interface AuthedRequest { user: { id: string; role: string; phone: string } }
 
@@ -30,7 +30,7 @@ export class IncidentsController {
     @Body() body: { staff_id: string; type: IncidentType; title: string; description?: string; evidence_urls?: string[] },
     @Request() req: AuthedRequest,
   ) {
-    const client = await resolveClientProfile(this.prisma, req.user.phone);
+    const client = await resolveFinanceCustomer(this.prisma, req.user.id);
     return this.incidents.fileByClient(
       { staffId: body.staff_id, type: body.type, title: body.title, description: body.description, evidenceUrls: body.evidence_urls },
       client.id,
@@ -43,7 +43,7 @@ export class IncidentsController {
   @ApiOperation({ summary: 'List incidents scoped to the caller\'s role' })
   async list(@Request() req: AuthedRequest) {
     if (req.user.role === 'CLIENT') {
-      const client = await resolveClientProfile(this.prisma, req.user.phone);
+      const client = await resolveFinanceCustomer(this.prisma, req.user.id);
       return this.incidents.listForClient(client.id);
     }
     if (req.user.role === 'RM') return this.incidents.listForRm(req.user.id);
@@ -56,7 +56,7 @@ export class IncidentsController {
   async findOne(@Param('id') id: string, @Request() req: AuthedRequest) {
     const incident = await this.incidents.findOne(id);
     if (req.user.role === 'CLIENT') {
-      const client = await resolveClientProfile(this.prisma, req.user.phone);
+      const client = await resolveFinanceCustomer(this.prisma, req.user.id);
       assertClientOwns(client.id, incident.clientId);
     }
     return incident;
@@ -69,7 +69,7 @@ export class IncidentsController {
     if (req.user.role === 'CLIENT') {
       const [incident, client] = await Promise.all([
         this.incidents.findOne(id),
-        resolveClientProfile(this.prisma, req.user.phone),
+        resolveFinanceCustomer(this.prisma, req.user.id),
       ]);
       assertClientOwns(client.id, incident.clientId);
     }

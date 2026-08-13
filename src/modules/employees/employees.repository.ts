@@ -103,48 +103,6 @@ export class EmployeesRepository {
     return employees.map((e) => e.employeeId);
   }
 
-  async syncStaffApplicant(emp: any) {
-    try {
-      const existing = await this.prisma.staffApplicant.findFirst({
-        where: { OR: [{ mobile: emp.mobile }, { staffCode: emp.employeeId }] },
-      });
-      if (!existing) {
-        const depStr = `${emp.department || ''} ${emp.designation || ''}`.toUpperCase();
-        let series = 'DRIVER';
-        if (depStr.includes('MAID') || depStr.includes('COOK') || depStr.includes('CLEAN')) series = 'MAID';
-        else if (depStr.includes('SKILL') || depStr.includes('CARE') || depStr.includes('NURSE')) series = 'SKILLED_CARE';
-        else if (depStr.includes('UNSKILL') || depStr.includes('HELP') || depStr.includes('BOY') || depStr.includes('GUARD')) series = 'UNSKILLED_CARE';
-        else if (depStr.includes('DRIV')) series = 'DRIVER';
-
-        await this.prisma.staffApplicant.create({
-          data: {
-            staffCode: emp.employeeId,
-            fullName: emp.fullName,
-            mobile: emp.mobile,
-            dateOfBirth: emp.dateOfBirth ?? '1995-01-01',
-            address: emp.address ?? 'Delhi',
-            series: series as any,
-            branchId: emp.branchId || null,
-            pipelineStage: 'S1_INTAKE',
-            languageTier: 'T1' as any,
-            pvStatus: 'CLEAR',
-          },
-        });
-      } else {
-        await this.prisma.staffApplicant.update({
-          where: { id: existing.id },
-          data: {
-            fullName: emp.fullName,
-            mobile: emp.mobile,
-            branchId: emp.branchId || null,
-          },
-        });
-      }
-    } catch (err) {
-      // Non-blocking sync attempt
-    }
-  }
-
   async create(data: Prisma.EmployeeCreateInput) {
     const emp = await this.prisma.employee.create({
       data,
@@ -153,7 +111,6 @@ export class EmployeesRepository {
         branch: true,
       },
     });
-    await this.syncStaffApplicant(emp);
     return emp;
   }
 
@@ -166,7 +123,6 @@ export class EmployeesRepository {
         branch: true,
       },
     });
-    await this.syncStaffApplicant(emp);
     return emp;
   }
 

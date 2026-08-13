@@ -1180,6 +1180,9 @@ model FinanceCustomer {
   userId                          String?                           @unique @map("user_id") @db.Uuid
   customerName                    String                            @map("customer_name") @db.VarChar(255)
   address                         String
+  city                            String?                           @db.VarChar(100)
+  state                           String?                           @db.VarChar(100)
+  pincode                         String?                           @db.VarChar(20)
   panCard                         String                            @map("pan_card") @db.VarChar(20)
   gstn                            String?                           @db.VarChar(20)
   billNoPrefix                    String                            @map("bill_no_prefix") @db.VarChar(30)
