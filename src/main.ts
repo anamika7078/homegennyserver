@@ -64,34 +64,37 @@ async function bootstrap() {
   // WebSocket adapter
   app.useWebSocketAdapter(new IoAdapter(app));
 
-  // Swagger docs (non-production only)
-  if (nodeEnv !== 'production') {
-    const swaggerConfig = new DocumentBuilder()
-      .setTitle('HomeGenny API')
-      .setDescription('HomeGenny Domestic Staffing Platform — Full API Reference')
-      .setVersion('1.0')
-      .addBearerAuth()
-      .addTag('Auth')
-      .addTag('Mobile App Auth APIs')
-      .addTag('RM Operations')
-      .addTag('Staff Mobile App')
-      .addTag('Mobile App RM APIs')
-      .addTag('Mobile App Staff APIs')
-      .addTag('Mobile App Client APIs')
-      .addTag('Staff Onboarding')
-      .addTag('Pipeline')
-      .addTag('Verification')
-      .addTag('Video Certification')
-      .addTag('Payroll')
-      .addTag('Placements')
-      .addTag('Matching & Placement')
-      .addTag('Notifications')
-      .addTag('Restricted List')
-      .build();
-    const document = SwaggerModule.createDocument(app, swaggerConfig);
-    SwaggerModule.setup('api/docs', app, document);
-    logger.log(`Swagger docs: http://localhost:${port}/api/docs`);
-  }
+  // Handle favicon to avoid 404 logs
+  app.use('/favicon.ico', (req: any, res: any) => res.status(204).end());
+
+  // Swagger docs
+  const swaggerConfig = new DocumentBuilder()
+    .setTitle('HomeGenny API')
+    .setDescription('HomeGenny Domestic Staffing Platform — Full API Reference')
+    .setVersion('1.0')
+    .addBearerAuth()
+    .addTag('Auth')
+    .addTag('Mobile App Auth APIs')
+    .addTag('RM Operations')
+    .addTag('Staff Mobile App')
+    .addTag('Mobile App RM APIs')
+    .addTag('Mobile App Staff APIs')
+    .addTag('Mobile App Client APIs')
+    .addTag('Staff Onboarding')
+    .addTag('Pipeline')
+    .addTag('Verification')
+    .addTag('Video Certification')
+    .addTag('Payroll')
+    .addTag('Placements')
+    .addTag('Matching & Placement')
+    .addTag('Notifications')
+    .addTag('Restricted List')
+    .build();
+  const document = SwaggerModule.createDocument(app, swaggerConfig);
+  SwaggerModule.setup('api/docs', app, document, {
+    useGlobalPrefix: false,
+  });
+  logger.log(`Swagger docs: http://localhost:${port}/api/docs`);
 
   await app.listen(port);
   logger.log(`HomeGenny API running on http://localhost:${port}/api/v1`);
