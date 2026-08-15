@@ -136,6 +136,58 @@ normal app:
   they look up by the *real* staff's StaffApplicant.id. If a confirmed placement isn't showing up
   where expected, this mismatch is the first thing to check.
 
+### RM app screens — Placement flow (frontend-managed gating)
+
+The backend does **not** restrict which pipeline stage a staff must be in before a placement can
+be created — `POST /placements` will accept any staff, at any stage (S1_INTAKE included). By spec,
+a placement should only happen once a staff is deployment-ready (`pipeline_stage: "S5_DEPLOY"`),
+so **this gate needs to live in the RM app's UI** — filter the staff picker client-side, don't rely
+on the API to reject an out-of-stage staff.
+
+**Screen 1 — Staff list / picker**
+- Data source: `GET /rm/kanban` (already grouped by stage) or `GET /rm/dashboard`.
+- Filter to `pipeline_stage === "S5_DEPLOY"` before showing a staff in the "Create Placement" flow
+  — staff in any earlier stage shouldn't be selectable here at all (grey out or hide them).
+- On selection, capture the row's `id` (StaffApplicant.id) — this becomes `staff_id`.
+
+**Screen 2 — Client picker**
+- Data source: `GET /finance/customers` (optionally `?search=` for a search box).
+- On selection, capture the row's `id` (FinanceCustomer.id) — this becomes `client_id`.
+
+**Screen 3 — Placement details form**
+- Fields: `staff_salary`, `management_fee` (both numbers), optionally `trial_start_date` /
+  `trial_end_date` (defaults to today / +14 days if left blank).
+- Submit → `POST /placements` with `{ staff_id, client_id, staff_salary, management_fee, ... }`.
+- Response comes back `status: "TRIAL"` — show this clearly (e.g. a "Trial — pending confirmation"
+  badge), don't imply the staff is fully deployed yet.
+
+**Screen 4 — Confirm action**
+- Shown on the placement's detail view, only while `status === "TRIAL"`.
+- A "Confirm Placement" button → `POST /placements/:id/confirm`.
+- On success, `status` flips to `"CONFIRMED"` — only after this does the staff's check-in, RM's
+  attendance marking, and Finance's payroll/invoicing start working for this placement. Make this
+  visually obvious (e.g. don't let the RM think the job is done after step 3 alone).
+- If called twice, or on a non-TRIAL placement, the API 400s with a clear message — surface that
+  message directly, don't need custom copy for it.
+
+**Screen 5 — Exit action**
+- On an active (CONFIRMED) placement's detail view — "End Placement" → `POST /placements/:id/exit`
+  with `{ exit_date, exit_scenario_code }`.
+
+Summary of the state machine the UI should reflect:
+```
+staff reaches S5_DEPLOY (RM app should gate on this before offering "Create Placement")
+        │
+        ▼
+POST /placements            → status: TRIAL      (visible, not yet usable by staff/RM/Finance)
+        │
+        ▼
+POST /placements/:id/confirm → status: CONFIRMED  (staff check-in, RM attendance, invoicing all unlock)
+        │
+        ▼
+POST /placements/:id/exit    → status: EXITED
+```
+
 ## 5. Staff Mobile APIs
 
 Base path: `/staff`. Swagger tag **"Mobile App Staff APIs"** (clean — only this controller).
