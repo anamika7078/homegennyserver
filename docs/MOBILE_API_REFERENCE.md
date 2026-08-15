@@ -54,6 +54,12 @@ provider is wired in. Do not build UI logic that expects a real, randomly genera
 
 ## 3. Demo accounts
 
+⚠️ **These only exist on the local dev database — not on the live server
+(`homegennyserver-po5u.onrender.com`).** The app connects straight to that live server, which has
+its own, separate database — none of the accounts below will log in there. They're included so you
+can see the *shape* of a fully-linked RM → Staff → Client chain, not as literal credentials to use
+against production.
+
 | Role | Phone | Password | Notes |
 |---|---|---|---|
 | Client | `9100000091` | `HomeGenny@2024` | "Mobile Demo Client" — has a real FinanceCustomer + active Placement + attendance history |
@@ -61,7 +67,17 @@ provider is wired in. Do not build UI logic that expects a real, randomly genera
 | Staff | `9911100001` | `HomeGenny@2024` | staff_code `staff001`, MAID series — deployed on the demo client's placement above |
 
 These three accounts are linked to each other (same placement chain), so testing one role's screen
-against another's data will show consistent, real results.
+against another's data will show consistent, real results — **on local only**.
+
+### Getting real credentials on the live server
+
+- **Client / Staff**: self-register via `POST /auth/register/customer` or `POST /auth/register/staff`
+  (see section 2) — this works against the live DB directly.
+- **RM**: RM accounts aren't self-registered — ask Admin/HR to create one (Admin panel → Create
+  User → role RM), which auto-provisions a login with the default password from section 2.
+- Whatever staff/client account you end up testing with, remember the placement-confirm gotcha in
+  section 4 — a freshly created placement is `TRIAL` until someone with RM/BM/Admin calls
+  `POST /placements/:id/confirm`, and check-in/attendance/invoicing all need it to be `CONFIRMED`.
 
 ## 4. RM Mobile APIs
 
