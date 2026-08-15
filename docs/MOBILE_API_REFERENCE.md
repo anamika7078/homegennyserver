@@ -117,6 +117,25 @@ Also relevant to RM (separate controllers, same "Mobile App RM APIs" tag):
   payroll/invoicing for it (all three require `CONFIRMED`). `confirm` 400s if called on anything
   other than a `TRIAL` placement.
 
+### Where `staff_id` / `client_id` come from for `POST /placements`
+
+These should never be typed in by hand — they come from a "select from list" screen, same as any
+normal app:
+
+- **`staff_id`** — this is a `StaffApplicant.id`, **not** the staff's login `user.id`. Get it from
+  the `id` field of any staff row returned by `GET /rm/kanban`, `GET /rm/dashboard`, or
+  `GET /rm/trials` — the RM app should show a staff picker (search by name/staff_code) backed by
+  one of these, and capture the selected row's `id`.
+- **`client_id`** — this is a `FinanceCustomer.id`, **not** the client's login `user.id`. Get it
+  from the `id` field of any row returned by `GET /finance/customers` (RM has access to this route)
+  — same pattern, a client picker backed by that list.
+- **Common mistake** (hit live during testing): pasting the `user.id` from a login response into
+  either field instead of the StaffApplicant/FinanceCustomer id. There's no foreign-key constraint
+  on `placements.staff_id`/`client_id` in the database, so a wrong id is silently accepted — the
+  placement looks fine (even confirms fine) but check-in/dashboard queries never find it, because
+  they look up by the *real* staff's StaffApplicant.id. If a confirmed placement isn't showing up
+  where expected, this mismatch is the first thing to check.
+
 ## 5. Staff Mobile APIs
 
 Base path: `/staff`. Swagger tag **"Mobile App Staff APIs"** (clean — only this controller).
