@@ -1,0 +1,156 @@
+# HomeGenny Mobile API — Reference for App Integration
+
+This document is written to be pasted directly into an AI assistant (Claude, etc.) as context for
+integrating the HomeGenny mobile APIs into the Flutter app. It covers all four mobile-facing API
+groups: **Auth**, **RM**, **Staff**, and **Client**.
+
+## 1. Environment
+
+- **Live base URL**: `https://homegennyserver-po5u.onrender.com/api/v1`
+- **Swagger UI**: `https://homegennyserver-po5u.onrender.com/api/docs`
+- **Swagger JSON**: `https://homegennyserver-po5u.onrender.com/api/docs-json`
+- All routes are versioned under `/api/v1/...` — a request to a path without this prefix (e.g.
+  `/auth/login` instead of `/api/v1/auth/login`) returns a `404 Cannot POST ...` — this is the
+  single most common integration mistake, check this first if something 404s unexpectedly.
+- Every response is wrapped in a common envelope:
+  ```json
+  { "success": true, "data": { ... }, "timestamp": "2026-08-14T08:20:26.105Z" }
+  ```
+  Errors follow Nest's standard shape: `{ "statusCode": 400, "timestamp": "...", "path": "...", "message": "..." }`.
+- Auth: `Authorization: Bearer <access_token>` header on every route except `login`,
+  `register/*`, `forgot-password`, `verify-otp`, `reset-password`.
+
+## 2. Auth — shared by every role
+
+Base path: `/auth`
+
+| Method | Route | Purpose |
+|---|---|---|
+| POST | `register/customer` | Self-registration — Client |
+| POST | `register/staff` | Self-registration — Staff |
+| POST | `login` | `{ phone, password }` → tokens + `must_change_password` flag |
+| POST | `forgot-password` | Sends OTP (currently mocked, see below) |
+| POST | `verify-otp` | Verifies the OTP from forgot-password |
+| POST | `reset-password` | Sets a new password after OTP verification |
+| POST | `change-password` | `{ otp, new_password }` — used for the forced first-login change |
+| POST | `2fa/setup` / `2fa/confirm` / `2fa/reset-setup` | Optional 2FA |
+| POST | `refresh` | `{ userId, refresh_token }` — **both fields required**, a common client bug is omitting `userId` |
+| POST | `logout` / `logout-all` | Invalidate session(s) |
+| GET | `me` | Current user's profile |
+
+### Account provisioning & first-login flow (important context)
+
+Whenever Admin/HR/Finance/RM creates a Staff, Client, or Employee record, a login-capable `User`
+row is auto-created with:
+- **Default password**: `HomeGenny@2024`
+- `must_change_password: true` on that user
+
+On first login, the `login` response includes `must_change_password: true` — the app should route
+to a forced change-password screen, calling `POST /auth/change-password` with the OTP.
+
+**OTP is currently a fixed mock value: `123456`** everywhere (forgot-password and the forced
+change-password flow both use this) — this is a deliberate placeholder until a real SMS/OTP
+provider is wired in. Do not build UI logic that expects a real, randomly generated OTP yet.
+
+## 3. Demo accounts
+
+| Role | Phone | Password | Notes |
+|---|---|---|---|
+| Client | `9100000091` | `HomeGenny@2024` | "Mobile Demo Client" — has a real FinanceCustomer + active Placement + attendance history |
+| RM | `9800000002` | `HomeGenny@2024` | "RM Demo Account" — manages the pipeline, approves shifts |
+| Staff | `9911100001` | `HomeGenny@2024` | staff_code `staff001`, MAID series — deployed on the demo client's placement above |
+
+These three accounts are linked to each other (same placement chain), so testing one role's screen
+against another's data will show consistent, real results.
+
+## 4. RM Mobile APIs
+
+Base path: `/rm`. Swagger tag **"Mobile App RM APIs"** — note this tag is intentionally broad: it
+also includes routes from the Verification and Video Certification controllers, and the Staff
+mobile routes, because RM triggers/reviews those flows as part of managing a staff member's
+pipeline. If you only want RM's *own* endpoints, use this table, not the full tag list.
+
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `dashboard` | KPIs — pipeline funnel, staff counts by stage |
+| GET | `kanban` | Full pipeline board, staff grouped by stage |
+| POST | `intake` | S1 intake — create a new staff applicant |
+| POST | `pipeline/:staffId/advance` | Advance a staff member to the next pipeline stage |
+| GET | `trials` | Staff currently in trial placement |
+| GET | `deferred` | Deferred cases |
+| POST | `deferred/:staffId/resume` | Resume a deferred case |
+| GET | `terminal` | Terminated/rejected applicants |
+| GET / POST | `incidents` | List / file incidents |
+| GET | `shifts` | Shift logs pending/reviewed |
+| PATCH | `shifts/:id/review` | Approve/reject/flag a shift log — `{ action: "APPROVED"|"REJECTED"|"FLAGGED", notes? }` |
+| GET | `upgrades` | Series/role upgrade requests |
+| GET | `locations` | Staff GPS/location data |
+| GET / PUT | `attendance` | Read/mark daily attendance |
+| GET | `attendance/:staffId/invoice-preview` | Preview payroll calc before running it |
+| POST | `attendance/:staffId/generate-invoice` | Trigger invoice generation for a placement |
+
+Also relevant to RM (separate controllers, same "Mobile App RM APIs" tag):
+- `POST /verification/aadhaar` — trigger mock Aadhaar eKYC (mock mode is automatic — no live
+  Sarathi/UIDAI integration yet, deterministic mock responses)
+- `PUT /trainer/video-certifications/:id/review` — **note: this is TRAINER/ADMIN-only, not RM**,
+  despite living under the RM tag — a known spec/implementation gap, not yet reconciled.
+- `POST /placements` / `GET /placements` / `POST /placements/:id/confirm` / `POST /placements/:id/exit`
+  — links a staff member to a client. **Important**: `POST /placements` always creates the
+  placement as `TRIAL` — you must call `POST /placements/:id/confirm` afterwards to move it to
+  `CONFIRMED` before the staff can check in, RM can mark attendance, or Finance can run
+  payroll/invoicing for it (all three require `CONFIRMED`). `confirm` 400s if called on anything
+  other than a `TRIAL` placement.
+
+## 5. Staff Mobile APIs
+
+Base path: `/staff`. Swagger tag **"Mobile App Staff APIs"** (clean — only this controller).
+
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `dashboard` | Current stage, completion %, assigned RM, today's tasks |
+| GET | `pipeline` | **Full 8-stage history** (not just current stage) — matches what RM sees for this staff |
+| GET | `profile` | Staff's own profile |
+| PUT | `profile` | Update own profile |
+| GET | `deployment` | Current placement details (client name, address, salary) |
+| POST | `attendance/check-in` | `{ latitude?, longitude? }` — requires a `CONFIRMED` placement, else `400` |
+| POST | `attendance/check-out` | Same shape as check-in |
+| GET | `attendance/history` | Last 30 shift logs |
+
+Note: shift logs start as `PENDING` on check-in — they only count toward payroll after an RM
+approves them via `PATCH /rm/shifts/:id/review`.
+
+## 6. Client Mobile APIs
+
+Base path: `/client`. Swagger tag **"Mobile App Client APIs"** (clean — only this controller).
+
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `profile` | Client's own profile (name/phone/address/city/pincode — payment fields are always null, no schema for them yet) |
+| GET | `dashboard` | Placement count, today's attendance status, invoice summary |
+| GET | `assigned-staff` | Staff deployed at this client |
+| GET | `staff/:id/profile` | Detail view — verification status, PV status, series |
+| GET | `attendance/today` | Today's check-in/out for the assigned staff |
+| GET | `attendance/history` | Last 30 shift logs |
+| POST | `attendance/raise-issue` | `{ message, staff_id?, title? }` — files a real Incident, `staff_id` defaults to the active placement's staff if omitted |
+| GET | `invoices` | Real `client_invoices` rows — **empty until an RM approves the shift + Finance runs payroll** for that period, this is expected, not a bug |
+| POST | `complaints` | **Multipart form** — `{ subject, description, images[]? }` — matches the Flutter app's exact call shape; `staff_id`/`type`/`title` are optional overrides |
+| POST | `replacements` | ⚠️ Placeholder only — no `Replacement`/`ExitRequest` schema exists yet, always returns a canned "under review" response |
+
+### Known gaps (be aware, not blockers)
+
+- `IncidentType` only has 6 values right now (`CLIENT_COMPLAINT`, `STAFF_MISCONDUCT`,
+  `SAFETY_ISSUE`, `ATTENDANCE_FRAUD`, `DRIVING_VIOLATION`, `LATE_EXIT`) — extending it is blocked
+  on a Postgres enum-owner permission, not yet resolved.
+- `POST /client/replacements` has no backing data model — deferred to a follow-up pass.
+- The Flutter app's own `ClientRepositoryImpl` only wires `remote:` calls for 3 of these 10 routes
+  today (`dashboard`, `profile`, `complaints`) — the rest exist and are tested here, but need the
+  app's repository layer wired to them before they'll actually be called from the UI.
+
+## 7. How to test
+
+1. Open the Swagger UI: `https://homegennyserver-po5u.onrender.com/api/docs`.
+2. `POST /auth/login` with any demo account phone/password from section 3.
+3. Copy `access_token` from the response.
+4. Click **Authorize** (top right) and paste the token.
+5. Call any route — filter by tag (`Mobile App Auth APIs` / `Mobile App RM APIs` /
+   `Mobile App Staff APIs` / `Mobile App Client APIs`) to narrow the list.

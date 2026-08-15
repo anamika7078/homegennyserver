@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PlacementStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
@@ -100,6 +100,50 @@ export class PlacementService {
     this.events.emit('realtime.broadcast', {
       channel: 'deployments',
       event: 'placement.created',
+      data: { placementId: row.id, staffId: row.staffId },
+    });
+
+    const staff = await this.prisma.staffApplicant.findUnique({
+      where: { id: row.staffId },
+      select: { staffCode: true, series: true },
+    });
+    return this.mapRow(row, staff);
+  }
+
+  /**
+   * TRIAL → CONFIRMED. Previously there was no endpoint at all for this — placements
+   * were created as TRIAL by create() above and nothing ever moved them to CONFIRMED,
+   * which is the status staff check-in / RM attendance / invoicing all require. Demo
+   * data only worked because it was seeded directly as CONFIRMED, bypassing the API.
+   */
+  async confirm(id: string, actorId?: string) {
+    const existing = await this.prisma.placement.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Placement not found');
+    if (existing.status !== PlacementStatus.TRIAL) {
+      throw new BadRequestException(`Only a TRIAL placement can be confirmed (current status: ${existing.status})`);
+    }
+
+    const row = await this.prisma.placement.update({
+      where: { id },
+      data: { status: PlacementStatus.CONFIRMED },
+    });
+
+    await this.prisma.deployment.updateMany({
+      where: { placementId: id },
+      data: { status: PlacementStatus.CONFIRMED },
+    }).catch(() => undefined);
+
+    await this.audit.log({
+      actorId,
+      action: AuditAction.DEPLOYMENT_ACTION,
+      entityType: 'placement',
+      entityId: row.id,
+      metadata: { action: 'trial_confirmed' },
+    });
+
+    this.events.emit('realtime.broadcast', {
+      channel: 'deployments',
+      event: 'placement.confirmed',
       data: { placementId: row.id, staffId: row.staffId },
     });
 
