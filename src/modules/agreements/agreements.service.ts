@@ -139,21 +139,13 @@ export class AgreementsService {
   }
 
   private async findAnyClientId(): Promise<string | null> {
+    // FinanceCustomer, not ClientProfile (`clients`) — same id space as
+    // placements.client_id/sow.client_id, and the only table
+    // agreements.client_id's FK actually points at now.
     const rows = await this.prisma.$queryRaw<{ id: string }[]>`
-      SELECT id FROM clients ORDER BY created_at ASC LIMIT 1
+      SELECT id FROM finance_customers ORDER BY created_at ASC LIMIT 1
     `;
     return rows[0]?.id ?? null;
-  }
-
-  private async createDevClient(): Promise<string> {
-    const phone = `99${String(randomInt(100000000, 999999999))}`;
-    const rows = await this.prisma.$queryRaw<{ id: string }[]>`
-      INSERT INTO clients (full_name, phone, status)
-      VALUES ('Development Client', ${phone}, 'PROSPECT')
-      RETURNING id
-    `;
-    if (!rows[0]?.id) throw new BadRequestException('Could not create client record');
-    return rows[0].id;
   }
 
   private async findLegacyClientForStaff(staffId: string): Promise<string | null> {
@@ -274,12 +266,12 @@ export class AgreementsService {
     const existingClient = await this.findAnyClientId();
     if (existingClient) return existingClient;
 
-    if (process.env.NODE_ENV !== 'production') {
-      const createdId = await this.createDevClient();
-      this.log.warn(`[ESIGN_OTP] Auto-created dev client ${createdId}`);
-      return createdId;
-    }
-
+    // Previously auto-created a throwaway ClientProfile row here in dev mode.
+    // FinanceCustomer (the table client_id actually FKs to now) requires
+    // pan_card/bill_no_prefix/unit_code/unit_name with no sane defaults —
+    // fabricating those would create garbage billing records, so this now
+    // just errors clearly instead. Create a real FinanceCustomer via
+    // POST /finance/customers first.
     throw new BadRequestException(
       'No client is linked for this staff member. Add a client record before sending agreement OTP.',
     );

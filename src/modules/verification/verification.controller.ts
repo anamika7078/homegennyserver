@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, UseGuards, NotFoundException } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiQuery, ApiParam } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -15,6 +15,22 @@ import { VerificationService } from './verification.service';
 @Controller({ path: 'verification', version: '1' })
 export class VerificationController {
   constructor(private readonly verificationService: VerificationService) {}
+
+  @Get(':staffId')
+  @ApiOperation({
+    summary: 'Read back all 5 verification track statuses for a staff member',
+    description:
+      'Aggregates every VerificationTrack row (aadhaar/dl/echallan/pv/medical) persisted by the ' +
+      'verify-action endpoints below, plus which tracks are actually required for this staff\'s ' +
+      'series. Previously there was no way to read this back after navigating away from the ' +
+      'verification screen — only POST actions existed.',
+  })
+  @ApiParam({ name: 'staffId', example: 'b0116bc6-b2db-45e3-a6af-530b285a777e' })
+  async getStatus(@Param('staffId') staffId: string) {
+    const status = await this.verificationService.getStatusForStaff(staffId);
+    if (!status) throw new NotFoundException('Staff not found');
+    return status;
+  }
 
   @Post('dl')
   @ApiOperation({

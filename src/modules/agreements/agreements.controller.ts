@@ -25,7 +25,7 @@ export class AgreementsController {
   }
 
   @Post()
-  @Roles(UserRole.ADMIN, UserRole.BM)
+  @Roles(UserRole.ADMIN, UserRole.BM, UserRole.RM)
   create(@Body() body: Record<string, unknown>) {
     return this.agreementsService.createAgreement({
       staff_id: body.staff_id as string,

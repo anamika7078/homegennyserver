@@ -166,9 +166,14 @@ export class PlacementService {
     return this.mapRow(row, staff, client);
   }
 
-  async findAll(params: { limit: number; offset: number }) {
+  async findAll(params: { limit: number; offset: number; staffId?: string; clientId?: string }) {
+    const where = {
+      ...(params.staffId ? { staffId: params.staffId } : {}),
+      ...(params.clientId ? { clientId: params.clientId } : {}),
+    };
     const [rows, total] = await Promise.all([
       this.prisma.placement.findMany({
+        where,
         orderBy: { createdAt: 'desc' },
         take: params.limit,
         skip: params.offset,
@@ -176,7 +181,7 @@ export class PlacementService {
           branch: false,
         },
       }),
-      this.prisma.placement.count(),
+      this.prisma.placement.count({ where }),
     ]);
 
     const staffIds = [...new Set(rows.map((r) => r.staffId))];
