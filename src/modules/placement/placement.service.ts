@@ -21,6 +21,8 @@ export interface PlacementRow {
   trial_end_date: Date | string | null;
   staff_code?: string;
   series?: string;
+  staff_name?: string;
+  client_name?: string;
   [key: string]: unknown;
 }
 
@@ -43,7 +45,7 @@ export class PlacementService {
     trialEndDate: Date | null;
     createdAt: Date;
     updatedAt: Date;
-  }, staff?: { staffCode: string; series: string } | null): PlacementRow {
+  }, staff?: { staffCode: string; series: string; fullName?: string } | null, client?: { customerName: string } | null): PlacementRow {
     return {
       id: p.id,
       staff_id: p.staffId,
@@ -57,7 +59,23 @@ export class PlacementService {
       updated_at: p.updatedAt,
       staff_code: staff?.staffCode,
       series: staff?.series,
+      staff_name: staff?.fullName,
+      client_name: client?.customerName,
     };
+  }
+
+  private async getStaffMeta(staffId: string) {
+    return this.prisma.staffApplicant.findUnique({
+      where: { id: staffId },
+      select: { staffCode: true, series: true, fullName: true },
+    });
+  }
+
+  private async getClientMeta(clientId: string) {
+    return this.prisma.financeCustomer.findUnique({
+      where: { id: clientId },
+      select: { customerName: true },
+    });
   }
 
   async create(data: Record<string, unknown>, actorId?: string) {
@@ -103,11 +121,8 @@ export class PlacementService {
       data: { placementId: row.id, staffId: row.staffId },
     });
 
-    const staff = await this.prisma.staffApplicant.findUnique({
-      where: { id: row.staffId },
-      select: { staffCode: true, series: true },
-    });
-    return this.mapRow(row, staff);
+    const [staff, client] = await Promise.all([this.getStaffMeta(row.staffId), this.getClientMeta(row.clientId)]);
+    return this.mapRow(row, staff, client);
   }
 
   /**
@@ -147,11 +162,8 @@ export class PlacementService {
       data: { placementId: row.id, staffId: row.staffId },
     });
 
-    const staff = await this.prisma.staffApplicant.findUnique({
-      where: { id: row.staffId },
-      select: { staffCode: true, series: true },
-    });
-    return this.mapRow(row, staff);
+    const [staff, client] = await Promise.all([this.getStaffMeta(row.staffId), this.getClientMeta(row.clientId)]);
+    return this.mapRow(row, staff, client);
   }
 
   async findAll(params: { limit: number; offset: number }) {
@@ -168,17 +180,22 @@ export class PlacementService {
     ]);
 
     const staffIds = [...new Set(rows.map((r) => r.staffId))];
-    const staffMap = new Map(
-      (
-        await this.prisma.staffApplicant.findMany({
-          where: { id: { in: staffIds } },
-          select: { id: true, staffCode: true, series: true },
-        })
-      ).map((s) => [s.id, s]),
-    );
+    const clientIds = [...new Set(rows.map((r) => r.clientId))];
+    const [staffRows, clientRows] = await Promise.all([
+      this.prisma.staffApplicant.findMany({
+        where: { id: { in: staffIds } },
+        select: { id: true, staffCode: true, series: true, fullName: true },
+      }),
+      this.prisma.financeCustomer.findMany({
+        where: { id: { in: clientIds } },
+        select: { id: true, customerName: true },
+      }),
+    ]);
+    const staffMap = new Map(staffRows.map((s) => [s.id, s]));
+    const clientMap = new Map(clientRows.map((c) => [c.id, c]));
 
     return {
-      items: rows.map((r) => this.mapRow(r, staffMap.get(r.staffId) ?? null)),
+      items: rows.map((r) => this.mapRow(r, staffMap.get(r.staffId) ?? null, clientMap.get(r.clientId) ?? null)),
       total,
     };
   }
