@@ -9,7 +9,9 @@ groups: **Auth**, **RM**, **Staff**, and **Client**.
 > plan against the Flutter app's actual current (dummy-data) RM feature, covering every endpoint
 > below in context plus the exact `ApiConstants`/architecture to add. For a ready-to-paste
 > implementation prompt derived from that plan, see
-> [`RM_CLAUDE_PROMPT.md`](./RM_CLAUDE_PROMPT.md).
+> [`RM_CLAUDE_PROMPT.md`](./RM_CLAUDE_PROMPT.md). For the underlying product spec (pipeline stage
+> narratives, all 94 scenario codes, user-role permissions, payroll rules) and where it disagrees
+> with what's actually built, see [`PRODUCT_SPEC_REFERENCE.md`](./PRODUCT_SPEC_REFERENCE.md).
 
 ## 1. Environment
 
