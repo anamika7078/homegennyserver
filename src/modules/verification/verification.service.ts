@@ -209,6 +209,54 @@ export class VerificationService {
     return result;
   }
 
+  /**
+   * Every verify-action above (aadhaar/dl/echallan/pv/medical) persists a VerificationTrack
+   * row, but until now there was no way to read it back — an RM navigating away from a
+   * verification screen had no way to reconstruct what was already checked. Mirrors the
+   * REQUIRED_VERIFICATION_TRACKS logic already used in staff-mobile.controller.ts so RM and
+   * Staff see the same "what's required for this series" signal.
+   */
+  async getStatusForStaff(staffId: string) {
+    const staff = await this.prisma.staffApplicant.findUnique({
+      where: { id: staffId },
+      select: { series: true, verificationTracks: true },
+    });
+    if (!staff) return null;
+
+    const TRACK_LABELS: Record<string, string> = {
+      AADHAAR_EKYC: 'aadhaar',
+      SARATHI_API: 'dl',
+      ECHALLAN_API: 'echallan',
+      POLICE_VERIFICATION: 'pv',
+      HEALTH_SCREENING: 'medical',
+    };
+    const REQUIRED_BY_SERIES: Record<string, string[]> = {
+      DR: ['AADHAAR_EKYC', 'SARATHI_API', 'ECHALLAN_API', 'POLICE_VERIFICATION', 'HEALTH_SCREENING'],
+      SC: ['AADHAAR_EKYC', 'POLICE_VERIFICATION', 'HEALTH_SCREENING'],
+      UC: ['AADHAAR_EKYC', 'POLICE_VERIFICATION'],
+      MAID: ['AADHAAR_EKYC', 'POLICE_VERIFICATION'],
+    };
+
+    const bySlug = new Map(staff.verificationTracks.map((t) => [TRACK_LABELS[t.trackType] ?? t.trackType, t]));
+    const required = REQUIRED_BY_SERIES[staff.series] ?? [];
+
+    const tracks = Object.entries(TRACK_LABELS).map(([trackType, slug]) => {
+      const row = bySlug.get(slug);
+      return {
+        track: slug,
+        track_type: trackType,
+        required: required.includes(trackType),
+        status: row?.status ?? 'NOT_STARTED',
+        verified_at: row?.verifiedAt ?? null,
+        notes: row?.notes ?? null,
+      };
+    });
+
+    const allRequiredClear = required.every((t) => bySlug.get(TRACK_LABELS[t])?.status === 'CLEAR');
+
+    return { staff_id: staffId, series: staff.series, tracks, all_required_clear: allRequiredClear };
+  }
+
   private mapSarathiResponse(data: Record<string, unknown>): SarathiResult {
     return {
       dl_number: String(data['dlNumber'] ?? data['dl_number'] ?? ''),

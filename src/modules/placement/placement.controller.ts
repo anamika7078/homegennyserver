@@ -1,5 +1,5 @@
 import { Controller, Get, Post, Param, Body, Query, Req, UseGuards } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
@@ -43,11 +43,20 @@ export class PlacementController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'List all placements' })
+  @ApiOperation({
+    summary: 'List placements',
+    description: 'Optionally filter to a single staff member or client — e.g. to find "this staff\'s placement" without paging through everything.',
+  })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 100 })
+  @ApiQuery({ name: 'offset', required: false, type: Number, example: 0 })
+  @ApiQuery({ name: 'staff_id', required: false, description: 'StaffApplicant id' })
+  @ApiQuery({ name: 'client_id', required: false, description: 'FinanceCustomer id' })
   findAll(@Query() q: Record<string, string>): Promise<PlacementList> {
     return this.service.findAll({
       limit:  q['limit']  ? parseInt(q['limit'],  10) : 100,
       offset: q['offset'] ? parseInt(q['offset'], 10) : 0,
+      staffId: q['staff_id'] || undefined,
+      clientId: q['client_id'] || undefined,
     });
   }
 

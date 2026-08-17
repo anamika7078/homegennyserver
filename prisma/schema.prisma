@@ -160,7 +160,6 @@ model ClientProfile {
   createdAt           DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt           DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt           DateTime?    @map("deleted_at") @db.Timestamptz(6)
-  agreements          Agreement[]
   deployments         Deployment[]
 
   @@map("clients")
@@ -341,7 +340,13 @@ model Agreement {
   metadata    Json            @default("{}")
   createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
-  client      ClientProfile   @relation(fields: [clientId], references: [id])
+  // Was ClientProfile (`clients` table) — the same identity-mismatch bug fixed
+  // for SOW/Indemnity/Incidents earlier: real CLIENT logins are linked to
+  // FinanceCustomer (via userId), placements.client_id/sow.client_id are that
+  // same id space, but agreements.client_id pointed at ClientProfile instead —
+  // a real FinanceCustomer id would FK-violate on insert. No agreements rows
+  // existed anywhere (local or prod) when this was fixed, so no migration risk.
+  client      FinanceCustomer @relation(fields: [clientId], references: [id])
   staff       StaffApplicant? @relation(fields: [staffId], references: [id])
 
   @@index([staffId])
@@ -1197,6 +1202,7 @@ model FinanceCustomer {
   finance_commercial_calculations finance_commercial_calculations[]
   finance_quotations              finance_quotations[]
   finance_rate_cards              finance_rate_cards[]
+  agreements                      Agreement[]
 
   @@index([unitCode])
   @@index([panCard])
