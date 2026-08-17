@@ -7,7 +7,9 @@ groups: **Auth**, **RM**, **Staff**, and **Client**.
 > **Building out the RM screens specifically?** See
 > [`RM_MOBILE_APP_INTEGRATION_PLAN.md`](./RM_MOBILE_APP_INTEGRATION_PLAN.md) — a screen-by-screen
 > plan against the Flutter app's actual current (dummy-data) RM feature, covering every endpoint
-> below in context plus the exact `ApiConstants`/architecture to add.
+> below in context plus the exact `ApiConstants`/architecture to add. For a ready-to-paste
+> implementation prompt derived from that plan, see
+> [`RM_CLAUDE_PROMPT.md`](./RM_CLAUDE_PROMPT.md).
 
 ## 1. Environment
 
