@@ -11,7 +11,9 @@ groups: **Auth**, **RM**, **Staff**, and **Client**.
 > implementation prompt derived from that plan, see
 > [`RM_CLAUDE_PROMPT.md`](./RM_CLAUDE_PROMPT.md). For the underlying product spec (pipeline stage
 > narratives, all 94 scenario codes, user-role permissions, payroll rules) and where it disagrees
-> with what's actually built, see [`PRODUCT_SPEC_REFERENCE.md`](./PRODUCT_SPEC_REFERENCE.md).
+> with what's actually built, see [`PRODUCT_SPEC_REFERENCE.md`](./PRODUCT_SPEC_REFERENCE.md). For
+> the full S1→S5 pipeline flow — every stage's exact API calls, Trainer's role, and RM's authority
+> to advance/skip stages — see [`RM_PIPELINE_PLAYBOOK.md`](./RM_PIPELINE_PLAYBOOK.md).
 
 ## 1. Environment
 
