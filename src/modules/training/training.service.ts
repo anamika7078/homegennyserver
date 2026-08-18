@@ -128,8 +128,16 @@ export class TrainingService {
     const classroom = String(body.classroom ?? 'Main Hall');
     const startDate = String(body.startDate ?? body.start_date ?? new Date().toISOString().slice(0, 10));
     const status = String(body.status ?? 'UPCOMING');
-    const branchId = body.branchId ?? body.branch_id ?? resolveStaffScope(user, {}).branchId ?? null;
-    const rmId = body.rmId ?? body.rm_id ?? resolveStaffScope(user, {}).rmId ?? null;
+    // resolveStaffScope() only fills branchId/rmId in for the RM/BM cases —
+    // for any other creator (TRAINER, ADMIN) both silently fell through to
+    // null, and getAssignedBatches()'s `AND b.branch_id = '<trainer's own
+    // branch>'` can never match a NULL row. A batch a Trainer created via
+    // their own "Add Batch" screen would save fine, appear immediately from
+    // the create response, then vanish on the next real fetch (reload).
+    // Falling back to the acting user's own branchId/id covers that case
+    // without touching the RM/BM resolution, which already worked.
+    const branchId = body.branchId ?? body.branch_id ?? resolveStaffScope(user, {}).branchId ?? user.branchId ?? null;
+    const rmId = body.rmId ?? body.rm_id ?? resolveStaffScope(user, {}).rmId ?? (user.role === 'TRAINER' ? user.id : null);
 
     const res = await this.prisma.$queryRawUnsafe<any[]>(
       `INSERT INTO training_batches (id, batch_code, series, trainer_name, trainer_id, classroom, start_date, status, branch_id, rm_id, created_at, updated_at)
