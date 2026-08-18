@@ -51,7 +51,7 @@ Staff record is created and screened against the restricted list in the same cal
 
 | Method | Route | Notes |
 |---|---|---|
-| POST | `/rm/intake` | Creates the `StaffApplicant`. Restricted-list check runs inline. `advance_to_verify: true` (default) auto-moves it straight to S2_VERIFY. Body: `{ aadhaar_number, mobile, full_name, date_of_birth, address, series, deposit_amount?, advance_to_verify? }` |
+| POST | `/rm/intake` | Creates the `StaffApplicant`. Restricted-list check runs inline. `advance_to_verify: true` (default) auto-moves it straight to S2_VERIFY. Body: `{ aadhaar_number, mobile, full_name, date_of_birth, address, series, deposit_amount?, deposit_collected?, advance_to_verify? }` — `deposit_amount` is optional now: pass `deposit_collected: true` with no amount and it defaults by series (DR ₹2,000 / SC ₹1,500 / UC ₹1,000 / Maid ₹500). |
 
 ## S2 — Verify
 
@@ -133,7 +133,7 @@ Indemnity).
 
 | Method | Route | Notes |
 |---|---|---|
-| POST | `/placements` | Create the `TRIAL` placement **right here**, as soon as A1 is signed — don't wait for S5. `{ staff_id, client_id }` |
+| POST | `/placements` | Create the `TRIAL` placement **right here**, as soon as A1 is signed — don't wait for S5. `{ staff_id, client_id }`. Trial length defaults by the staff's series per spec — 7 days for Maid/UC/DR, 14 for SC — unless `trial_end_date` is passed explicitly. |
 | POST | `/sow` | `{ placement_id, content }` |
 | POST | `/indemnity` | `{ placement_id, clause_version, clause_text }` |
 

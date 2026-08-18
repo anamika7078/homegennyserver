@@ -178,6 +178,43 @@ state/endpoints** — flagging so a future session doesn't assume they're built:
 - **Restricted-list check UX** (the mockup's dedicated "Restricted Check" screen with CLEAR/RESTRICTED result cards) maps cleanly to the real `POST /restricted-list/check` (or `POST /staff/check-restricted`) — this one *is* accurately represented in the mockup.
 - **BM dashboard "Issues & Alarms" screen** (client complaints, compliance alerts, payment issues, system alerts, all in one triaged inbox with notes/status workflow) has **no single backing endpoint** — real data would need to be composed from `GET /rm/incidents`, `GET /finance/deposits`, monitoring-cron outputs, and system-health endpoints; there's no unified "alarms" resource today.
 
+### Fixed this session, against `HomeGenny_StageDescriptions.pdf` directly
+
+Re-audited the backend line-by-line against the source stage-description doc (not the UI mockups). Two real
+gaps found and fixed, live-tested both:
+
+- **Trial period was hardcoded to 14 days for every series.** Spec (S5, Trial Period): Maid/UC/DR = 7 days, SC
+  = 14 days only. `PlacementService.create()` now looks up the staff's series and picks the right default;
+  an explicit `trial_end_date` in the request still always wins. Verified: a MAID and a DRIVER placement both
+  got a 7-day window, a SKILLED_CARE placement got 14.
+- **Deposit amount had no series default.** Spec (S1, Series Differences): DR ₹2,000 · SC ₹1,500 · UC ₹1,000 ·
+  Maid ₹500. `POST /rm/intake` previously only created a `Deposit` row if the caller passed an explicit
+  `deposit_amount` — nothing defaulted it, so the RM had to already know the right figure. Now, if
+  `deposit_collected: true` is sent without an amount, it defaults from the staff's series. Still opt-in — a
+  plain intake with no deposit signal at all still creates no `Deposit` row.
+
+### Confirmed complete against `HomeGenny_StageDescriptions.pdf`
+
+- FSM transitions (S1→S2→S2.5 DR-only→S3→S4→S5, Deferred, Terminal) — exact match.
+- Video-cert prompt counts per series (Maid 9, UC 10, SC 10, DR 12) — exact match
+  (`REQUIRED_VIDEO_PROMPTS` in `pipeline-fsm.service.ts`).
+- 3-attempt hard limit on the DR practical test — matches.
+- All **7 monitoring cron jobs** the spec describes (DL expiry, eChallan daily, PV renewal, video-cert renewal,
+  trial expiry, invoice overdue, upgrade path) exist in `monitoring.service.ts`, correctly scoped.
+- 90-day Deferred auto-timeout — cron exists (`deferredTimeoutCheck`).
+
+### Still open (found in the same re-audit, not fixed yet)
+
+- **This spec document has no "Trainer" role at all** — every S2/S2.5/S3 responsibility (including video-cert
+  sign-off) is written as an RM action. The platform's actual `TRAINER` role (see the video-cert bullet above)
+  is a deliberate divergence from *this* doc, not an omission — flagging so it isn't mistaken for one.
+- **The 7-day / 14-day minimum wait between DR practical-test attempts (`DR-10`) isn't a server-enforced
+  gate** — only the 3-attempt ceiling is enforced (`assessments.service.ts`). An RM can technically resubmit
+  before the spec's cooldown period.
+- **The late-exit cancellation fee matrix** (30/15/7-day salary + goodwill scaled by how long post-confirmation
+  the exit happens) is documented in spec but not automated anywhere in code — would need to be computed
+  manually today.
+
 ## 7. Where to go for endpoint-level detail
 - `docs/MOBILE_API_REFERENCE.md` — Auth/RM/Staff/Client endpoint list, demo accounts, response shapes.
 - `docs/RM_MOBILE_APP_INTEGRATION_PLAN.md` — screen-by-screen plan mapping the *current* dummy-data Flutter RM feature to real endpoints.
