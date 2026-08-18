@@ -34,7 +34,7 @@ export class PlacementController {
         staff_salary: { type: 'number', example: 18000 },
         management_fee: { type: 'number', example: 4500 },
         trial_start_date: { type: 'string', format: 'date', description: 'Optional — defaults to now' },
-        trial_end_date: { type: 'string', format: 'date', description: 'Optional — defaults to +14 days' },
+        trial_end_date: { type: 'string', format: 'date', description: 'Optional — defaults to +7 days (Maid/UC/DR) or +14 days (SC), based on the staff\'s series' },
       },
     },
   })

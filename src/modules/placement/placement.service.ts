@@ -5,6 +5,18 @@ import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '@prisma/client';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 
+// Spec (HomeGenny_StageDescriptions, S5 Trial Period): Maid/UC/DR = 7-day
+// trial, SC = 14-day trial. create() used to default every series to 14 days
+// flat — a Maid or Driver placement's trial ran twice as long as it should
+// unless the caller explicitly overrode trial_end_date every single time.
+const TRIAL_DAYS_BY_SERIES: Record<string, number> = {
+  MAID: 7,
+  UNSKILLED_CARE: 7,
+  DRIVER: 7,
+  SKILLED_CARE: 14,
+};
+const DEFAULT_TRIAL_DAYS = 7;
+
 export interface PlacementList {
   items: PlacementRow[];
   total: number;
@@ -80,6 +92,16 @@ export class PlacementService {
 
   async create(data: Record<string, unknown>, actorId?: string) {
     const branchId = String(data.branch_id ?? '00000000-0000-0000-0000-000000000001');
+
+    let trialDays = DEFAULT_TRIAL_DAYS;
+    if (!data.trial_end_date && data.staff_id) {
+      const staff = await this.prisma.staffApplicant.findUnique({
+        where: { id: String(data.staff_id) },
+        select: { series: true },
+      });
+      if (staff) trialDays = TRIAL_DAYS_BY_SERIES[staff.series] ?? DEFAULT_TRIAL_DAYS;
+    }
+
     const row = await this.prisma.placement.create({
       data: {
         staffId: String(data.staff_id),
@@ -92,7 +114,7 @@ export class PlacementService {
         trialStartDate: data.trial_start_date ? new Date(String(data.trial_start_date)) : new Date(),
         trialEndDate: data.trial_end_date
           ? new Date(String(data.trial_end_date))
-          : new Date(Date.now() + 14 * 86400000),
+          : new Date(Date.now() + trialDays * 86400000),
       },
     });
 

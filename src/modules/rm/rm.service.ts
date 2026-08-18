@@ -22,6 +22,16 @@ import {
 } from './branch-areas.config';
 import * as crypto from 'crypto';
 
+// Spec (HomeGenny_StageDescriptions, S1 Series Differences): "branch-configurable
+// but typically" these amounts. Keyed on the raw StaffSeries enum, not the
+// short RM-facing code, so it works straight off created.series_db.
+const SERIES_DEPOSIT_DEFAULTS: Record<string, number> = {
+  MAID: 500,
+  UNSKILLED_CARE: 1000,
+  SKILLED_CARE: 1500,
+  DRIVER: 2000,
+};
+
 const KANBAN_STAGES: PipelineStage[] = [
   'S1_INTAKE',
   'S2_VERIFY',
@@ -337,11 +347,21 @@ export class RmService {
         branchId: created.branch_id as string | null,
       });
     }
-    if (body.deposit_amount) {
+    // RM previously had to know/type the correct series-specific deposit
+    // figure themselves — nothing defaulted it. Per spec: DR ₹2,000, SC
+    // ₹1,500, UC ₹1,000, Maid ₹500 (branch-configurable "typical" amounts).
+    // Still opt-in (only creates a Deposit row if the RM signalled one via
+    // an explicit amount or `deposit_collected: true`) — this only removes
+    // the need to know the right number, it doesn't force a deposit onto
+    // every intake.
+    const depositAmount = body.deposit_amount != null
+      ? Number(body.deposit_amount)
+      : (body.deposit_collected ? SERIES_DEPOSIT_DEFAULTS[String(created.series_db)] : undefined);
+    if (depositAmount != null) {
       await this.prisma.deposit.create({
         data: {
           staffId: created.id as string,
-          amount: Number(body.deposit_amount),
+          amount: depositAmount,
           status: body.deposit_collected ? 'COLLECTED' : 'PENDING',
           collectedAt: body.deposit_collected ? new Date() : undefined,
         },
