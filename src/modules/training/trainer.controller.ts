@@ -20,6 +20,15 @@ export class TrainerController {
     return this.trainerService.getAssignedBatches(req.user);
   }
 
+  // Was missing entirely — PUT .../review existed with no way to discover
+  // which ids to review. getVideoCerts() already existed as a private helper
+  // feeding the dashboard's pending count; exposing it here is the same
+  // branch-scoped query, just returned as a real list instead of a count.
+  @Get('video-certifications')
+  async getVideoCerts(@Req() req: any) {
+    return this.trainerService.getVideoCerts(req.user);
+  }
+
   @Put('assessment/:traineeId')
   async updateAssessment(
     @Req() req: any,
