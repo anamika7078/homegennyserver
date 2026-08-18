@@ -22,7 +22,12 @@ function genBatchCode(series: string): string {
   const s = seriesAlias(series);
   const now = new Date();
   const month = String(now.getMonth() + 1).padStart(2, '0');
-  const rand = Math.floor(Math.random() * 90 + 10);
+  // Was `month + 2-digit random` — only 90 possible codes per series/month,
+  // so a busy month collided in real testing (batch_code is UNIQUE and the
+  // insert wasn't caught, so a collision surfaced as a bare 500). 5-digit
+  // random suffix (90,000 possibilities) makes that collision negligible on
+  // its own; createBatch() below also retries once on an actual duplicate.
+  const rand = Math.floor(Math.random() * 90000 + 10000);
   return `TRN-${s}-${now.getFullYear()}-${month}${rand}`;
 }
 
@@ -122,7 +127,6 @@ export class TrainingService {
   async createBatch(user: AuthUser, body: Record<string, unknown>) {
     await this.ensureTables();
     const series = String(body.series ?? 'DR');
-    const code = genBatchCode(series);
     const trainerName = String(body.trainerName ?? body.trainer_name ?? (user as any).name ?? (user as any).fullName ?? 'Staff Trainer');
     const trainerId = String(body.trainerId ?? body.trainer_id ?? user.id);
     const classroom = String(body.classroom ?? 'Main Hall');
@@ -139,17 +143,40 @@ export class TrainingService {
     const branchId = body.branchId ?? body.branch_id ?? resolveStaffScope(user, {}).branchId ?? user.branchId ?? null;
     const rmId = body.rmId ?? body.rm_id ?? resolveStaffScope(user, {}).rmId ?? (user.role === 'TRAINER' ? user.id : null);
 
-    const res = await this.prisma.$queryRawUnsafe<any[]>(
-      `INSERT INTO training_batches (id, batch_code, series, trainer_name, trainer_id, classroom, start_date, status, branch_id, rm_id, created_at, updated_at)
-       VALUES (gen_random_uuid(), $1, $2, $3, $4::uuid, $5, $6::date, $7, $8::uuid, $9::uuid, now(), now())
-       RETURNING id`,
-      code, series, trainerName, trainerId, classroom, startDate, status, branchId, rmId,
-    );
+    // batch_code is UNIQUE and genBatchCode() is random — a collision wasn't
+    // caught anywhere, so it surfaced as a bare 500 on POST /training/batches
+    // (confirmed live: 8+ batches already existed for one series this month
+    // against a 90-code keyspace). Wider keyspace above makes it rare; retry
+    // a few times on the specific unique-violation as a backstop instead of
+    // trusting randomness alone.
+    let res: any[] | undefined;
+    let code = '';
+    for (let attempt = 0; attempt < 5; attempt++) {
+      code = genBatchCode(series);
+      try {
+        res = await this.prisma.$queryRawUnsafe<any[]>(
+          `INSERT INTO training_batches (id, batch_code, series, trainer_name, trainer_id, classroom, start_date, status, branch_id, rm_id, created_at, updated_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4::uuid, $5, $6::date, $7, $8::uuid, $9::uuid, now(), now())
+           RETURNING id`,
+          code, series, trainerName, trainerId, classroom, startDate, status, branchId, rmId,
+        );
+        break;
+      } catch (err: any) {
+        // $queryRawUnsafe wraps the real Postgres error — err.code is
+        // Prisma's generic 'P2010' ("raw query failed"), the actual
+        // unique-violation code (23505) and constraint detail live under
+        // err.meta. Confirmed the exact shape by reproducing this collision
+        // directly against Prisma before writing this check.
+        const isBatchCodeCollision =
+          err?.meta?.code === '23505' && String(err?.meta?.message ?? '').includes('batch_code');
+        if (!isBatchCodeCollision || attempt === 4) throw err;
+      }
+    }
 
     return {
       success: true,
       batch: {
-        id: res[0].id,
+        id: res![0].id,
         batchCode: code,
         series,
         trainerName,
