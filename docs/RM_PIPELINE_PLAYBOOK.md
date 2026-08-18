@@ -91,13 +91,19 @@ POST /rm/pipeline/:staffId/advance
 
 ## S3 — Train
 
-Video-prompt training and certification. Upload is RM/staff-driven; approval is Trainer-only.
+Video-prompt training and certification. **The staff member records and uploads their own
+video** — `upload-url` and `finalize` are `STAFF`-only routes (RM cannot call them; RM can only
+view via `/video-cert/view-url`). Approval is Trainer-only.
 
-| Method | Route | Notes |
-|---|---|---|
-| GET | `/video-cert/prompts/:series` | Prompt list for this series |
-| POST | `/video-cert/upload-url` | Signed URL — the video file uploads directly to it |
-| POST | `/video-cert/finalize` | Hash-verifies and permanently saves the upload |
+> Spec says RM should review/sign-off video certs — actual code only allows TRAINER/ADMIN on
+> `PUT /trainer/video-certifications/:id/review`. This is a known, already-flagged spec-vs-actual
+> gap (comment in `video-cert.controller.ts`), not something broken by a recent change.
+
+| Method | Route | Called by | Notes |
+|---|---|---|---|
+| GET | `/video-cert/prompts/:series` | Staff | Prompt list for this series |
+| POST | `/video-cert/upload-url` | Staff | Signed URL — the video file uploads directly to it |
+| POST | `/video-cert/finalize` | Staff | Hash-verifies and permanently saves the upload |
 
 > **Gate**: RM cannot approve a video cert. Approval only happens via
 > `PUT /trainer/video-certifications/:id/review` (see [Trainer's role](#trainers-role-specifically)).
