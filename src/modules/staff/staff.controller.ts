@@ -26,7 +26,15 @@ export class StaffController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'List staff applicants with optional filters' })
+  @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN, UserRole.TRAINER)
+  @ApiOperation({
+    summary: 'List staff applicants with optional filters',
+    description:
+      'Trainer also has read access here — needed to search real S3_TRAIN pipeline candidates ' +
+      'when adding a trainee to a training batch (was previously only searchable from the internal ' +
+      'HR employees list, which cannot be enrolled at all — batch_enrollments.staff_id FKs to ' +
+      'staff_applicants, not employees).',
+  })
   @ApiQuery({ name: 'limit', required: false })
   @ApiQuery({ name: 'offset', required: false })
   @ApiQuery({ name: 'stage', required: false })

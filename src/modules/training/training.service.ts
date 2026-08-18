@@ -93,8 +93,8 @@ export class TrainingService {
               'staffCode', COALESCE(emp.employee_id, sa.staff_code, 'N/A'),
               'fullName', COALESCE(emp.full_name, sa.full_name, 'Unknown'),
               'mobile', COALESCE(emp.mobile, sa.mobile, ''),
-              'department', COALESCE(emp.department, sa.series, ''),
-              'designation', COALESCE(emp.designation, sa.series, '')
+              'department', COALESCE(emp.department, sa.series::text, ''),
+              'designation', COALESCE(emp.designation, sa.series::text, '')
             ) ORDER BY COALESCE(emp.full_name, sa.full_name)
           ) FILTER (WHERE e.id IS NOT NULL),
           '[]'::json

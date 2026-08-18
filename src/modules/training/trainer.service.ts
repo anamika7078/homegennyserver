@@ -195,6 +195,11 @@ export class TrainerService {
     try {
     const trainerClause = await this.getTrainerEmployeeClause(user.id);
     
+    // Enrollments are almost always a StaffApplicant (real S1-S5 pipeline
+    // trainees) now that GET /staff?stage=S3_TRAIN backs the enroll picker —
+    // was only joining `employees`, so every real trainee showed up here with
+    // a null name/staffCode. Mirrors the same COALESCE pattern already used
+    // in training.service.ts's listBatches().
     const rows = await this.prisma.$queryRawUnsafe<any[]>(`
       SELECT
         b.id, b.batch_code, b.series, b.trainer_name, b.trainer_id, b.classroom,
@@ -205,18 +210,19 @@ export class TrainerService {
               'id', e.id,
               'staffId', e.staff_id::text,
               'attendance', e.attendance,
-              'staffCode', emp.employee_id,
-              'fullName', emp.full_name,
-              'mobile', emp.mobile,
-              'department', emp.department,
-              'designation', emp.designation
-            ) ORDER BY emp.full_name
+              'staffCode', COALESCE(emp.employee_id, sa.staff_code, 'N/A'),
+              'fullName', COALESCE(emp.full_name, sa.full_name, 'Unknown'),
+              'mobile', COALESCE(emp.mobile, sa.mobile, ''),
+              'department', COALESCE(emp.department, sa.series::text, ''),
+              'designation', COALESCE(emp.designation, sa.series::text, '')
+            ) ORDER BY COALESCE(emp.full_name, sa.full_name)
           ) FILTER (WHERE e.id IS NOT NULL),
           '[]'::json
         ) AS enrollments
       FROM training_batches b
       LEFT JOIN batch_enrollments e ON e.batch_id = b.id
       LEFT JOIN employees emp ON emp.id = e.staff_id AND emp.deleted_at IS NULL
+      LEFT JOIN staff_applicants sa ON sa.id = e.staff_id AND sa.deleted_at IS NULL
       WHERE 1=1 ${branchClause} ${trainerClause}
       GROUP BY b.id
       ORDER BY b.created_at DESC
@@ -284,7 +290,11 @@ export class TrainerService {
     }
 
     return mappedRows;
-    } catch {
+    } catch (err) {
+      // Was a silent `catch { return [] }` — a real query bug (e.g. the
+      // enum/varchar COALESCE mismatch fixed alongside this) looked
+      // identical to "trainer has no batches" with nothing in the logs.
+      this.logger.warn(`getAssignedBatches: ${err instanceof Error ? err.message : String(err)}`);
       return [];
     }
   }
