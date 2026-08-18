@@ -124,8 +124,8 @@ Indemnity).
 | Method | Route | Notes |
 |---|---|---|
 | POST | `/agreements` | `{ staff_id, client_id, type: "A1" }` |
-| POST | `/agreements/esign/send-otp` | |
-| POST | `/agreements/esign/verify-otp` | |
+| POST | `/agreements/esign/send-otp` | `{ staff_id, staff_name, agreement_type }` |
+| POST | `/agreements/esign/verify-otp` | `{ staff_id, agreement_type, otp }` — **mock OTP is hardcoded to `123456`** until a real SMS/OTP provider is wired in (same convention as `/auth/forgot-password`). `send-otp` still has to be called first. This is the only OTP step in the whole pipeline — A2/A3 don't use OTP at all. |
 | POST | `/agreements/:id/sign` | |
 | POST | `/agreements/:id/generate-pdf` | |
 
