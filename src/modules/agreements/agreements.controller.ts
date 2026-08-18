@@ -37,12 +37,22 @@ export class AgreementsController {
 
   @Post('esign/send-otp')
   @Roles(UserRole.ADMIN, UserRole.BM, UserRole.RM)
+  @ApiOperation({
+    summary: 'Send agreement e-sign OTP',
+    description: '⚠️ TEMPORARY: the OTP is hardcoded to `123456` (same convention as /auth/forgot-password) ' +
+      'until a real OTP/SMS provider is wired in — send-otp still has to be called first, but any actual SMS ' +
+      'delivery is mocked.',
+  })
   sendEsignOtp(@Body() dto: SendEsignOtpDto) {
     return this.agreementsService.sendEsignOtp(dto);
   }
 
   @Post('esign/verify-otp')
   @Roles(UserRole.ADMIN, UserRole.BM, UserRole.RM)
+  @ApiOperation({
+    summary: 'Verify agreement e-sign OTP',
+    description: '⚠️ TEMPORARY: hardcoded to `123456` until a real OTP/SMS provider is wired in.',
+  })
   verifyOtp(@Body() body: { staff_id: string; agreement_type: string; otp: string }) {
     return this.agreementsService.verifyEsignOtp(body.staff_id, body.agreement_type, body.otp);
   }

@@ -1,10 +1,18 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { createHash, randomInt } from 'crypto';
+import { createHash } from 'crypto';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction, AgreementStatus } from '@prisma/client';
 import { SendEsignOtpDto } from './dto/send-esign-otp.dto';
+
+/**
+ * TEMPORARY: hardcoded to '123456' (same convention as /auth/forgot-password
+ * and /auth/change-password — see MOCK_OTP in auth.service.ts) until a real
+ * OTP/SMS provider is wired in for agreement e-sign. Was `randomInt(100000,
+ * 999999)` before this.
+ */
+const AGREEMENT_ESIGN_MOCK_OTP = '123456';
 
 interface OtpEntry {
   otp: string;
@@ -294,7 +302,7 @@ export class AgreementsService {
     const staffName = staff.fullName.trim() || dto.staff_name?.trim() || '';
     if (!staffName) throw new BadRequestException('Could not resolve staff name');
 
-    const otp = String(randomInt(100000, 999999));
+    const otp = AGREEMENT_ESIGN_MOCK_OTP;
     const key = this.otpKey(dto.staff_id, dto.agreement_type);
     this.otpStore.set(key, {
       otp,
