@@ -9,7 +9,7 @@ import { Prisma, PipelineStage, UserRole, StaffAttendanceStatus, TerminalOutcome
 import { PrismaService } from '../../prisma/prisma.service';
 import { PipelineFsmService, PipelineStage as FsmStage } from '../pipeline/pipeline-fsm.service';
 import { AuthUser, resolveStaffScope, assertStaffAccess } from '../../common/guards/branch-scope.util';
-import { toStaffDto, parseCreateStaffBody } from '../../common/mappers/staff.mapper';
+import { toStaffDto, parseCreateStaffBody, mapSeriesFromShort } from '../../common/mappers/staff.mapper';
 import { StaffService } from '../staff/staff.service';
 import { PayrollService } from '../payroll/payroll.service';
 import { UserProvisioningService } from '../auth/user-provisioning.service';
@@ -201,7 +201,7 @@ export class RmService {
       ...(scope.rmId ? { assignedRmId: scope.rmId } : {}),
       ...(scope.branchId ? { branchId: scope.branchId } : {}),
     };
-    if (params.series) where.series = params.series as never;
+    if (params.series) where.series = mapSeriesFromShort(params.series);
     if (params.search) {
       where.OR = [
         { staffCode: { contains: params.search, mode: 'insensitive' } },
