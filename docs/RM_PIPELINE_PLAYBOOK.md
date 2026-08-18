@@ -37,6 +37,7 @@ behalf. Its job is narrow and sits entirely inside S3_TRAIN:
 |---|---|---|
 | GET | `/trainer/dashboard` | Their own stats — batches, pending reviews. |
 | GET | `/trainer/batches` | Training batches assigned to this trainer. |
+| GET | `/trainer/video-certifications` | List of video-cert submissions (branch-scoped), any status. Added because the review action below existed with no way to discover which ids needed reviewing — the web app's Trainer video-cert page always showed empty before this. |
 | PUT | `/trainer/assessment/:traineeId` | Records/updates a trainee's in-class assessment score. Separate from the S2.5 driver practical test (`/assessments`), which RM/Admin runs. |
 | PUT | `/trainer/video-certifications/:id/review` | **The real gate.** `{ status: "APPROVED" \| "REJECTED", notes? }` — this is the only way a video-cert prompt clears. It's what `checkDeploymentEligibility` counts against `REQUIRED_VIDEO_PROMPTS` before S5_DEPLOY is allowed. |
 | POST | `/agreements/video-cert/:staffId/lock` | Trainer (or BM/Admin) locks the staff's approved video-cert set once training is done, ahead of moving into S4_AGREEMENTS. |
