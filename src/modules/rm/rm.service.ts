@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -34,6 +35,8 @@ const KANBAN_STAGES: PipelineStage[] = [
 
 @Injectable()
 export class RmService {
+  private readonly logger = new Logger(RmService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly fsm: PipelineFsmService,
@@ -427,7 +430,7 @@ export class RmService {
     if (user.role === UserRole.RM && log.staff.assignedRmId !== user.id) {
       throw new ForbiddenException('Not assigned to this staff member');
     }
-    return this.prisma.shiftLog.update({
+    const updated = await this.prisma.shiftLog.update({
       where: { id },
       data: {
         status: action,
@@ -435,6 +438,52 @@ export class RmService {
         notes: notes ?? log.notes,
       },
     });
+
+    // Approving a shift log (staff's own check-in/check-out) previously had no
+    // effect on invoicing at all — GET/POST /rm/attendance/:staffId/invoice-preview
+    // and generate-invoice read from StaffDailyAttendance, a completely separate
+    // table only ever written by RM's own PUT /rm/attendance. A staff member could
+    // check in every day, have every shift approved here, and still show 0
+    // billable days on the invoice because nothing ever synced the two. Mirror the
+    // approved shift into StaffDailyAttendance (same upsert shape as
+    // markAttendance() above) so approval is the single action that makes a day
+    // billable — RM no longer has to separately re-enter the same date via
+    // PUT /rm/attendance for a day that was already approved here.
+    if (action === 'APPROVED' && log.placementId) {
+      const placement = await this.prisma.placement.findUnique({ where: { id: log.placementId } });
+      if (placement) {
+        await this.prisma.staffDailyAttendance.upsert({
+          where: {
+            staffId_attendanceDate: {
+              staffId: log.staffId,
+              attendanceDate: log.shiftDate,
+            },
+          },
+          create: {
+            staffId: log.staffId,
+            placementId: placement.id,
+            branchId: placement.branchId,
+            attendanceDate: log.shiftDate,
+            status: 'PRESENT',
+            markedBy: user.id,
+          },
+          update: {
+            status: 'PRESENT',
+            placementId: placement.id,
+            branchId: placement.branchId,
+            markedBy: user.id,
+          },
+        }).catch((e) => this.logger.warn(`Could not sync shift approval to daily attendance: ${e.message}`));
+      }
+    } else if (action !== 'APPROVED') {
+      // Rejected/flagged after having previously been approved — remove the
+      // now-stale billable day rather than leaving it counted.
+      await this.prisma.staffDailyAttendance.deleteMany({
+        where: { staffId: log.staffId, attendanceDate: log.shiftDate, markedBy: user.id },
+      }).catch(() => undefined);
+    }
+
+    return updated;
   }
 
   async listDeferred(user: AuthUser) {

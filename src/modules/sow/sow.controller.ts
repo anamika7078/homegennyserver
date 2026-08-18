@@ -1,5 +1,5 @@
-import { Controller, Get, Post, Patch, Param, Body, Query, UseGuards, Request } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+import { BadRequestException, Controller, Get, Post, Patch, Param, Body, Query, UseGuards, Request } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
@@ -25,7 +25,25 @@ export class SowController {
   @Post()
   @Roles(UserRole.RM, UserRole.ADMIN)
   @ApiOperation({ summary: 'RM creates a Scope of Work for a placement' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['placement_id', 'content'],
+      properties: {
+        placement_id: { type: 'string', description: 'Not staff_id/client_id — the client/staff are resolved from this placement' },
+        content: { type: 'string' },
+        is_non_standard: { type: 'boolean' },
+      },
+    },
+  })
   create(@Body() body: { placement_id: string; content: string; is_non_standard?: boolean }, @Request() req: AuthedRequest) {
+    // Previously an omitted/malformed placement_id fell through to
+    // prisma.placement.findUnique({ where: { id: undefined } }) and 500'd —
+    // Prisma rejects an undefined unique-lookup value as a validation error,
+    // not a clean "not found". Guard it here so a missing field is a normal
+    // 400, not a crash.
+    if (!body.placement_id) throw new BadRequestException('placement_id is required');
+    if (!body.content) throw new BadRequestException('content is required');
     return this.sow.create({ placementId: body.placement_id, content: body.content, isNonStandard: body.is_non_standard }, req.user.id);
   }
 
