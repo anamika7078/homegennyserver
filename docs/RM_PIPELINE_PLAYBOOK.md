@@ -105,6 +105,15 @@ view via `/video-cert/view-url`). Approval is Trainer-only.
 | POST | `/video-cert/upload-url` | Staff | Signed URL — the video file uploads directly to it |
 | POST | `/video-cert/finalize` | Staff | Hash-verifies and permanently saves the upload |
 
+> **No real GCS bucket yet — `VIDEO_STORAGE_MODE=local` jugaad is in place.** With that env var
+> set, `upload-url` returns this server's own `POST /video-cert/local-upload` (multipart: `key` +
+> `file` fields) instead of a GCS signed policy, and the SHA-256 hash is computed server-side
+> instead of trusted from the client. Everything downstream (`finalize`, Trainer review, `GET
+> /video-cert/local-file` for playback) works exactly the same either way. **Uploads under this
+> mode live on the server's own disk and do NOT survive a redeploy** — switch back to `gcs` (or
+> unset the var) once a real bucket + service-account credentials are provisioned; no other code
+> change needed.
+
 > **Gate**: RM cannot approve a video cert. Approval only happens via
 > `PUT /trainer/video-certifications/:id/review` (see [Trainer's role](#trainers-role-specifically)).
 > RM just watches for the approval and then advances the stage.
