@@ -19,6 +19,12 @@ export default registerAs('app', () => ({
     bucketVideoCerts: process.env.GCS_BUCKET_VIDEO_CERTS || 'homegenny-video-certs-prod',
     bucketDocuments: process.env.GCS_BUCKET_DOCUMENTS || 'homegenny-documents-prod',
     signedUrlExpiry: parseInt(process.env.GCS_SIGNED_URL_EXPIRY || '3600', 10),
+    // TEMPORARY: no real GCS bucket/service-account is provisioned yet. Set to
+    // 'local' to store video-cert uploads on this server's own disk instead of
+    // GCS — same upload/finalize/review flow, just a different storage backend.
+    // Switch back to 'gcs' (or unset — that's the default) once a real bucket
+    // + credentials exist; no other code change needed.
+    videoStorageMode: (process.env.VIDEO_STORAGE_MODE || 'gcs') as 'gcs' | 'local',
   },
 
   // Firebase (Firebase Admin uses GCP ADC — same project)

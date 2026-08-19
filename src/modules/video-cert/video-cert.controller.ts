@@ -1,5 +1,7 @@
-import { Controller, Get, Post, Patch, Param, Body, UseGuards, Request } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody } from '@nestjs/swagger';
+import { Controller, Get, Post, Patch, Param, Body, UseGuards, UseInterceptors, UploadedFile, Query, Res, Request, BadRequestException } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiConsumes } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
@@ -56,12 +58,56 @@ export class VideoCertController {
   }
 
   @Post('view-url')
-  @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN)
+  @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN, UserRole.TRAINER)
   @ApiOperation({ summary: 'Generate GCS signed playback URL (15-minute expiry) — reviewer use' })
   @ApiBody({ schema: { type: 'object', required: ['key'], properties: { key: { type: 'string', description: 'GCS object key from the finalize/register response' } } } })
   async getViewUrl(@Body() body: { key: string }) {
+    // Was RM/BM/Admin only — Trainer is who actually reviews these and needs
+    // to watch the video first, added alongside the local-storage jugaad.
     const url = await this.service.generateViewUrl(body.key);
     return { url };
+  }
+
+  @Post('local-upload')
+  @Roles(UserRole.STAFF, UserRole.ADMIN)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 500 * 1024 * 1024 } }))
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({
+    summary: '⚠️ TEMPORARY (local storage mode only): receives the raw video file for a key ' +
+      'issued by upload-url, in place of POSTing directly to GCS. Only active while ' +
+      'VIDEO_STORAGE_MODE=local — disabled (400) once a real GCS bucket is configured.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['key', 'file'],
+      properties: {
+        key: { type: 'string', description: 'gcsKey returned by upload-url' },
+        file: { type: 'string', format: 'binary' },
+      },
+    },
+  })
+  localUpload(@Body('key') key: string, @UploadedFile() file: Express.Multer.File, @Request() req: AuthedRequest) {
+    if (!key) throw new BadRequestException('key is required');
+    if (!file) throw new BadRequestException('file is required');
+    return this.service.saveLocalUpload(key, file.buffer);
+  }
+
+  @Get('local-file')
+  @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN, UserRole.TRAINER, UserRole.STAFF)
+  @ApiOperation({ summary: '⚠️ TEMPORARY (local storage mode only): streams back a locally-stored video for playback.' })
+  async localFile(@Query('key') key: string, @Request() req: AuthedRequest, @Res() res: Response) {
+    if (!key) throw new BadRequestException('key is required');
+    if (req.user.role === 'STAFF') {
+      // videoUrl keys embed the owning staffId as their 3rd path segment —
+      // video-certs/<series>/<staffId>/<file> — cheap enough to check without
+      // a DB round trip, same ownership intent as assertStaffOwnsRecord elsewhere.
+      const staffIdInKey = key.split('/')[2];
+      await this.service.assertStaffOwnsRecord(staffIdInKey, req.user.phone);
+    }
+    const stream = this.service.readLocalFile(key);
+    res.setHeader('Content-Type', 'video/mp4');
+    stream.pipe(res);
   }
 
   @Post('verify-hash')

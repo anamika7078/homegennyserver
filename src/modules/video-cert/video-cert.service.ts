@@ -4,6 +4,7 @@ import { Storage, Bucket, FileMetadata } from '@google-cloud/storage';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { mapSeriesToShort, mapSeriesFromShort } from '../../common/mappers/staff.mapper';
+import { LocalVideoStorage } from './local-video-storage.util';
 
 export const VIDEO_PROMPTS: Record<string, { count: number; minDuration: number; prompts: string[] }> = {
   MAID: {
@@ -68,13 +69,25 @@ export const VIDEO_PROMPTS: Record<string, { count: number; minDuration: number;
 @Injectable()
 export class VideoCertService {
   private readonly logger = new Logger(VideoCertService.name);
-  private readonly storage: Storage;
-  private readonly bucket: Bucket;
+  private readonly storage: Storage | null = null;
+  private readonly bucket: Bucket | null = null;
+  /** TEMPORARY: true until a real GCS bucket/service-account is provisioned
+   * — see VIDEO_STORAGE_MODE in app.config.ts and local-video-storage.util.ts. */
+  private readonly localMode: boolean;
 
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
   ) {
+    this.localMode = config.get<string>('app.gcs.videoStorageMode') === 'local';
+    if (this.localMode) {
+      this.logger.warn(
+        '[VIDEO-CERT] VIDEO_STORAGE_MODE=local — storing uploads on local disk, not GCS. ' +
+        'Temporary until a real bucket is provisioned; local-uploads/ does not survive a redeploy.',
+      );
+      return;
+    }
+
     // On GCE: Application Default Credentials (ADC) — no key file needed
     // Local dev: set GOOGLE_APPLICATION_CREDENTIALS env var
     const projectId = config.get<string>('app.gcp.projectId');
@@ -132,7 +145,20 @@ export class VideoCertService {
   ): Promise<{ uploadUrl: string; gcsKey: string; fields: Record<string, string> }> {
     const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
     const gcsKey = `video-certs/${series.toLowerCase()}/${staffId}/${Date.now()}_${safeFilename}`;
-    const file = this.bucket.file(gcsKey);
+
+    if (this.localMode) {
+      // No GCS signed-POST policy here — the client instead POSTs the raw
+      // file straight to our own server at this relative path, multipart
+      // field name "file", plus a "key" field set to gcsKey below.
+      this.logger.log(`[VIDEO-CERT] (local mode) Upload target generated — staff ${staffId}, key ${gcsKey}`);
+      return {
+        uploadUrl: '/api/v1/video-cert/local-upload',
+        gcsKey,
+        fields: { key: gcsKey },
+      };
+    }
+
+    const file = this.bucket!.file(gcsKey);
 
     const fields: Record<string, string> = {
       'Content-Type': 'video/mp4',
@@ -158,12 +184,33 @@ export class VideoCertService {
   }
 
   /**
+   * TEMPORARY (local mode only): receives the actual file bytes for a key
+   * previously issued by generateUploadUrl, writes them to local disk, and
+   * computes the real SHA-256 server-side (more robust than trusting a
+   * client-supplied hash for local testing).
+   */
+  saveLocalUpload(gcsKey: string, buffer: Buffer, staffId?: string, series?: string) {
+    if (!this.localMode) {
+      throw new BadRequestException('Local upload is disabled — VIDEO_STORAGE_MODE is not "local"');
+    }
+    const meta = LocalVideoStorage.save(gcsKey, buffer, { staffId, series });
+    this.logger.log(`[VIDEO-CERT] (local mode) Saved ${gcsKey} — ${meta.sizeBytes} bytes, sha256=${meta.sha256Hash}`);
+    return { gcsKey, sha256Hash: meta.sha256Hash, sizeBytes: meta.sizeBytes };
+  }
+
+  /**
    * Verifies the SHA-256 hash stored in GCS object metadata.
    * Call after the Flutter app confirms the upload is complete.
    */
   async verifyVideoHash(gcsKey: string, expectedHash: string): Promise<boolean> {
+    if (this.localMode) {
+      const meta = LocalVideoStorage.getMeta(gcsKey);
+      const match = !!meta && meta.sha256Hash === expectedHash;
+      this.logger.log(`[VIDEO-CERT] (local mode) Hash check ${gcsKey}: ${match ? 'PASS' : 'FAIL'}`);
+      return match;
+    }
     try {
-      const [meta] = await this.bucket.file(gcsKey).getMetadata();
+      const [meta] = await this.bucket!.file(gcsKey).getMetadata();
       const storedHash = (meta as FileMetadata & { metadata?: Record<string, string> })
         .metadata?.['sha256hash'];
       const match = storedHash === expectedHash;
@@ -175,9 +222,12 @@ export class VideoCertService {
     }
   }
 
-  /** Generates a 15-minute signed playback URL */
+  /** Generates a 15-minute signed playback URL (or the local-mode equivalent) */
   async generateViewUrl(gcsKey: string): Promise<string> {
-    const [url] = await this.bucket.file(gcsKey).getSignedUrl({
+    if (this.localMode) {
+      return `/api/v1/video-cert/local-file?key=${encodeURIComponent(gcsKey)}`;
+    }
+    const [url] = await this.bucket!.file(gcsKey).getSignedUrl({
       version: 'v4',
       action: 'read',
       expires: Date.now() + 15 * 60 * 1000,
@@ -186,12 +236,26 @@ export class VideoCertService {
   }
 
   async objectExists(gcsKey: string): Promise<boolean> {
-    const [exists] = await this.bucket.file(gcsKey).exists();
+    if (this.localMode) return LocalVideoStorage.exists(gcsKey);
+    const [exists] = await this.bucket!.file(gcsKey).exists();
     return exists;
   }
 
   async getObjectMetadata(gcsKey: string): Promise<Record<string, unknown>> {
-    const [meta] = await this.bucket.file(gcsKey).getMetadata();
+    if (this.localMode) {
+      const meta = LocalVideoStorage.getMeta(gcsKey);
+      if (!meta) throw new NotFoundException(`No local upload found for key ${gcsKey}`);
+      return {
+        size: meta.sizeBytes,
+        contentType: 'video/mp4',
+        created: meta.uploadedAt,
+        sha256Hash: meta.sha256Hash,
+        staffId: meta.staffId,
+        series: meta.series,
+        retentionExpiryTime: null,
+      };
+    }
+    const [meta] = await this.bucket!.file(gcsKey).getMetadata();
     const m = meta as FileMetadata & {
       metadata?: Record<string, string>;
       retentionExpirationTime?: string;
@@ -205,6 +269,13 @@ export class VideoCertService {
       series: m.metadata?.['series'],
       retentionExpiryTime: m.retentionExpirationTime,
     };
+  }
+
+  /** Local mode only — streams the file back for the local-file view route. */
+  readLocalFile(gcsKey: string) {
+    if (!this.localMode) throw new BadRequestException('Not in local storage mode');
+    if (!LocalVideoStorage.exists(gcsKey)) throw new NotFoundException('Video not found');
+    return LocalVideoStorage.readStream(gcsKey);
   }
 
   computeRetentionDate(exitDate: Date, neverDelete: boolean): Date | null {

@@ -3,6 +3,9 @@ node_modules/
 dist/
 build/
 
+# Local video-cert storage (VIDEO_STORAGE_MODE=local jugaad — never commit actual uploads)
+local-uploads/
+
 # Environment variables
 .env
 .env.production
