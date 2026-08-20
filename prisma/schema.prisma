@@ -387,6 +387,10 @@ model Placement {
   trialEndDate   DateTime?       @map("trial_end_date") @db.Date
   staffSalary    Decimal?        @map("staff_salary") @db.Decimal(10, 2)
   managementFee  Decimal?        @map("management_fee") @db.Decimal(10, 2)
+  // Written by exit() (placement.service.ts) — used to silently no-op via a
+  // raw-SQL catch fallback because these columns never existed until now.
+  exitDate           DateTime? @map("exit_date") @db.Date
+  exitScenarioCode   String?   @map("exit_scenario_code") @db.VarChar(20)
   metadata       Json            @default("{}")
   createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
