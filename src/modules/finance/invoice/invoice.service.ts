@@ -282,10 +282,13 @@ export class FinanceInvoiceService {
       `SELECT * FROM employee_payrolls WHERE id = $1`, [id],
     );
     if (empRows.length) {
+      // Was writing 'APPROVED' while claiming/returning 'SENT' — the
+      // Invoices page shows its "Send" button while status === 'APPROVED',
+      // so it kept reappearing after every "send" for this row type.
       await this.dataSource.query(
-        `UPDATE employee_payrolls SET status = 'APPROVED' WHERE id = $1`, [id],
+        `UPDATE employee_payrolls SET status = 'SENT' WHERE id = $1`, [id],
       );
-      return { id, status: 'SENT', message: 'Employee payroll verified' };
+      return { id, status: 'SENT', message: 'Employee payroll sent' };
     }
 
     throw new NotFoundException(`Invoice or payroll ${id} not found`);

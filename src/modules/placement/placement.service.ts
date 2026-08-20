@@ -148,6 +148,38 @@ export class PlacementService {
   }
 
   /**
+   * Sets/updates staff_salary and management_fee on an existing placement —
+   * there was no way to do this at all before (create() is the only place
+   * that ever wrote them, and only if the caller happened to pass them).
+   * Needed as an escape hatch now that confirm() requires both to be set:
+   * a placement created without them (API called directly, bypassing the
+   * RM UI's create form) would otherwise be permanently stuck at TRIAL.
+   */
+  async updateTerms(id: string, data: { staff_salary?: unknown; management_fee?: unknown }, actorId?: string) {
+    const existing = await this.prisma.placement.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Placement not found');
+
+    const row = await this.prisma.placement.update({
+      where: { id },
+      data: {
+        ...(data.staff_salary != null ? { staffSalary: Number(data.staff_salary) } : {}),
+        ...(data.management_fee != null ? { managementFee: Number(data.management_fee) } : {}),
+      },
+    });
+
+    await this.audit.log({
+      actorId,
+      action: AuditAction.DEPLOYMENT_ACTION,
+      entityType: 'placement',
+      entityId: row.id,
+      metadata: { action: 'terms_updated', staff_salary: data.staff_salary, management_fee: data.management_fee },
+    });
+
+    const [staff, client] = await Promise.all([this.getStaffMeta(row.staffId), this.getClientMeta(row.clientId)]);
+    return this.mapRow(row, staff, client);
+  }
+
+  /**
    * TRIAL → CONFIRMED. Previously there was no endpoint at all for this — placements
    * were created as TRIAL by create() above and nothing ever moved them to CONFIRMED,
    * which is the status staff check-in / RM attendance / invoicing all require. Demo
@@ -158,6 +190,20 @@ export class PlacementService {
     if (!existing) throw new NotFoundException('Placement not found');
     if (existing.status !== PlacementStatus.TRIAL) {
       throw new BadRequestException(`Only a TRIAL placement can be confirmed (current status: ${existing.status})`);
+    }
+    // Neither create() nor confirm() used to require these — a placement could
+    // reach CONFIRMED with both NULL, and PayrollService's parseFloat(null) =
+    // NaN silently persisted into payroll_records/client_invoices as the
+    // literal string 'NaN' (Postgres NUMERIC accepts it) instead of failing.
+    // Confirmed live: 3 CONFIRMED placements in prod/local had this. Gating
+    // here — not create() — matches how RM actually works: salary/fee are
+    // real commercial terms that should be locked in before confirming a
+    // trial, not necessarily known on day one of the trial.
+    if (existing.staffSalary == null || existing.managementFee == null) {
+      throw new BadRequestException(
+        'Cannot confirm — staff_salary and management_fee must be set first. ' +
+        'Update the placement with these values before confirming.',
+      );
     }
 
     const row = await this.prisma.placement.update({

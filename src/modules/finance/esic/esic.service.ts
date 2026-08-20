@@ -1,5 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { calculateEsic, calculatePfFlat } from '../../../common/finance/statutory-calc.util';
+import { AuditService } from '../../audit/audit.service';
+import { AuditAction } from '@prisma/client';
 
 // Statutory rates — single source of truth
 const ESIC_EMPLOYEE_RATE = 0.0075;
@@ -7,6 +10,9 @@ const ESIC_EMPLOYER_RATE = 0.0325;
 const ESIC_WAGE_LIMIT    = 21_000;
 const PF_RATE            = 0.12;
 const PF_WAGE_CEILING    = 15_000;
+// Recomputed vs. stored values are compared with this tolerance — rounding
+// differences of a few paise shouldn't flag as a compliance issue.
+const AMOUNT_TOLERANCE = 0.5;
 
 export interface PayrollAggRow {
   staff_id: string;
@@ -22,9 +28,54 @@ export interface PayrollAggRow {
 
 @Injectable()
 export class EsicService {
-  constructor(private readonly dataSource: DataSource) {}
+  private readonly logger = new Logger(EsicService.name);
 
-  async generateEsicChallan(month: number, year: number) {
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly audit: AuditService,
+  ) {}
+
+  /**
+   * Was trusting payroll_records verbatim with zero independent
+   * recomputation — ESIC_WAGE_LIMIT/PF_WAGE_CEILING were defined but only
+   * ever used for display text, never to validate a row before it goes into
+   * a government-filing CSV. Confirmed live: a ₹25,000-gross record (above
+   * the ESIC wage limit, should be esic=0) still showed full ESIC
+   * contributions in a generated challan, because it was old fixture data
+   * that predates the current calculation code and nothing ever re-checked
+   * it. This recomputes from gross_salary using the same shared
+   * calculateEsic/calculatePfFlat every other module uses, and flags (not
+   * silently corrects) any row that doesn't match.
+   */
+  private reconcileEsic(rows: PayrollAggRow[]): (PayrollAggRow & { compliant: boolean; expected_employee: number; expected_employer: number })[] {
+    return rows.map((r) => {
+      const gross = parseFloat(r.gross_salary);
+      const expected = calculateEsic(gross);
+      const storedEmployee = parseFloat(r.esic_employee);
+      const storedEmployer = parseFloat(r.esic_employer);
+      const compliant =
+        !isNaN(storedEmployee) && !isNaN(storedEmployer) &&
+        Math.abs(expected.employee - storedEmployee) <= AMOUNT_TOLERANCE &&
+        Math.abs(expected.employer - storedEmployer) <= AMOUNT_TOLERANCE;
+      return { ...r, compliant, expected_employee: expected.employee, expected_employer: expected.employer };
+    });
+  }
+
+  private reconcilePf(rows: PayrollAggRow[]): (PayrollAggRow & { compliant: boolean; expected_employee: number; expected_employer: number })[] {
+    return rows.map((r) => {
+      const gross = parseFloat(r.gross_salary);
+      const expected = calculatePfFlat(gross);
+      const storedEmployee = parseFloat(r.pf_employee);
+      const storedEmployer = parseFloat(r.pf_employer);
+      const compliant =
+        !isNaN(storedEmployee) && !isNaN(storedEmployer) &&
+        Math.abs(expected.employee - storedEmployee) <= AMOUNT_TOLERANCE &&
+        Math.abs(expected.employer - storedEmployer) <= AMOUNT_TOLERANCE;
+      return { ...r, compliant, expected_employee: expected.employee, expected_employer: expected.employer };
+    });
+  }
+
+  async generateEsicChallan(month: number, year: number, actorId?: string) {
     const rows = await this.dataSource.query<PayrollAggRow[]>(
       `SELECT
           pr.staff_id,
@@ -41,8 +92,22 @@ export class EsicService {
       [month, year],
     );
 
+    const reconciled = this.reconcileEsic(rows);
+    const mismatches = reconciled.filter((r) => !r.compliant);
+    if (mismatches.length) {
+      this.logger.warn(
+        `[ESIC] ${mismatches.length}/${rows.length} record(s) for ${month}/${year} don't match ` +
+        `recomputed ESIC (stale/manual data?) — staff_codes: ${mismatches.map((m) => m.staff_code).join(', ')}`,
+      );
+    }
+
     const totalEsicEmployee = rows.reduce((s, r) => s + parseFloat(r.esic_employee), 0);
     const totalEsicEmployer = rows.reduce((s, r) => s + parseFloat(r.esic_employer), 0);
+
+    await this.audit.log({
+      actorId, action: AuditAction.PAYROLL_ACTION, entityType: 'esic_challan',
+      metadata: { event: 'ESIC_CHALLAN_GENERATED', month, year, staff_count: rows.length, mismatch_count: mismatches.length },
+    }).catch(() => undefined);
 
     return {
       month, year,
@@ -53,11 +118,12 @@ export class EsicService {
       total_employer_contribution: Math.round(totalEsicEmployer * 100) / 100,
       total_challan_amount: Math.round((totalEsicEmployee + totalEsicEmployer) * 100) / 100,
       staff_count: rows.length,
-      records: rows,
+      mismatch_count: mismatches.length,
+      records: reconciled,
     };
   }
 
-  async generatePfEcr(month: number, year: number) {
+  async generatePfEcr(month: number, year: number, actorId?: string) {
     const rows = await this.dataSource.query<PayrollAggRow[]>(
       `SELECT
           pr.staff_id,
@@ -74,8 +140,22 @@ export class EsicService {
       [month, year],
     );
 
+    const reconciled = this.reconcilePf(rows);
+    const mismatches = reconciled.filter((r) => !r.compliant);
+    if (mismatches.length) {
+      this.logger.warn(
+        `[PF] ${mismatches.length}/${rows.length} record(s) for ${month}/${year} don't match ` +
+        `recomputed PF (stale/manual data?) — staff_codes: ${mismatches.map((m) => m.staff_code).join(', ')}`,
+      );
+    }
+
     const totalPfEmployee = rows.reduce((s, r) => s + parseFloat(r.pf_employee), 0);
     const totalPfEmployer = rows.reduce((s, r) => s + parseFloat(r.pf_employer), 0);
+
+    await this.audit.log({
+      actorId, action: AuditAction.PAYROLL_ACTION, entityType: 'pf_ecr',
+      metadata: { event: 'PF_ECR_GENERATED', month, year, staff_count: rows.length, mismatch_count: mismatches.length },
+    }).catch(() => undefined);
 
     return {
       month, year,
@@ -86,7 +166,8 @@ export class EsicService {
       total_employer_contribution: Math.round(totalPfEmployer * 100) / 100,
       total_ecr_amount: Math.round((totalPfEmployee + totalPfEmployer) * 100) / 100,
       staff_count: rows.length,
-      records: rows,
+      mismatch_count: mismatches.length,
+      records: reconciled,
     };
   }
 

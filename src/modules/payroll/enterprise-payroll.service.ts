@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { calculateEsic } from '../../common/finance/statutory-calc.util';
 import {
@@ -312,8 +312,21 @@ export class EnterprisePayrollService {
 
   /**
    * Multi-tier Approval Workflow
+   *
+   * TIER_ORDER + the role check below close a real segregation-of-duties
+   * bypass: this used to let anyone in (HR, ADMIN, FINANCE) approve ANY tier
+   * regardless of `workflow.approverRole` (a column that already existed,
+   * just never read for this) or whether earlier tiers were even approved
+   * yet. Confirmed live: a FINANCE token could approve LEVEL_3_ADMIN first,
+   * leaving LEVEL_1_HR/LEVEL_2_FINANCE PENDING, and the batch still worked.
    */
-  async approveTier(batchId: string, dto: ApproveBatchTierDto, userId?: string) {
+  private static readonly TIER_ORDER: Record<string, number> = {
+    LEVEL_1_HR: 1,
+    LEVEL_2_FINANCE: 2,
+    LEVEL_3_ADMIN: 3,
+  };
+
+  async approveTier(batchId: string, dto: ApproveBatchTierDto, userId?: string, userRole?: string) {
     const batch = await this.getBatchById(batchId);
     if (batch.status === PayrollApprovalStatus.LOCKED) {
       throw new BadRequestException('Cannot approve a locked payroll batch.');
@@ -322,6 +335,19 @@ export class EnterprisePayrollService {
     const workflow = batch.approvals.find((w) => w.tier === dto.tier);
     if (!workflow) {
       throw new NotFoundException(`Approval tier ${dto.tier} not found on this batch.`);
+    }
+    if (userRole && workflow.approverRole !== userRole) {
+      throw new ForbiddenException(
+        `Tier ${dto.tier} requires role ${workflow.approverRole}, not ${userRole}.`,
+      );
+    }
+    const thisOrder = EnterprisePayrollService.TIER_ORDER[dto.tier] ?? 0;
+    const earlierPending = batch.approvals.some((w) => {
+      const order = EnterprisePayrollService.TIER_ORDER[w.tier] ?? 0;
+      return order < thisOrder && w.status !== PayrollApprovalStatus.APPROVED;
+    });
+    if (earlierPending) {
+      throw new BadRequestException(`Earlier approval tiers must be approved before ${dto.tier}.`);
     }
 
     await this.prisma.payrollApprovalWorkflow.update({
@@ -352,11 +378,16 @@ export class EnterprisePayrollService {
     return this.getBatchById(batchId);
   }
 
-  async rejectTier(batchId: string, dto: ApproveBatchTierDto, userId?: string) {
+  async rejectTier(batchId: string, dto: ApproveBatchTierDto, userId?: string, userRole?: string) {
     const batch = await this.getBatchById(batchId);
     const workflow = batch.approvals.find((w) => w.tier === dto.tier);
     if (!workflow) {
       throw new NotFoundException(`Approval tier ${dto.tier} not found on this batch.`);
+    }
+    if (userRole && workflow.approverRole !== userRole) {
+      throw new ForbiddenException(
+        `Tier ${dto.tier} requires role ${workflow.approverRole}, not ${userRole}.`,
+      );
     }
 
     await this.prisma.payrollApprovalWorkflow.update({

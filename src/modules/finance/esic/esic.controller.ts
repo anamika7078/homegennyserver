@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Query, Res, UseGuards, ParseIntPipe, DefaultValuePipe } from '@nestjs/common';
+import { Controller, Get, Post, Query, Res, Req, UseGuards, ParseIntPipe, DefaultValuePipe } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
@@ -21,8 +21,9 @@ export class EsicController {
   async getEsicChallan(
     @Query('month', ParseIntPipe) month: number,
     @Query('year',  ParseIntPipe) year:  number,
+    @Req() req: { user: { id: string } },
   ) {
-    return this.service.generateEsicChallan(month, year);
+    return this.service.generateEsicChallan(month, year, req.user.id);
   }
 
   @Get('pf-ecr')
@@ -32,8 +33,9 @@ export class EsicController {
   async getPfEcr(
     @Query('month', ParseIntPipe) month: number,
     @Query('year',  ParseIntPipe) year:  number,
+    @Req() req: { user: { id: string } },
   ) {
-    return this.service.generatePfEcr(month, year);
+    return this.service.generatePfEcr(month, year, req.user.id);
   }
 
   @Get('export')
@@ -45,11 +47,12 @@ export class EsicController {
     @Query('type')  type:  'ESIC' | 'PF',
     @Query('month', ParseIntPipe) month: number,
     @Query('year',  ParseIntPipe) year:  number,
+    @Req() req: { user: { id: string } },
     @Res() res: Response,
   ) {
     const data = type === 'ESIC'
-      ? await this.service.generateEsicChallan(month, year)
-      : await this.service.generatePfEcr(month, year);
+      ? await this.service.generateEsicChallan(month, year, req.user.id)
+      : await this.service.generatePfEcr(month, year, req.user.id);
 
     const csv = this.service.exportCsv(type, data.records as any, month, year);
     const filename = `HomeGenny_${type}_${month}_${year}.csv`;

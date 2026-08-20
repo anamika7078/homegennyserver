@@ -161,6 +161,24 @@ export class PayrollService {
     };
   }
 
+  /**
+   * Defense-in-depth: placement.service.ts now blocks confirm() unless both
+   * fields are set, but this guards against pre-existing bad data (3
+   * CONFIRMED placements found with NULL salary/fee) and any other path that
+   * might still produce it. Without this, parseFloat(null) = NaN sails
+   * through every downstream calculation and Postgres NUMERIC happily
+   * accepts the literal string 'NaN' into payroll_records/client_invoices
+   * instead of the insert failing — confirmed live, this is not theoretical.
+   */
+  private assertValidSalaryTerms(monthlySalary: number, monthlyFee: number, placementId: string): void {
+    if (isNaN(monthlySalary) || isNaN(monthlyFee)) {
+      throw new BadRequestException(
+        `Placement ${placementId} has no staff_salary/management_fee set — ` +
+        `update it via PATCH /placements/${placementId}/terms before running payroll.`,
+      );
+    }
+  }
+
   calculatePayroll(grossSalary: number, managementFeePercent: number): PayrollCalculation {
     const esic = calculateEsic(grossSalary);
     const pf = calculatePfFlat(grossSalary);
@@ -181,6 +199,22 @@ export class PayrollService {
     month: number,
     year: number,
   ): Promise<Record<string, unknown>> {
+    // Was missing entirely — runAttendancePayroll (the newer, UI-driven path)
+    // already has this check; this legacy path didn't, so calling it twice
+    // for the same placement/month created two payroll_records + two
+    // client_invoices rows with no error. Same guard, same shape.
+    const existing = await this.dataSource.query<{ id: string }[]>(
+      `SELECT id FROM client_invoices
+       WHERE placement_id = $1 AND period_month = $2 AND period_year = $3
+       LIMIT 1`,
+      [placementId, month, year],
+    );
+    if (existing.length) {
+      throw new BadRequestException(
+        `Invoice already exists for placement ${placementId} in ${month}/${year}`,
+      );
+    }
+
     return this.dataSource.transaction(async (manager) => {
       const placements = await manager.query<PlacementRow[]>(
         `SELECT staff_id, client_id, staff_salary, management_fee
@@ -202,6 +236,7 @@ export class PayrollService {
 
       const monthlySalary = parseFloat(p.staff_salary);
       const monthlyFee = parseFloat(p.management_fee);
+      this.assertValidSalaryTerms(monthlySalary, monthlyFee, placementId);
       const dim = this.daysInMonth(month, year);
       const proratedGross = this.calculateProratedGross(monthlySalary, shiftDays, dim);
       const proratedFee = this.calculateProratedGross(monthlyFee, shiftDays, dim);
@@ -270,6 +305,7 @@ export class PayrollService {
     const summary = await this.countAttendanceForStaff(p.staff_id, month, year);
     const monthlySalary = parseFloat(p.staff_salary);
     const monthlyFee = parseFloat(p.management_fee);
+    this.assertValidSalaryTerms(monthlySalary, monthlyFee, placementId);
     const proratedGross = this.calculateProratedGross(
       monthlySalary,
       summary.billable_days,
@@ -376,17 +412,44 @@ export class PayrollService {
     });
   }
 
+  /**
+   * TEMPORARY jugaad, same pattern as disburse() below: no real Razorpay
+   * credentials exist yet, so try the real order first and fall back to a
+   * clearly-marked simulated order instead of throwing. This was also never
+   * called from any frontend page at all — confirmed via the finance audit,
+   * no invoice could ever get a payable link. Now also persists the order id
+   * onto client_invoices so the settlement webhook has something to match
+   * against later (it previously always stayed NULL).
+   */
   async createRazorpayOrder(
     invoiceId: string,
     amount: number,
   ): Promise<Record<string, unknown>> {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const order = await this.getRazorpay().orders.create({
-      amount: Math.round(amount * 100),   // convert Rs to paise
+    let order: Record<string, unknown> = {
+      id: `sim_order_${Date.now()}`,
+      status: 'simulated',
+      amount: Math.round(amount * 100),
       currency: 'INR',
       receipt: invoiceId,
-      notes: { invoiceId },
-    }) as Record<string, unknown>;
+    };
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      order = await this.getRazorpay().orders.create({
+        amount: Math.round(amount * 100),   // convert Rs to paise
+        currency: 'INR',
+        receipt: invoiceId,
+        notes: { invoiceId },
+      }) as Record<string, unknown>;
+    } catch (err: any) {
+      this.logger.warn(`[PAYMENT-ORDER] Razorpay API unavailable (${err.message}). Returning a simulated order.`);
+    }
+
+    await this.dataSource.query(
+      `UPDATE client_invoices SET razorpay_order_id = $1 WHERE id = $2`,
+      [order['id'], invoiceId],
+    ).catch(() => undefined);
+
     return order;
   }
 
@@ -435,6 +498,12 @@ export class PayrollService {
 
     const summary = await this.countAttendanceForEmployee(employeeId, month, year);
     const monthlySalary = parseFloat(emp.salary);
+    // employees.salary is NOT NULL in schema.prisma, so this is a pure
+    // defense-in-depth backstop (matches assertValidSalaryTerms above) rather
+    // than a response to a confirmed live NULL case, unlike placements.
+    if (isNaN(monthlySalary)) {
+      throw new BadRequestException(`Employee ${employeeId} has no valid salary set`);
+    }
     const proratedGross = this.calculateProratedGross(
       monthlySalary,
       summary.billable_days,

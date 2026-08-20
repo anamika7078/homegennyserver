@@ -1,72 +1,9 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { calculateGstOnFee, calculateEsic, calculateNetSalary } from '../../../common/finance/statutory-calc.util';
+import { WageConfigDto, CalculationItemDto, CreateCalculationDto, CreateQuotationDto } from './dto/commercial.dto';
 
-export interface WageConfigDto {
-  state: string;
-  zone: string;
-  effective_date: string;
-  category: string;
-  basic_wage: number;
-  da: number;
-  hra: number;
-  skilled_allowance: number;
-  additional_hours_pct: number;
-  employer_pf_pct: number;
-  employer_pf_max: number;
-  employee_pf_pct: number;
-  employer_esic_pct: number;
-  employee_esic_pct: number;
-  bonus_pct: number;
-  leave_days: number;
-  lwf_pct: number;
-  lwf_max: number;
-  uniform_allowance: number;
-  relieving_pct: number;
-  management_pct: number;
-  training_charges: number;
-  gst_pct: number;
-  professional_tax: number;
-  nfh: number;
-  status?: string;
-  // ── Toggle flags ──
-  pf_applicable?: boolean;
-  esic_applicable?: boolean;
-  bonus_applicable?: boolean;
-  bonus_frequency?: string; // 'monthly' | 'yearly'
-  lwf_applicable?: boolean;
-  uniform_applicable?: boolean;
-  relieving_applicable?: boolean;
-  nfh_applicable?: boolean;
-  shift_pattern?: string; // '8' | '12'
-  gst_applicable?: boolean;
-  gst_type?: string; // 'intra_state' | 'inter_state'
-}
-
-export interface CalculationItemDto {
-  category: string;
-  no_of_resources: number;
-  working_hours: number;
-  shift_type: string;
-  wage_config_id?: string;
-}
-
-export interface CreateCalculationDto {
-  customer_id: string;
-  branch_id?: string;
-  branch_name?: string;
-  state: string;
-  zone: string;
-  contract_duration: number;
-  items: CalculationItemDto[];
-}
-
-export interface CreateQuotationDto {
-  calculation_id: string;
-  validity_days: number;
-  terms_conditions?: string;
-  prepared_by: string;
-}
+export { WageConfigDto, CalculationItemDto, CreateCalculationDto, CreateQuotationDto };
 
 const DEFAULT_CATEGORIES = [
   'Security Guard',

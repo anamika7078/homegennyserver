@@ -54,14 +54,19 @@ export class EnterprisePayrollController {
   @Roles(UserRole.HR, UserRole.ADMIN, UserRole.FINANCE)
   @ApiOperation({ summary: 'Approve a multi-tier workflow step on a payroll batch' })
   async approveTier(@Param('id', ParseUUIDPipe) id: string, @Body() dto: ApproveBatchTierDto, @Req() req: any) {
-    return this.service.approveTier(id, dto, req.user?.id);
+    // @Roles above only gates "can call this endpoint at all" — it never
+    // checked whether THIS caller is the right approver for THIS tier, or
+    // whether earlier tiers were even approved yet. Confirmed live: FINANCE
+    // could approve LEVEL_3_ADMIN directly while HR/FINANCE tiers were still
+    // PENDING. Role is now threaded through so the service can enforce both.
+    return this.service.approveTier(id, dto, req.user?.id, req.user?.role);
   }
 
   @Put('batches/:id/reject')
   @Roles(UserRole.HR, UserRole.ADMIN, UserRole.FINANCE)
   @ApiOperation({ summary: 'Reject a multi-tier workflow step on a payroll batch' })
   async rejectTier(@Param('id', ParseUUIDPipe) id: string, @Body() dto: ApproveBatchTierDto, @Req() req: any) {
-    return this.service.rejectTier(id, dto, req.user?.id);
+    return this.service.rejectTier(id, dto, req.user?.id, req.user?.role);
   }
 
   @Put('batches/:id/lock')

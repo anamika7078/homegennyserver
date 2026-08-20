@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Param, Body, Query, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Body, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -60,12 +60,38 @@ export class PlacementController {
     });
   }
 
+  @Patch(':id/terms')
+  @ApiOperation({
+    summary: 'Set/update staff_salary and management_fee on a placement',
+    description:
+      'Required before confirm() will succeed if either was left unset at creation — there was ' +
+      'previously no way to fix a placement created without them. Both are optional here; only the ' +
+      'ones supplied are updated.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        staff_salary: { type: 'number', example: 18000 },
+        management_fee: { type: 'number', example: 4500 },
+      },
+    },
+  })
+  updateTerms(
+    @Req() req: { user: { id: string } },
+    @Param('id') id: string,
+    @Body() body: { staff_salary?: number; management_fee?: number },
+  ): Promise<PlacementRow> {
+    return this.service.updateTerms(id, body, req.user.id);
+  }
+
   @Post(':id/confirm')
   @ApiOperation({
     summary: 'Confirm a trial placement — TRIAL → CONFIRMED',
     description:
       'Required before the staff can check in, RM can mark their attendance, or Finance can run payroll/invoicing ' +
-      'for this placement — all of those require CONFIRMED status. Only valid from TRIAL; 400 otherwise.',
+      'for this placement — all of those require CONFIRMED status. Only valid from TRIAL; 400 otherwise. ' +
+      'staff_salary and management_fee must both be set first (PATCH :id/terms if not set at creation).',
   })
   confirm(@Req() req: { user: { id: string } }, @Param('id') id: string): Promise<PlacementRow> {
     return this.service.confirm(id, req.user.id);
