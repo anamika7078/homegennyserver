@@ -24,7 +24,7 @@ app's current upload screen never calls the real API at all.
 
 ## 2. The full loop — who does what
 
-This is a two-actor flow, same shape as the PV flow (`PV_VERIFICATION_CLAUDE_PROMPT.md` §2):
+This is a three-actor flow — only the Staff part below is this prompt's job to build:
 
 ```text
 Staff (this app): record + upload video for each prompt   → §4 below
@@ -34,12 +34,13 @@ RM (mobile or web): advance the stage once training is done → POST /rm/pipelin
    ↓
 Staff app: GET /staff/pipeline (already real, already wired — confirmed `remote: _remote.getPipeline`
    in staff_repository_impl.dart) automatically shows S3_TRAIN as "completed" the moment RM's
-   advance call lands — no separate staff-side wiring needed for this part, same as the PV flow.
+   advance call lands — no separate staff-side wiring needed for this part, it already reflects
+   whatever the backend's real stage is.
 ```
 
-⚠️ Unlike PV, there is currently **no backend gate** enforcing that a candidate's video certs are
-actually approved (or an assessment passed) before RM can advance S3_TRAIN → S4_AGREEMENTS — this
-is a separate, already-flagged backend gap (tracked elsewhere, not part of this prompt). It doesn't
+⚠️ There is currently **no backend gate** enforcing that a candidate's video certs are actually
+approved (or an assessment passed) before RM can advance S3_TRAIN → S4_AGREEMENTS — this is a
+separate, already-flagged backend gap (tracked elsewhere, not part of this prompt). It doesn't
 change what to build here: upload real videos, let the real Trainer review flow work as designed,
 and trust `GET /staff/pipeline` to reflect whatever the backend's true stage is — don't build any
 client-side logic that tries to infer or force "S3 complete" locally.
@@ -180,4 +181,6 @@ Report:
   'PENDING'`.
 - Confirm the §8 end-to-end test was actually run across both apps (staff upload → web Trainer
   approval → RM advance → staff sees S3 completed), not just the upload calls checked in isolation.
+
+
 - Confirm you did NOT build any Trainer-facing screen in this app.
