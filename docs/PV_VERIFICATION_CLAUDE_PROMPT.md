@@ -1,7 +1,8 @@
-# HomeGenny — RM Mobile App: Police Verification (PV) Flow
+# HomeGenny — Police Verification (PV) Flow — RM + Staff
 
-You are working on the **HomeGenny Flutter mobile application**, specifically the Police
-Verification (PV / Pillar 4) sub-flow inside the existing S2_VERIFY stage screen.
+You are working on the **HomeGenny Flutter mobile application**. This is a two-actor flow — **RM
+does the verification actions, Staff sees the resulting stage status** — but only the RM side
+needs new screens; see §2 for why the staff side needs no new code.
 
 Do NOT redesign existing UI unless a small modification is required to make this flow functional.
 Inspect the existing Verification screen/repository/API service first — reuse it, don't duplicate it.
@@ -20,7 +21,40 @@ all (`pv_status !== 'CLEAR'` blocks deployment for every series except MAID, whi
 
 ---
 
-## 2. Real APIs (all three now real and working — no known gaps)
+## 2. The full loop — who does what, confirmed by reading both apps' code
+
+This is a two-actor flow, and **only the RM half needs building**. Confirmed by reading both the
+backend and the Flutter staff app directly:
+
+```text
+RM: submit PV                    → POST /verification/pv/submit/:staffId
+RM: (agency reports back)
+RM: record result CLEAR/ADVERSE  → POST /verification/pv/:staffId/close   (§3 below)
+RM: advance the stage            → POST /rm/pipeline/:staffId/advance  { to_stage: "S2_5_ASSESS" }
+                                     (only once ALL S2 items — not just PV — are ready; RM's own
+                                     judgement call, nothing auto-advances this)
+   ↓
+Staff app: GET /staff/pipeline (already real, already wired — `staff_repository_impl.dart`'s
+   getPipeline() calls `remote: _remote.getPipeline`, confirmed in code) automatically shows
+   S2_VERIFY as "completed" the moment RM's advance call lands, because that endpoint derives each
+   stage's status purely from `StaffApplicant.pipelineStage` + `PipelineEvent` history — there is
+   no separate staff-side wiring needed for "staff sees S2 completed." It already reflects
+   whatever the backend's real stage is.
+```
+
+**Do not build any staff-facing PV-specific screen or status line** (e.g. "PV: Clear") — no such
+granular endpoint is exposed to STAFF today (`GET /verification/:staffId` is RM/ADMIN-only), and
+the staff app's real design already only shows the coarse per-stage progress bar via
+`GET /staff/pipeline`, which is correct and sufficient — confirm this screen is already
+functioning, don't duplicate it with new PV-specific staff UI.
+
+This prompt's actual mobile-app work is entirely the **RM side** below (§3–§6) — the RM app is
+what needs the Submit/Record-Result screens built. The staff side requires no new code, only an
+end-to-end verification (§7) that the loop above genuinely reflects in the staff app once RM acts.
+
+---
+
+## 3. Real APIs (all three now real and working — no known gaps)
 
 **Submit a PV request:**
 ```
@@ -63,7 +97,7 @@ Rejects any `result` value other than exactly `CLEAR`/`ADVERSE` with a `400`.
 
 ---
 
-## 3. UI states to implement
+## 4. UI states to implement
 
 ```
 NOT_INITIATED  → "Not started" + Submit button
@@ -83,7 +117,7 @@ the S2 screen and any S5-readiness indicator elsewhere in the app stay in sync.
 
 ---
 
-## 4. Series exception — don't miss this
+## 5. Series exception — don't miss this
 
 For `MAID` series specifically, a PENDING PV does **not** block deployment — only an `ADVERSE`
 result does (`checkDeploymentEligibility()` special-cases this). Every other series requires
@@ -92,7 +126,7 @@ for a MAID candidate whose PV is merely PENDING).
 
 ---
 
-## 5. Error handling / states
+## 6. Error handling / states
 
 Same standard as the rest of the RM app (`RM_CLAUDE_PROMPT.md` §33/34): loading, empty, error,
 retry, disable-while-submitting, no silent failures, no locally-inferred success before the API
@@ -101,7 +135,23 @@ message directly (it's already human-readable) rather than a generic error.
 
 ---
 
-## 6. Final deliverable
+## 7. End-to-end test — the actual proof this works
+
+After building the RM screens, test the **full loop across both apps**, not just the RM API calls
+in isolation:
+
+1. As RM: submit PV for a real test staff.
+2. As RM: record result CLEAR via the new close action.
+3. As that staff (or via `GET /staff/pipeline` with the staff's token): confirm S2_VERIFY is
+   **still** `current`, not `completed` — closing PV alone does not advance the stage; only RM's
+   explicit advance call does. This is expected, not a bug.
+4. As RM: call `POST /rm/pipeline/:staffId/advance` with `to_stage: "S2_5_ASSESS"`.
+5. As that staff: reload the pipeline screen — confirm S2_VERIFY now shows `completed` and
+   S2_5_ASSESS shows `current`. This is the actual deliverable — if this last step doesn't update
+   correctly, the bug is in the staff app's pipeline screen not refreshing/re-fetching, not in the
+   PV endpoints themselves.
+
+## 8. Final deliverable
 
 Report back:
 - Submit screen: wired / not wired.
@@ -110,3 +160,5 @@ Report back:
   deliberate CLEAR/ADVERSE choice (never defaulted or auto-triggered).
 - Confirm the S2 screen and S5-readiness view both refresh from the server after a close call
   rather than assuming local state.
+- Confirm the §7 end-to-end test was actually run (both RM and Staff sides), not just the RM API
+  calls checked in isolation.
