@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, Query, UseGuards, NotFoundException } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, Req, UseGuards, NotFoundException } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiQuery, ApiParam } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -93,6 +93,34 @@ export class VerificationController {
   })
   async submitPV(@Param('staffId') staffId: string, @Body() details: any) {
     return this.verificationService.submitPoliceVerification(staffId, details);
+  }
+
+  @Post('pv/:staffId/close')
+  @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Close a submitted PV request with a real result (CLEAR/ADVERSE)',
+    description:
+      'The endpoint that was missing: submit only ever creates a PENDING VerificationTrack row — ' +
+      'nothing moved it forward, and the field the S5_DEPLOY gate actually reads ' +
+      '(StaffApplicant.pv_status) was a completely separate, never-updated column. This writes ' +
+      'both atomically and requires a prior submit to exist.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['result'],
+      properties: {
+        result: { type: 'string', enum: ['CLEAR', 'ADVERSE'] },
+        notes: { type: 'string', example: 'Verification certificate received from local police station' },
+      },
+    },
+  })
+  async closePV(
+    @Param('staffId') staffId: string,
+    @Body() body: { result: 'CLEAR' | 'ADVERSE'; notes?: string },
+    @Req() req: { user: { id: string } },
+  ) {
+    return this.verificationService.closePoliceVerification(staffId, body.result, body.notes, req.user?.id);
   }
 
   @Post('medical/submit/:staffId')

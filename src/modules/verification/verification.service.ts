@@ -1,10 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { AxiosResponse } from 'axios';
 import * as crypto from 'crypto';
 import { firstValueFrom } from 'rxjs';
 import { PrismaService } from '../../prisma/prisma.service';
+import { AuditService } from '../audit/audit.service';
+import { AuditAction } from '@prisma/client';
 
 export interface SarathiResult {
   dl_number: string; name: string; dob: string; valid_from: string; valid_to: string;
@@ -26,6 +28,7 @@ export class VerificationService {
     private readonly config: ConfigService,
     private readonly http: HttpService,
     private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
   ) {}
 
   async verifyDrivingLicence(dlNumber: string, dob: string, staffId?: string): Promise<SarathiResult> {
@@ -172,6 +175,69 @@ export class VerificationService {
       },
     }).catch(() => {});
     return res;
+  }
+
+  /**
+   * Closes out a previously-submitted PV request with a real result. This is the missing half of
+   * the PV workflow: submitPoliceVerification() above only ever writes VerificationTrack.status =
+   * 'PENDING' — nothing anywhere used to move it forward. Worse, the field the S5_DEPLOY gate
+   * actually reads (StaffApplicant.pvStatus, in pipeline-fsm.service.ts's
+   * checkDeploymentEligibility()) is a completely separate column with no code linking it to
+   * VerificationTrack — a PV could sit PENDING forever while pvStatus quietly stayed
+   * NOT_INITIATED, or vice versa. This method is the one place both fields get written together,
+   * atomically, so they can't drift apart again.
+   */
+  async closePoliceVerification(
+    staffId: string,
+    result: 'CLEAR' | 'ADVERSE',
+    notes: string | undefined,
+    actorId: string | undefined,
+  ) {
+    if (result !== 'CLEAR' && result !== 'ADVERSE') {
+      throw new BadRequestException("result must be exactly 'CLEAR' or 'ADVERSE'");
+    }
+
+    const existing = await this.prisma.verificationTrack.findUnique({
+      where: { staffId_trackType: { staffId, trackType: 'POLICE_VERIFICATION' } },
+    });
+    if (!existing) {
+      throw new BadRequestException(
+        'PV was never submitted for this staff — call POST /verification/pv/submit/:staffId first',
+      );
+    }
+
+    // VerificationTrackStatus has no ADVERSE member (its closest equivalent is FAILED); PvStatus
+    // has no FAILED member (its closest equivalent is ADVERSE). Map explicitly rather than
+    // reusing one enum's string for the other.
+    const trackStatus = result === 'CLEAR' ? 'CLEAR' : 'FAILED';
+    const closedAt = new Date();
+
+    const [track] = await this.prisma.$transaction([
+      this.prisma.verificationTrack.update({
+        where: { staffId_trackType: { staffId, trackType: 'POLICE_VERIFICATION' } },
+        data: {
+          status: trackStatus,
+          result: { ...(existing.result as object), status: result, closed_at: closedAt.toISOString() } as any,
+          notes: notes || `Police verification closed as ${result}`,
+          verifiedBy: actorId,
+          verifiedAt: closedAt,
+        },
+      }),
+      this.prisma.staffApplicant.update({
+        where: { id: staffId },
+        data: { pvStatus: result },
+      }),
+    ]);
+
+    await this.audit.log({
+      actorId,
+      action: result === 'CLEAR' ? AuditAction.APPROVAL : AuditAction.DENIAL,
+      entityType: 'police_verification',
+      entityId: staffId,
+      metadata: { result, notes },
+    });
+
+    return { staff_id: staffId, pv_status: result, track_status: track.status, closed_at: closedAt.toISOString() };
   }
 
   async submitMedicalVerification(staffId: string, details: Record<string, any>) {
