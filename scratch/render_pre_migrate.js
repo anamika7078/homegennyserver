@@ -9,6 +9,7 @@ const ROLLED_BACK = [
   '20260518000000_enterprise_extensions',
   '20260528000000_admin_security_triggers',
   '20260710112100_add_employee_tables',
+  '20260817071500_agreements_client_fk_fix',
 ];
 
 function run(cmd) {
