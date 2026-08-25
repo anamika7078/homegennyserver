@@ -824,6 +824,27 @@ export class RmService {
       return { cleared: true, staff_id: body.staff_id, date: body.date };
     }
 
+    // Attendance is staff-owned — they check in/out themselves (POST /staff/
+    // attendance/check-in|check-out) and RM's real role is to review that
+    // submission (PATCH /rm/shifts/:id/review), not to mark attendance on
+    // their behalf. This endpoint stays as a correction/fallback tool only —
+    // for a genuine gap (staff has no self-submitted shift log at all) or a
+    // shift RM already REJECTED as inaccurate. If staff's own submission for
+    // this date is still live (PENDING or APPROVED) or FLAGGED for review,
+    // RM must go through the proper review action instead of silently
+    // overwriting it here.
+    const ownShift = await this.prisma.shiftLog.findUnique({
+      where: { staffId_shiftDate: { staffId: body.staff_id, shiftDate: attendanceDate } },
+      select: { status: true },
+    });
+    if (ownShift && ownShift.status !== 'REJECTED') {
+      throw new BadRequestException(
+        `Staff already has a ${ownShift.status.toLowerCase()} self-check-in for this date — ` +
+        `review it via PATCH /rm/shifts/:id/review instead of marking attendance directly. ` +
+        `Direct marking is only for dates with no shift log, or one you've already rejected.`,
+      );
+    }
+
     const record = await this.prisma.staffDailyAttendance.upsert({
       where: {
         staffId_attendanceDate: {

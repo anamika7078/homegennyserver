@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { PayrollService } from '../payroll/payroll.service';
 
 @Injectable()
 export class EnterpriseCronService {
@@ -14,7 +15,53 @@ export class EnterpriseCronService {
     private readonly events: EventEmitter2,
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly payroll: PayrollService,
   ) {}
+
+  /**
+   * Attendance is staff-owned and billable the moment they check in (see
+   * StaffMobileController#checkIn) — but an invoice/payroll run is a monthly
+   * billing document, so it can't happen per check-in the same way the
+   * preview does (that's already always live). This replaces RM having to
+   * remember to call POST /rm/attendance/:staffId/generate-invoice for every
+   * CONFIRMED placement each month — same calculation
+   * (PayrollService.runAttendancePayroll, keyed by placement → staff →
+   * client, exactly as it already worked), just triggered automatically
+   * instead of manually. Manual generation (RM's endpoint, and Finance's
+   * POST /finance/payroll/attendance-generate) still exists — this cron
+   * doesn't replace either, it just means nobody has to remember to click it.
+   */
+  @Cron(CronExpression.EVERY_1ST_DAY_OF_MONTH_AT_MIDNIGHT)
+  async autoGenerateAttendanceInvoices() {
+    const now = new Date();
+    const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const month = prevMonthDate.getMonth() + 1;
+    const year = prevMonthDate.getFullYear();
+
+    const placements = await this.prisma.placement.findMany({
+      where: { status: 'CONFIRMED' },
+      select: { id: true },
+    });
+
+    let generated = 0;
+    let skipped = 0;
+    for (const p of placements) {
+      try {
+        await this.payroll.runAttendancePayroll(p.id, month, year);
+        generated++;
+      } catch (e) {
+        // Already generated, no billable days, salary/fee not set, etc. —
+        // best-effort batch, one bad placement must not block the rest.
+        skipped++;
+        this.logger.warn(`[AUTO-INVOICE] Skipped placement ${p.id} for ${month}/${year}: ${(e as Error).message}`);
+      }
+    }
+
+    this.logger.log(`[AUTO-INVOICE] ${month}/${year}: generated=${generated} skipped=${skipped}`);
+    if (generated) {
+      this.events.emit('cron.attendance_invoices_generated', { month, year, generated, skipped });
+    }
+  }
 
   @Cron(CronExpression.EVERY_DAY_AT_6AM)
   async trialExpiryReminders() {

@@ -268,7 +268,14 @@ export class RmController {
   }
 
   @Put('attendance')
-  @ApiOperation({ summary: 'Mark or clear daily attendance for a staff member' })
+  @ApiOperation({
+    summary: 'Correction/fallback: mark or clear a day\'s attendance directly',
+    description:
+      'Attendance is normally staff-owned — they self-check-in via POST /staff/attendance/check-in ' +
+      'and RM reviews it via PATCH /rm/shifts/:id/review. This endpoint is only for a genuine gap ' +
+      '(no shift log at all for that date) or fixing a date RM already rejected as inaccurate — 400 ' +
+      'if the staff has a live (PENDING/APPROVED) or FLAGGED self-check-in for that date instead.',
+  })
   @ApiBody({
     schema: {
       type: 'object',

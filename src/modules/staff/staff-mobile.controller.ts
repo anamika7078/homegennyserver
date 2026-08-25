@@ -277,7 +277,11 @@ export class StaffMobileController {
   @Post('attendance/check-in')
   @ApiOperation({
     summary: 'Submit staff check-in with GPS',
-    description: 'Requires a CONFIRMED placement — writes a real ShiftLog row (same table RM\'s /rm/shifts review reads).',
+    description:
+      'Requires a CONFIRMED placement — writes a real ShiftLog row (same table RM\'s /rm/shifts review ' +
+      'reads) and is immediately billable: attendance is staff-owned, so this auto-approves and syncs ' +
+      'straight to StaffDailyAttendance rather than waiting on RM review. RM can still retroactively ' +
+      'reject a fraudulent/incorrect day via PATCH /rm/shifts/:id/review, which un-syncs it.',
   })
   @ApiBody({
     schema: {
@@ -310,13 +314,35 @@ export class StaffMobileController {
         checkInAt: new Date(),
         checkInLat: body.latitude,
         checkInLng: body.longitude,
+        status: 'APPROVED',
       },
       update: {
         checkInAt: new Date(),
         checkInLat: body.latitude,
         checkInLng: body.longitude,
+        status: 'APPROVED',
       },
     });
+
+    // Same sync reviewShift() does on APPROVED — attendance is billable the
+    // moment staff checks in, no RM action required.
+    await this.prisma.staffDailyAttendance.upsert({
+      where: { staffId_attendanceDate: { staffId: staff.id, attendanceDate: today } },
+      create: {
+        staffId: staff.id,
+        placementId: placement.id,
+        branchId: placement.branchId,
+        attendanceDate: today,
+        status: 'PRESENT',
+        markedBy: req.user.id,
+      },
+      update: {
+        status: 'PRESENT',
+        placementId: placement.id,
+        branchId: placement.branchId,
+        markedBy: req.user.id,
+      },
+    }).catch(() => undefined);
 
     return {
       success: true,
