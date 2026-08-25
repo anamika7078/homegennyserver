@@ -17,11 +17,13 @@
 2. **New optional `status` field** in the create body: `"TRIAL"` (default,
    unchanged behavior) or `"CONFIRMED"` (skips the trial entirely and creates
    the placement already confirmed). If `"CONFIRMED"` is sent, `staff_salary`
-   and `management_fee` are now **required in the same request** — 400 if
-   either is missing:
+   and `management_fee` are now **required in the same request** — either
+   directly, or computed from `wage_config` (point 4 below) — 400 if
+   neither is supplied:
    ```
-   400 { "message": "staff_salary and management_fee are required to create
-   a placement directly as CONFIRMED." }
+   400 { "message": "staff_salary and management_fee (directly, or computed
+   via wage_config) are required to create a placement directly as
+   CONFIRMED." }
    ```
 
 3. **`POST /:id/confirm` (the separate TRIAL→CONFIRMED step) now also
@@ -40,10 +42,31 @@
    screen's confirm action (wherever `POST /:id/confirm` is currently
    called) with a clear message pointing the RM at the missing A2/A3.
 
-Nothing else changed — `PATCH /:id/terms`, `POST /:id/confirm`, `POST
-/:id/exit`, `GET /placements` are all unchanged. `POST /sow` and `POST
-/indemnity` are also unchanged (still require an existing `placement_id`) —
-see "Why" below for how that's meant to be sequenced now.
+4. **`POST /placements` and `PATCH /:id/terms` now accept a `wage_config`
+   object** instead of (or as well as) flat `staff_salary`/`management_fee` —
+   the same fields/formula as Finance's Commercial Calculator
+   (`basic_wage, da, hra, skilled_allowance, working_hours, employer_pf_pct,
+   employer_pf_max, employee_pf_pct, employer_esic_pct, employee_esic_pct,
+   bonus_pct, bonus_frequency, leave_days, lwf_amount, uniform_allowance,
+   relieving_pct, management_pct, professional_tax`, plus the
+   `..._applicable` boolean toggles and `gst_applicable/gst_type/gst_pct`).
+   When `wage_config` is supplied, `staff_salary` is set from the computed
+   `netSalary` and `management_fee` from the computed `managementFee` —
+   any flat `staff_salary`/`management_fee` also sent in the same request is
+   ignored. The full computed breakdown is returned on the placement as
+   `wage_breakup`, and the raw inputs as `wage_config` (both persisted, so
+   they round-trip on every subsequent `GET`/`PATCH` too).
+   New endpoint **`POST /placements/calculate-wage`** takes the same
+   `wage_config` shape and returns the breakdown with nothing persisted —
+   use it to drive a live preview as the RM fills the form, exactly like
+   Finance's "Live Preview" toggle, before the RM actually submits
+   create()/updateTerms(). RM already has access to all of this (no new
+   role/permission needed).
+
+Nothing else changed — `POST /:id/confirm`, `POST /:id/exit`, `GET
+/placements` are all unchanged. `POST /sow` and `POST /indemnity` are also
+unchanged (still require an existing `placement_id`) — see "Why" below for
+how that's meant to be sequenced now.
 
 ## Why (business reason)
 
@@ -97,8 +120,9 @@ is fine with the backend (it takes whatever `client_id` you send).
   false on both counts.
 - Add a **Trial vs. Confirm Now** choice to the form (e.g. a segmented
   control or two buttons). When "Confirm Now" is selected:
-  - Require the salary + fee fields (they're currently optional in the UI)
-    before enabling submit.
+  - Require the salary + fee fields — or, once section 5 below is also
+    built, the whole wage-breakup form — to be completed before enabling
+    submit (currently optional in the UI).
   - Send `"status": "CONFIRMED"` in the body.
   - Skip/hide the "Trial dates default to..." helper text and the amber
     "This creates a TRIAL placement..." banner — replace with something
@@ -113,3 +137,30 @@ is fine with the backend (it takes whatever `client_id` you send).
 ### 4. Anywhere else that navigates to `RmRoutes.placementCreate(staffId)`
 Search for other callers (the S4 hub was the only one referenced in the
 code read so far) and make sure none of them still route here from S4.
+
+### 5. `rm_placement_create_screen.dart` — replace the salary/fee fields with a wage-breakup form
+Instead of the two bare `staff_salary`/`management_fee` text fields, RM now
+fills the full Commercial Calculator-style form — same fields as
+`WageConfigFormModal` in the web app (`homegenny/src/components/finance/WageConfigFormModal.tsx`,
+mode `customer_assignment`, minus the unit-code/customer-multi-resource
+section, which doesn't apply here): Basic Wage, DA, HRA, Skilled Allowance,
+working hours (8/12), PF/ESIC/Bonus/LWF/Uniform/Relieving toggles + %s,
+Management Fee %, Professional Tax, GST config. Reasonable statutory
+defaults (mirroring `WageConfigFormModal`'s `DEFAULT_FORM_DATA`): Employer
+PF 13%, PF ceiling ₹15,000, Employee PF 12%, Employer ESIC 3.25%, Employee
+ESIC 0.75%, Bonus 8.33% monthly, Leave days 32, LWF ₹62, Uniform ₹275,
+Relieving 16.67%, GST 18% intra-state — RM edits Basic/DA/HRA/Skilled/
+Management% per the actual deal, the statutory %s rarely need changing.
+
+- On every field change, call `POST /placements/calculate-wage` (debounced)
+  to show a live preview (staff take-home / management fee / CTC), same
+  idea as the web calculator's "Live Preview" panel.
+- On submit, send the whole form as `wage_config` in the `POST /placements`
+  (or `PATCH /:id/terms`) body — don't compute netSalary/managementFee on
+  the client and send those directly; the backend derives and stores them.
+  This also applies to the "Trial vs. Confirm Now" choice in Flutter section
+  3 above — `wage_config` satisfies the CONFIRMED-requires-salary/fee check
+  the same way flat `staff_salary`/`management_fee` did.
+- A flat manual-entry fallback (just typing salary + fee, no breakdown) can
+  stay as an option if useful, by sending `staff_salary`/`management_fee`
+  directly instead of `wage_config` — the backend still accepts both.

@@ -1,9 +1,10 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
-import { PlacementStatus } from '@prisma/client';
+import { PlacementStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '@prisma/client';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { computeWageBreakup, WageConfigInput } from './wage-calculator.util';
 
 // Spec (HomeGenny_StageDescriptions, S5 Trial Period): Maid/UC/DR = 7-day
 // trial, SC = 14-day trial. create() used to default every series to 14 days
@@ -55,9 +56,11 @@ export class PlacementService {
     managementFee: unknown;
     trialStartDate: Date | null;
     trialEndDate: Date | null;
+    metadata?: unknown;
     createdAt: Date;
     updatedAt: Date;
   }, staff?: { staffCode: string; series: string; fullName?: string } | null, client?: { customerName: string } | null): PlacementRow {
+    const metadata = (p.metadata as Record<string, unknown> | null) ?? {};
     return {
       id: p.id,
       staff_id: p.staffId,
@@ -67,6 +70,8 @@ export class PlacementService {
       management_fee: p.managementFee != null ? Number(p.managementFee) : null,
       trial_start_date: p.trialStartDate,
       trial_end_date: p.trialEndDate,
+      wage_config: metadata.wage_config ?? null,
+      wage_breakup: metadata.wage_breakup ?? null,
       created_at: p.createdAt,
       updated_at: p.updatedAt,
       staff_code: staff?.staffCode,
@@ -88,6 +93,41 @@ export class PlacementService {
       where: { id: clientId },
       select: { customerName: true },
     });
+  }
+
+  /**
+   * RM fills the full wage-breakup form at placement time (same fields/formula
+   * as Finance's Commercial Calculator) rather than typing a flat salary/fee —
+   * this derives staff_salary and management_fee from it, and keeps the raw
+   * inputs + full computed breakdown (PF/ESIC/bonus/GST/CTC) in `metadata` for
+   * audit — no schema change needed, `metadata` already existed and was unused.
+   * Falls back to flat staff_salary/management_fee when wage_config is omitted
+   * (existing callers, e.g. direct-CONFIRMED quick placements, keep working).
+   */
+  private resolveWageTerms(data: Record<string, unknown>): {
+    staffSalary?: number;
+    managementFee?: number;
+    metadataPatch: Record<string, unknown>;
+  } {
+    const wageConfig = data.wage_config;
+    if (wageConfig && typeof wageConfig === 'object') {
+      const breakup = computeWageBreakup(wageConfig as WageConfigInput);
+      return {
+        staffSalary: Math.round(breakup.netSalary * 100) / 100,
+        managementFee: Math.round(breakup.managementFee * 100) / 100,
+        metadataPatch: { wage_config: wageConfig, wage_breakup: breakup },
+      };
+    }
+    return {
+      staffSalary: data.staff_salary != null ? Number(data.staff_salary) : undefined,
+      managementFee: data.management_fee != null ? Number(data.management_fee) : undefined,
+      metadataPatch: {},
+    };
+  }
+
+  /** Pure calculation, no persistence — for a live preview before submitting create()/updateTerms(). */
+  calculateWage(wageConfig: WageConfigInput) {
+    return computeWageBreakup(wageConfig);
   }
 
   async create(data: Record<string, unknown>, actorId?: string) {
@@ -116,10 +156,12 @@ export class PlacementService {
     // e.g. a repeat/trusted client the RM doesn't need a trial period for.
     // CONFIRMED normally requires salary+fee to already be set (see confirm()
     // below) — enforced here too since there's no separate confirm step to catch it.
+    const wageTerms = this.resolveWageTerms(data);
+
     const directConfirm = String(data.status ?? '').toUpperCase() === 'CONFIRMED';
-    if (directConfirm && (data.staff_salary == null || data.management_fee == null)) {
+    if (directConfirm && (wageTerms.staffSalary == null || wageTerms.managementFee == null)) {
       throw new BadRequestException(
-        'staff_salary and management_fee are required to create a placement directly as CONFIRMED.',
+        'staff_salary and management_fee (directly, or computed via wage_config) are required to create a placement directly as CONFIRMED.',
       );
     }
     const status = directConfirm ? PlacementStatus.CONFIRMED : PlacementStatus.TRIAL;
@@ -133,8 +175,9 @@ export class PlacementService {
         branchId,
         rmId: data.rm_id ? String(data.rm_id) : undefined,
         status,
-        staffSalary: data.staff_salary != null ? Number(data.staff_salary) : undefined,
-        managementFee: data.management_fee != null ? Number(data.management_fee) : undefined,
+        staffSalary: wageTerms.staffSalary,
+        managementFee: wageTerms.managementFee,
+        metadata: wageTerms.metadataPatch as Prisma.InputJsonValue,
         trialStartDate: data.trial_start_date ? new Date(String(data.trial_start_date)) : new Date(),
         trialEndDate: data.trial_end_date
           ? new Date(String(data.trial_end_date))
@@ -179,15 +222,25 @@ export class PlacementService {
    * a placement created without them (API called directly, bypassing the
    * RM UI's create form) would otherwise be permanently stuck at TRIAL.
    */
-  async updateTerms(id: string, data: { staff_salary?: unknown; management_fee?: unknown }, actorId?: string) {
+  async updateTerms(
+    id: string,
+    data: { staff_salary?: unknown; management_fee?: unknown; wage_config?: unknown },
+    actorId?: string,
+  ) {
     const existing = await this.prisma.placement.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Placement not found');
+
+    const wageTerms = this.resolveWageTerms(data);
+    const existingMetadata = (existing.metadata as Record<string, unknown> | null) ?? {};
 
     const row = await this.prisma.placement.update({
       where: { id },
       data: {
-        ...(data.staff_salary != null ? { staffSalary: Number(data.staff_salary) } : {}),
-        ...(data.management_fee != null ? { managementFee: Number(data.management_fee) } : {}),
+        ...(wageTerms.staffSalary != null ? { staffSalary: wageTerms.staffSalary } : {}),
+        ...(wageTerms.managementFee != null ? { managementFee: wageTerms.managementFee } : {}),
+        ...(Object.keys(wageTerms.metadataPatch).length
+          ? { metadata: { ...existingMetadata, ...wageTerms.metadataPatch } as Prisma.InputJsonValue }
+          : {}),
       },
     });
 
@@ -196,7 +249,7 @@ export class PlacementService {
       action: AuditAction.DEPLOYMENT_ACTION,
       entityType: 'placement',
       entityId: row.id,
-      metadata: { action: 'terms_updated', staff_salary: data.staff_salary, management_fee: data.management_fee },
+      metadata: { action: 'terms_updated', staff_salary: wageTerms.staffSalary, management_fee: wageTerms.managementFee, via_wage_config: !!data.wage_config },
     });
 
     const [staff, client] = await Promise.all([this.getStaffMeta(row.staffId), this.getClientMeta(row.clientId)]);

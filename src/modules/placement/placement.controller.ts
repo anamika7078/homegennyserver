@@ -4,6 +4,44 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { PlacementService, PlacementRow, PlacementList } from './placement.service';
+import { WageConfigInput } from './wage-calculator.util';
+
+// Same fields as Finance's Commercial Calculator (homegenny's WageConfigFormModal /
+// wageEngine.ts) — RM fills this at placement time instead of typing a flat number,
+// so salary/fee stay driven by variable, editable rates instead of a guess.
+const WAGE_CONFIG_SCHEMA = {
+  type: 'object',
+  description: 'Full wage-breakup inputs — when supplied, staff_salary and management_fee are computed from this (and both are ignored/overridden if also passed flat).',
+  properties: {
+    basic_wage: { type: 'number', example: 15000 },
+    da: { type: 'number', example: 0 },
+    hra: { type: 'number', example: 0 },
+    skilled_allowance: { type: 'number', example: 0 },
+    working_hours: { type: 'number', enum: [8, 12], default: 8, description: '12 adds a +50% additional-hours uplift' },
+    employer_pf_pct: { type: 'number', example: 13 },
+    employer_pf_max: { type: 'number', example: 15000, description: 'PF ceiling limit' },
+    employee_pf_pct: { type: 'number', example: 12 },
+    employer_esic_pct: { type: 'number', example: 3.25 },
+    employee_esic_pct: { type: 'number', example: 0.75 },
+    bonus_pct: { type: 'number', example: 8.33 },
+    bonus_frequency: { type: 'string', enum: ['monthly', 'yearly'], default: 'monthly' },
+    leave_days: { type: 'number', example: 32, description: 'Leave days / year' },
+    lwf_amount: { type: 'number', example: 62 },
+    uniform_allowance: { type: 'number', example: 275 },
+    relieving_pct: { type: 'number', example: 16.67 },
+    management_pct: { type: 'number', example: 5.5, description: 'Management fee %' },
+    professional_tax: { type: 'number', example: 0 },
+    pf_applicable: { type: 'boolean', default: true },
+    esic_applicable: { type: 'boolean', default: true },
+    bonus_applicable: { type: 'boolean', default: true },
+    lwf_applicable: { type: 'boolean', default: true },
+    uniform_applicable: { type: 'boolean', default: true },
+    relieving_applicable: { type: 'boolean', default: true },
+    gst_applicable: { type: 'boolean', default: true },
+    gst_type: { type: 'string', enum: ['intra_state', 'inter_state'], default: 'intra_state' },
+    gst_pct: { type: 'number', example: 18 },
+  },
+};
 
 // Spec: Matching & Placement — RM=Y, BM=Y, Admin=Y, Staff/Client/Finance=no access.
 // All 4 routes here are things an RM actually does from the mobile app (start a trial,
@@ -35,8 +73,9 @@ export class PlacementController {
         branch_id: { type: 'string', description: 'Optional — defaults to the main branch' },
         rm_id: { type: 'string', description: 'Optional — RM managing this placement' },
         status: { type: 'string', enum: ['TRIAL', 'CONFIRMED'], default: 'TRIAL', description: 'TRIAL (default) or CONFIRMED to deploy straight to a confirmed placement' },
-        staff_salary: { type: 'number', example: 18000, description: 'Required if status is CONFIRMED' },
-        management_fee: { type: 'number', example: 4500, description: 'Required if status is CONFIRMED' },
+        staff_salary: { type: 'number', example: 18000, description: 'Flat entry — ignored if wage_config is also supplied. Required if status is CONFIRMED (directly, or via wage_config).' },
+        management_fee: { type: 'number', example: 4500, description: 'Flat entry — ignored if wage_config is also supplied. Required if status is CONFIRMED (directly, or via wage_config).' },
+        wage_config: WAGE_CONFIG_SCHEMA,
         trial_start_date: { type: 'string', format: 'date', description: 'Optional — defaults to now' },
         trial_end_date: { type: 'string', format: 'date', description: 'Optional — defaults to +7 days (Maid/UC/DR) or +14 days (SC), based on the staff\'s series' },
       },
@@ -44,6 +83,19 @@ export class PlacementController {
   })
   create(@Req() req: { user: { id: string } }, @Body() body: Record<string, unknown>): Promise<PlacementRow> {
     return this.service.create(body, req.user.id);
+  }
+
+  @Post('calculate-wage')
+  @ApiOperation({
+    summary: 'Compute a wage breakup (no persistence) — for a live preview before create()/terms',
+    description:
+      'Same formula Finance\'s Commercial Calculator uses. Returns netSalary (→ staff_salary) and ' +
+      'managementFee (→ management_fee) plus the full PF/ESIC/bonus/GST/CTC breakdown, purely computed ' +
+      'from the inputs given — nothing is saved.',
+  })
+  @ApiBody({ schema: WAGE_CONFIG_SCHEMA })
+  calculateWage(@Body() body: WageConfigInput) {
+    return this.service.calculateWage(body);
   }
 
   @Get()
@@ -69,22 +121,24 @@ export class PlacementController {
     summary: 'Set/update staff_salary and management_fee on a placement',
     description:
       'Required before confirm() will succeed if either was left unset at creation — there was ' +
-      'previously no way to fix a placement created without them. Both are optional here; only the ' +
-      'ones supplied are updated.',
+      'previously no way to fix a placement created without them. Pass wage_config to compute both ' +
+      'from a full wage breakup instead of flat numbers (same as create()) — the raw inputs and full ' +
+      'breakdown are merged into the placement\'s metadata. Only the fields supplied are updated.',
   })
   @ApiBody({
     schema: {
       type: 'object',
       properties: {
-        staff_salary: { type: 'number', example: 18000 },
-        management_fee: { type: 'number', example: 4500 },
+        staff_salary: { type: 'number', example: 18000, description: 'Ignored if wage_config is also supplied' },
+        management_fee: { type: 'number', example: 4500, description: 'Ignored if wage_config is also supplied' },
+        wage_config: WAGE_CONFIG_SCHEMA,
       },
     },
   })
   updateTerms(
     @Req() req: { user: { id: string } },
     @Param('id') id: string,
-    @Body() body: { staff_salary?: number; management_fee?: number },
+    @Body() body: { staff_salary?: number; management_fee?: number; wage_config?: WageConfigInput },
   ): Promise<PlacementRow> {
     return this.service.updateTerms(id, body, req.user.id);
   }
