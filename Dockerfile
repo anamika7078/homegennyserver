@@ -37,6 +37,10 @@ COPY --from=builder /app/scratch ./scratch
 COPY --from=builder /app/prisma ./prisma
 # Re-copy generated Prisma client (already in prod_modules, but needed for schema awareness)
 COPY --from=deps /app/node_modules/.prisma ./node_modules/.prisma
+# video-cert's local-storage jugaad (see local-video-storage.util.ts) writes to
+# <cwd>/local-uploads at runtime as the unprivileged `nestjs` user — everything
+# copied above is root-owned, so without this the first mkdirSync fails EACCES.
+RUN mkdir -p /app/local-uploads && chown -R nestjs:nodejs /app/local-uploads
 USER nestjs
 EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s \
