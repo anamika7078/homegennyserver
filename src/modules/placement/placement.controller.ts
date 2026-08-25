@@ -19,20 +19,24 @@ export class PlacementController {
 
   @Post()
   @ApiOperation({
-    summary: 'Create a new placement (trial)',
-    description: 'Links a staff member to a client. Always starts as TRIAL — call POST /:id/confirm once the trial succeeds.',
+    summary: 'Create a new placement (trial or direct-confirm) — only once the staff is at S5_DEPLOY',
+    description:
+      'Links a staff member to a client. Requires the staff to have already reached S5_DEPLOY — ' +
+      '400 otherwise. Defaults to TRIAL (call POST /:id/confirm later); pass status: "CONFIRMED" to ' +
+      'skip the trial entirely (staff_salary and management_fee are required up front in that case).',
   })
   @ApiBody({
     schema: {
       type: 'object',
       required: ['staff_id', 'client_id'],
       properties: {
-        staff_id: { type: 'string', description: 'StaffApplicant id' },
+        staff_id: { type: 'string', description: 'StaffApplicant id — must be at pipeline_stage S5_DEPLOY' },
         client_id: { type: 'string', description: 'FinanceCustomer id' },
         branch_id: { type: 'string', description: 'Optional — defaults to the main branch' },
         rm_id: { type: 'string', description: 'Optional — RM managing this placement' },
-        staff_salary: { type: 'number', example: 18000 },
-        management_fee: { type: 'number', example: 4500 },
+        status: { type: 'string', enum: ['TRIAL', 'CONFIRMED'], default: 'TRIAL', description: 'TRIAL (default) or CONFIRMED to deploy straight to a confirmed placement' },
+        staff_salary: { type: 'number', example: 18000, description: 'Required if status is CONFIRMED' },
+        management_fee: { type: 'number', example: 4500, description: 'Required if status is CONFIRMED' },
         trial_start_date: { type: 'string', format: 'date', description: 'Optional — defaults to now' },
         trial_end_date: { type: 'string', format: 'date', description: 'Optional — defaults to +7 days (Maid/UC/DR) or +14 days (SC), based on the staff\'s series' },
       },
@@ -91,7 +95,9 @@ export class PlacementController {
     description:
       'Required before the staff can check in, RM can mark their attendance, or Finance can run payroll/invoicing ' +
       'for this placement — all of those require CONFIRMED status. Only valid from TRIAL; 400 otherwise. ' +
-      'staff_salary and management_fee must both be set first (PATCH :id/terms if not set at creation).',
+      'staff_salary and management_fee must both be set first (PATCH :id/terms if not set at creation). ' +
+      'A2 (SOW, must be SENT/ACKNOWLEDGED) and A3 (Indemnity, must exist) must also already be on file for ' +
+      'this placement — 400 otherwise. (Not required for a placement created directly as CONFIRMED via POST /.)',
   })
   confirm(@Req() req: { user: { id: string } }, @Param('id') id: string): Promise<PlacementRow> {
     return this.service.confirm(id, req.user.id);

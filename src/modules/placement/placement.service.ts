@@ -91,24 +91,48 @@ export class PlacementService {
   }
 
   async create(data: Record<string, unknown>, actorId?: string) {
+    const staffId = String(data.staff_id);
+    const staff = await this.prisma.staffApplicant.findUnique({
+      where: { id: staffId },
+      select: { series: true, pipelineStage: true },
+    });
+    if (!staff) throw new NotFoundException(`Staff ${staffId} not found`);
+
+    // Placement (trial or direct-confirm) is a deployment action — it only makes
+    // sense once the candidate has actually cleared the pipeline to S5_DEPLOY.
+    // Previously this endpoint had no stage check at all, so the mobile app's S4
+    // hub screen used it to mint a throwaway TRIAL placement mid-agreements just
+    // to get a placement_id for SOW/Indemnity — before deployment eligibility
+    // (PV/video-cert/medical/agreement gates in PipelineFsmService) had even run.
+    if (staff.pipelineStage !== 'S5_DEPLOY') {
+      throw new BadRequestException(
+        `Placement can only be created once the staff has reached S5_DEPLOY (current stage: ${staff.pipelineStage}).`,
+      );
+    }
+
     const branchId = String(data.branch_id ?? '00000000-0000-0000-0000-000000000001');
 
-    let trialDays = DEFAULT_TRIAL_DAYS;
-    if (!data.trial_end_date && data.staff_id) {
-      const staff = await this.prisma.staffApplicant.findUnique({
-        where: { id: String(data.staff_id) },
-        select: { series: true },
-      });
-      if (staff) trialDays = TRIAL_DAYS_BY_SERIES[staff.series] ?? DEFAULT_TRIAL_DAYS;
+    // Deploy-time choice: start a TRIAL (default) or go straight to CONFIRMED —
+    // e.g. a repeat/trusted client the RM doesn't need a trial period for.
+    // CONFIRMED normally requires salary+fee to already be set (see confirm()
+    // below) — enforced here too since there's no separate confirm step to catch it.
+    const directConfirm = String(data.status ?? '').toUpperCase() === 'CONFIRMED';
+    if (directConfirm && (data.staff_salary == null || data.management_fee == null)) {
+      throw new BadRequestException(
+        'staff_salary and management_fee are required to create a placement directly as CONFIRMED.',
+      );
     }
+    const status = directConfirm ? PlacementStatus.CONFIRMED : PlacementStatus.TRIAL;
+
+    const trialDays = TRIAL_DAYS_BY_SERIES[staff.series] ?? DEFAULT_TRIAL_DAYS;
 
     const row = await this.prisma.placement.create({
       data: {
-        staffId: String(data.staff_id),
+        staffId,
         clientId: String(data.client_id),
         branchId,
         rmId: data.rm_id ? String(data.rm_id) : undefined,
-        status: PlacementStatus.TRIAL,
+        status,
         staffSalary: data.staff_salary != null ? Number(data.staff_salary) : undefined,
         managementFee: data.management_fee != null ? Number(data.management_fee) : undefined,
         trialStartDate: data.trial_start_date ? new Date(String(data.trial_start_date)) : new Date(),
@@ -123,7 +147,7 @@ export class PlacementService {
         staffId: row.staffId,
         clientId: row.clientId,
         placementId: row.id,
-        status: PlacementStatus.TRIAL,
+        status,
         trialStartDate: row.trialStartDate,
         trialEndDate: row.trialEndDate,
       },
@@ -134,17 +158,17 @@ export class PlacementService {
       action: AuditAction.DEPLOYMENT_ACTION,
       entityType: 'placement',
       entityId: row.id,
-      metadata: { action: 'trial_started' },
+      metadata: { action: directConfirm ? 'placement_confirmed_direct' : 'trial_started' },
     });
 
     this.events.emit('realtime.broadcast', {
       channel: 'deployments',
-      event: 'placement.created',
+      event: directConfirm ? 'placement.confirmed' : 'placement.created',
       data: { placementId: row.id, staffId: row.staffId },
     });
 
-    const [staff, client] = await Promise.all([this.getStaffMeta(row.staffId), this.getClientMeta(row.clientId)]);
-    return this.mapRow(row, staff, client);
+    const [staffMeta, client] = await Promise.all([this.getStaffMeta(row.staffId), this.getClientMeta(row.clientId)]);
+    return this.mapRow(row, staffMeta, client);
   }
 
   /**
@@ -204,6 +228,24 @@ export class PlacementService {
         'Cannot confirm — staff_salary and management_fee must be set first. ' +
         'Update the placement with these values before confirming.',
       );
+    }
+
+    // A2 (SOW) and A3 (Indemnity) are placement-scoped and can only be created
+    // once this placement exists — so unlike the old S4-gate (which required
+    // them before advancing the pipeline stage), they're gated here instead,
+    // on the TRIAL→CONFIRMED transition. Deliberately NOT checked when create()
+    // sets status:'CONFIRMED' directly (deploy-time "confirm now") — at that
+    // instant the placement doesn't exist yet either, so neither could possibly
+    // exist; that fast path is a trusted RM judgment call, not a hole to close.
+    const [sowSent, indemnitySent] = await Promise.all([
+      this.prisma.scopeOfWork.count({ where: { placementId: id, status: { not: 'DRAFT' } } }),
+      this.prisma.clientIndemnity.count({ where: { placementId: id } }),
+    ]);
+    if (sowSent === 0 || indemnitySent === 0) {
+      const missing = [sowSent === 0 && 'A2 (Scope of Work) sent', indemnitySent === 0 && 'A3 (Client Indemnity) sent']
+        .filter(Boolean)
+        .join(' and ');
+      throw new BadRequestException(`Cannot confirm — ${missing} required first.`);
     }
 
     const row = await this.prisma.placement.update({
