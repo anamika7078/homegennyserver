@@ -156,6 +156,12 @@ export class StaffMobileController {
 
     return {
       id: req.user.id,
+      // The video-cert endpoints (upload-url/finalize/list) key everything on
+      // staff_applicants.id and check ownership by phone match against it —
+      // `id` above is the *users* row, which is a different id. Without this,
+      // the app had no way to learn its own staffApplicant id and every
+      // video-cert call 403'd with "You may only access your own staff record".
+      staffApplicantId: staff?.id ?? null,
       staffCode: staff?.staffCode || 'STF-1029',
       fullName: staff?.fullName || req.user.fullName || 'Pooja Mishra',
       mobile: staff?.mobile || req.user.phone,
