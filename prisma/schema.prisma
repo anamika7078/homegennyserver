@@ -329,7 +329,7 @@ model BatchEnrollment {
 model Agreement {
   id          String          @id @default(uuid()) @db.Uuid
   staffId     String?         @map("staff_id") @db.Uuid
-  clientId    String          @map("client_id") @db.Uuid
+  clientId    String?         @map("client_id") @db.Uuid
   placementId String?         @map("placement_id") @db.Uuid
   type        String          @db.VarChar(40)
   status      AgreementStatus @default(PENDING)
@@ -346,7 +346,7 @@ model Agreement {
   // same id space, but agreements.client_id pointed at ClientProfile instead —
   // a real FinanceCustomer id would FK-violate on insert. No agreements rows
   // existed anywhere (local or prod) when this was fixed, so no migration risk.
-  client      FinanceCustomer @relation(fields: [clientId], references: [id])
+  client      FinanceCustomer? @relation(fields: [clientId], references: [id])
   staff       StaffApplicant? @relation(fields: [staffId], references: [id])
 
   @@index([staffId])

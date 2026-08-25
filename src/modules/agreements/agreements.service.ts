@@ -217,10 +217,21 @@ export class AgreementsService {
 
   async createAgreement(data: {
     staff_id?: string;
-    client_id: string;
-    type: string;
+    client_id?: string;
+    type?: string;
     placement_id?: string;
   }) {
+    if (!data.type) throw new BadRequestException('type is required');
+
+    // A1 is staff-level and client-independent (see MOBILE_BRIEF_PLACEMENT_S5_ONLY.md) —
+    // only A2/SOW and A3/Indemnity are client-specific, and those are normally created via
+    // POST /sow and POST /indemnity instead (which derive client_id from the placement).
+    // If this generic endpoint is ever used directly for A2/A2_SOW, still require an
+    // explicit client_id rather than guessing one.
+    if ((data.type === 'A2' || data.type === 'A2_SOW') && !data.client_id) {
+      throw new BadRequestException('client_id is required for A2/SOW agreements');
+    }
+
     if (data.type === 'A2' || data.type === 'A2_SOW') {
       const a1 = await this.prisma.agreement.findFirst({
         where: {
@@ -235,7 +246,7 @@ export class AgreementsService {
     const row = await this.prisma.agreement.create({
       data: {
         staffId: data.staff_id,
-        clientId: data.client_id,
+        clientId: data.client_id ?? null,
         placementId: data.placement_id,
         type: data.type,
         status: AgreementStatus.PENDING,

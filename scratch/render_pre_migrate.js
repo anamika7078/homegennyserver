@@ -75,9 +75,24 @@ async function main() {
     }
 
     await ensureHrTables(client);
+    await ensureAgreementsClientIdNullable(client);
   } finally {
     await client.end();
   }
+}
+
+/**
+ * A1 (Employment Agreement) is staff-level and client-independent — only A2/SOW
+ * and A3/Indemnity are client-specific (see MOBILE_BRIEF_PLACEMENT_S5_ONLY.md).
+ * agreements.client_id was NOT NULL, so POST /agreements with just {staff_id, type: "A1"}
+ * (no client yet) 500'd on a raw Postgres NOT NULL violation. Idempotent — safe to
+ * run on every deploy.
+ */
+async function ensureAgreementsClientIdNullable(client) {
+  const exists = await tableExists(client, 'agreements');
+  if (!exists) return;
+  await client.query(`ALTER TABLE agreements ALTER COLUMN client_id DROP NOT NULL`);
+  console.log('[render_pre_migrate] agreements.client_id is nullable');
 }
 
 async function ensureHrTables(client) {

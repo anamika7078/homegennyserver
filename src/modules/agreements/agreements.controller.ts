@@ -28,10 +28,10 @@ export class AgreementsController {
   @Roles(UserRole.ADMIN, UserRole.BM, UserRole.RM)
   create(@Body() body: Record<string, unknown>) {
     return this.agreementsService.createAgreement({
-      staff_id: body.staff_id as string,
-      client_id: String(body.client_id),
-      type: String(body.type),
-      placement_id: body.placement_id as string,
+      staff_id: body.staff_id as string | undefined,
+      client_id: body.client_id as string | undefined,
+      type: body.type as string | undefined,
+      placement_id: body.placement_id as string | undefined,
     });
   }
 
