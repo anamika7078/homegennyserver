@@ -195,12 +195,15 @@ export class RmController {
   }
 
   @Post('intake')
+  @Roles(UserRole.RM, UserRole.HR, UserRole.BM, UserRole.ADMIN)
   @ApiOperation({
     summary: 'S1 intake with restricted-list check, deposit, and optional S2 advance',
     description:
       'Creates the StaffApplicant record AND a login-capable STAFF account (default password ' +
       'HomeGenny@2024, must_change_password: true) linked to it. If the restricted-list check ' +
-      '(Aadhaar + phone) hits, the record is created directly at TERMINAL with no login provisioned.',
+      '(Aadhaar + phone) hits, the record is created directly at TERMINAL with no login provisioned. ' +
+      'HR can also call this (candidate intake, separate from the payroll-grade POST /employees) — ' +
+      'pass assigned_rm_id explicitly since HR is not itself an RM.',
   })
   @ApiBody({
     schema: {
@@ -221,11 +224,19 @@ export class RmController {
         deposit_collected: { type: 'boolean', example: true },
         advance_to_verify: { type: 'boolean', default: true, description: 'Set false to leave the staff at S1_INTAKE instead of auto-advancing to S2_VERIFY' },
         referral_source: { type: 'string' },
+        assigned_rm_id: { type: 'string', description: 'Required from non-RM callers (HR/BM/ADMIN) — which RM owns this candidate from S2 onward' },
       },
     },
   })
   intake(@Req() req: { user: AuthUser }, @Body() body: Record<string, unknown>) {
     return this.rm.processIntake(req.user, body);
+  }
+
+  @Get('users')
+  @Roles(UserRole.RM, UserRole.HR, UserRole.BM, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Lightweight list of active RM users, for assignment dropdowns (e.g. HR intake)' })
+  listRmUsers() {
+    return this.rm.listRmUsers();
   }
 
   @Get('locations')

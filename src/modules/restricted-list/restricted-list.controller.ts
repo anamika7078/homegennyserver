@@ -22,7 +22,7 @@ interface CheckRestrictedBody {
   phone: string;
 }
 
-// Spec: Restricted List — BM=write, RM=read-only (used during intake routing),
+// Spec: Restricted List — BM=write, RM/HR=read-only (used during intake routing),
 // Admin=full, Staff/Client/Finance=no access.
 @ApiTags('Restricted List')
 @ApiBearerAuth()
@@ -42,7 +42,7 @@ export class RestrictedListController {
   }
 
   @Post('check')
-  @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN)
+  @Roles(UserRole.RM, UserRole.HR, UserRole.BM, UserRole.ADMIN)
   @ApiOperation({ summary: 'Check if Aadhaar/phone is on the restricted list' })
   check(@Body() body: CheckRestrictedBody): Promise<{ found: boolean; reason?: string }> {
     return this.service.check(body.aadhaar_number, body.phone);

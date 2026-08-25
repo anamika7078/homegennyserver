@@ -380,6 +380,16 @@ export class RmService {
     return { outcome: 'ADVANCE_S2', staff: staff ? toStaffDto(staff) : created };
   }
 
+  /** Active RM users, for non-RM intake callers (HR/BM/ADMIN) to pick an assignee. */
+  async listRmUsers() {
+    const rows = await this.prisma.user.findMany({
+      where: { role: UserRole.RM, isActive: true },
+      select: { id: true, fullName: true, branchId: true },
+      orderBy: { fullName: 'asc' },
+    });
+    return rows.map((r) => ({ id: r.id, full_name: r.fullName, branch_id: r.branchId }));
+  }
+
   async listIncidents(user: AuthUser, status?: string) {
     const scope = resolveStaffScope(user, {});
     return this.prisma.incident.findMany({

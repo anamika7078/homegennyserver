@@ -14,7 +14,7 @@ import { resolveStaffScope, AuthUser } from '../../common/guards/branch-scope.ut
 @ApiTags('Staff Onboarding')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN)
+@Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN, UserRole.HR)
 @Controller({ path: 'staff', version: '1' })
 export class StaffController {
   constructor(private readonly service: StaffService) {}
@@ -26,7 +26,7 @@ export class StaffController {
   }
 
   @Get()
-  @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN, UserRole.TRAINER)
+  @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN, UserRole.TRAINER, UserRole.HR)
   @ApiOperation({
     summary: 'List staff applicants with optional filters',
     description:
