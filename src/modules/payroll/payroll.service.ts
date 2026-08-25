@@ -8,6 +8,11 @@ import {
   calculateNetSalary,
   calculateClientTotal,
   round2,
+  GST_RATE_DEFAULT,
+  ESIC_EMPLOYEE_RATE_DEFAULT,
+  ESIC_EMPLOYER_RATE_DEFAULT,
+  PF_RATE_DEFAULT,
+  PF_WAGE_CEILING,
 } from '../../common/finance/statutory-calc.util';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -30,6 +35,25 @@ export interface PayrollCalculation {
   managementFee: number;
   gstOnFee: number;
   clientTotalCharge: number;
+  /** Rates actually applied — falls back to statutory defaults when the placement has no wage_config. */
+  ratesUsed: {
+    pfEmployeePct: number;
+    pfEmployerPct: number;
+    pfCeiling: number;
+    esicEmployeePct: number;
+    esicEmployerPct: number;
+    gstPct: number;
+  };
+}
+
+/** Subset of a placement's stored wage_config (see wage-calculator.util.ts) relevant to statutory calc. */
+interface WageConfigRates {
+  employer_pf_pct?: number;
+  employee_pf_pct?: number;
+  employer_pf_max?: number;
+  employer_esic_pct?: number;
+  employee_esic_pct?: number;
+  gst_pct?: number;
 }
 
 interface PlacementRow {
@@ -37,6 +61,21 @@ interface PlacementRow {
   client_id: string;
   staff_salary: string;
   management_fee: string;
+  metadata?: unknown;
+}
+
+/**
+ * Placement.metadata is `{ wage_config?, wage_breakup? }` when the RM used
+ * the wage-breakup form (placement.service.ts's resolveWageTerms) instead of
+ * typing a flat staff_salary/management_fee — this pulls the PF/ESIC/GST
+ * rates RM actually configured back out, so the monthly attendance payroll
+ * uses THOSE rates instead of silently falling back to statutory defaults
+ * for every placement regardless of what was agreed with the client.
+ */
+function ratesFromPlacementMetadata(metadata: unknown): WageConfigRates | undefined {
+  if (!metadata || typeof metadata !== 'object') return undefined;
+  const wageConfig = (metadata as { wage_config?: WageConfigRates }).wage_config;
+  return wageConfig && typeof wageConfig === 'object' ? wageConfig : undefined;
 }
 
 interface ShiftCountRow { shift_days: string; }
@@ -141,11 +180,15 @@ export class PayrollService {
     };
   }
 
-  calculatePayrollWithAbsoluteFee(grossSalary: number, managementFee: number): PayrollCalculation {
-    const esic = calculateEsic(grossSalary);
-    const pf = calculatePfFlat(grossSalary);
+  calculatePayrollWithAbsoluteFee(
+    grossSalary: number,
+    managementFee: number,
+    rates?: WageConfigRates,
+  ): PayrollCalculation {
+    const esic = calculateEsic(grossSalary, rates?.employee_esic_pct, rates?.employer_esic_pct);
+    const pf = calculatePfFlat(grossSalary, rates?.employee_pf_pct, rates?.employer_pf_pct, rates?.employer_pf_max);
     const netSalary = calculateNetSalary(grossSalary, esic.employee, pf.employee);
-    const gstOnFee = calculateGstOnFee(managementFee);
+    const gstOnFee = calculateGstOnFee(managementFee, rates?.gst_pct);
     const clientTotalCharge = calculateClientTotal(grossSalary, esic.employer, pf.employer, managementFee, gstOnFee);
 
     return {
@@ -158,6 +201,14 @@ export class PayrollService {
       managementFee: round2(managementFee),
       gstOnFee,
       clientTotalCharge,
+      ratesUsed: {
+        pfEmployeePct: rates?.employee_pf_pct ?? PF_RATE_DEFAULT,
+        pfEmployerPct: rates?.employer_pf_pct ?? rates?.employee_pf_pct ?? PF_RATE_DEFAULT,
+        pfCeiling: rates?.employer_pf_max ?? PF_WAGE_CEILING,
+        esicEmployeePct: rates?.employee_esic_pct ?? ESIC_EMPLOYEE_RATE_DEFAULT,
+        esicEmployerPct: rates?.employer_esic_pct ?? ESIC_EMPLOYER_RATE_DEFAULT,
+        gstPct: rates?.gst_pct ?? GST_RATE_DEFAULT,
+      },
     };
   }
 
@@ -191,6 +242,14 @@ export class PayrollService {
       grossSalary, esicEmployee: esic.employee, esicEmployer: esic.employer,
       pfEmployee: pf.employee, pfEmployer: pf.employer, netSalary,
       managementFee, gstOnFee, clientTotalCharge,
+      ratesUsed: {
+        pfEmployeePct: PF_RATE_DEFAULT,
+        pfEmployerPct: PF_RATE_DEFAULT,
+        pfCeiling: PF_WAGE_CEILING,
+        esicEmployeePct: ESIC_EMPLOYEE_RATE_DEFAULT,
+        esicEmployerPct: ESIC_EMPLOYER_RATE_DEFAULT,
+        gstPct: GST_RATE_DEFAULT,
+      },
     };
   }
 
@@ -217,7 +276,7 @@ export class PayrollService {
 
     return this.dataSource.transaction(async (manager) => {
       const placements = await manager.query<PlacementRow[]>(
-        `SELECT staff_id, client_id, staff_salary, management_fee
+        `SELECT staff_id, client_id, staff_salary, management_fee, metadata
          FROM placements WHERE id = $1`,
         [placementId],
       );
@@ -240,7 +299,7 @@ export class PayrollService {
       const dim = this.daysInMonth(month, year);
       const proratedGross = this.calculateProratedGross(monthlySalary, shiftDays, dim);
       const proratedFee = this.calculateProratedGross(monthlyFee, shiftDays, dim);
-      const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee);
+      const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee, ratesFromPlacementMetadata(p.metadata));
 
       const [payroll] = await manager.query<Record<string, unknown>[]>(
         `INSERT INTO payroll_records
@@ -295,7 +354,7 @@ export class PayrollService {
 
   async previewAttendancePayroll(placementId: string, month: number, year: number) {
     const placements = await this.dataSource.query<PlacementRow[]>(
-      `SELECT staff_id, client_id, staff_salary, management_fee
+      `SELECT staff_id, client_id, staff_salary, management_fee, metadata
        FROM placements WHERE id = $1`,
       [placementId],
     );
@@ -316,7 +375,7 @@ export class PayrollService {
       summary.billable_days,
       summary.days_in_month,
     );
-    const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee);
+    const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee, ratesFromPlacementMetadata(p.metadata));
 
     return {
       placement_id: placementId,

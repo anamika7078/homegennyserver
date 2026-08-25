@@ -164,3 +164,20 @@ Management% per the actual deal, the statutory %s rarely need changing.
 - A flat manual-entry fallback (just typing salary + fee, no breakdown) can
   stay as an option if useful, by sending `staff_salary`/`management_fee`
   directly instead of `wage_config` — the backend still accepts both.
+
+### 6. Follow-up (already fixed, no mobile action required): monthly payroll now honors these rates
+Previously, the PF/ESIC/GST *percentages* RM configured here were computed
+correctly at placement time but then silently ignored by the monthly
+attendance-based payroll/invoice run (`PayrollService`), which always
+recalculated using fixed statutory defaults (13%/12% PF, 0.75%/3.25% ESIC,
+18% GST) regardless of what was actually agreed. This is now fixed
+server-side — `previewAttendancePayroll`/`runAttendancePayroll` read the
+placement's stored `wage_config` and use those rates; placements without a
+`wage_config` (flat entry) still use the statutory defaults, unchanged.
+Every `calculation` response (invoice preview, invoice generate) now also
+includes a `ratesUsed: { pfEmployeePct, pfEmployerPct, pfCeiling,
+esicEmployeePct, esicEmployerPct, gstPct }` block — `rm_invoice_preview_screen.dart`
+doesn't currently hardcode any rate in its labels (just shows amounts), so
+there's nothing broken to fix, but it could optionally show the rate next
+to each line (e.g. "PF (Employee contribution, 10%)") using this new field
+if useful — not required.

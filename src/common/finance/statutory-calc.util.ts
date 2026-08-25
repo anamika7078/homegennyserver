@@ -29,12 +29,12 @@
  * here. See PHASE_3_CORE_WORKFLOW_CORRECTNESS.md for the full writeup.
  */
 
-const GST_RATE_DEFAULT = 18;
-const ESIC_EMPLOYEE_RATE_DEFAULT = 0.75;
-const ESIC_EMPLOYER_RATE_DEFAULT = 3.25;
-const ESIC_WAGE_LIMIT = 21_000;
-const PF_RATE_DEFAULT = 12;
-const PF_WAGE_CEILING = 15_000;
+export const GST_RATE_DEFAULT = 18;
+export const ESIC_EMPLOYEE_RATE_DEFAULT = 0.75;
+export const ESIC_EMPLOYER_RATE_DEFAULT = 3.25;
+export const ESIC_WAGE_LIMIT = 21_000;
+export const PF_RATE_DEFAULT = 12;
+export const PF_WAGE_CEILING = 15_000;
 
 export function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -72,18 +72,24 @@ export interface PfResult {
 }
 
 /**
- * Confirmed baseline (payroll.service.ts): 12% on min(base, ₹15,000), same
- * rate/base both sides. See the ambiguity note in the file header before
- * reusing this for a context where "base" might not mean gross salary.
+ * Confirmed baseline (payroll.service.ts): 12% on min(base, ₹15,000).
+ * `employerRatePct` defaults to `employeeRatePct` (the original behavior —
+ * same rate/base both sides) but callers with a placement-specific
+ * `wage_config` (which has genuinely distinct employer_pf_pct/employee_pf_pct)
+ * can now pass both explicitly. See the ambiguity note in the file header
+ * before reusing this for a context where "base" might not mean gross salary.
  */
 export function calculatePfFlat(
   base: number,
-  ratePct: number = PF_RATE_DEFAULT,
+  employeeRatePct: number = PF_RATE_DEFAULT,
+  employerRatePct: number = employeeRatePct,
   ceiling: number = PF_WAGE_CEILING,
 ): PfResult {
   const pfBase = Math.min(base, ceiling);
-  const amount = round2(pfBase * (ratePct / 100));
-  return { employee: amount, employer: amount };
+  return {
+    employee: round2(pfBase * (employeeRatePct / 100)),
+    employer: round2(pfBase * (employerRatePct / 100)),
+  };
 }
 
 /** Net = Gross − employee ESIC − employee PF. No other deductions per spec. */
