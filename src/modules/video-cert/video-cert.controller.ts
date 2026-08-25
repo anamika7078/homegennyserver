@@ -1,5 +1,6 @@
 import { Controller, Get, Post, Patch, Param, Body, UseGuards, UseInterceptors, UploadedFile, Query, Res, Request, BadRequestException } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import type { Response } from 'express';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiConsumes } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -70,7 +71,10 @@ export class VideoCertController {
 
   @Post('local-upload')
   @Roles(UserRole.STAFF, UserRole.ADMIN)
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 500 * 1024 * 1024 } }))
+  // Without an explicit `storage`, multer defaults to disk storage — `file.buffer`
+  // (which saveLocalUpload below relies on) would be undefined and `fs.writeFileSync`
+  // would throw. memoryStorage() is what actually populates `.buffer`.
+  @UseInterceptors(FileInterceptor('file', { storage: memoryStorage(), limits: { fileSize: 500 * 1024 * 1024 } }))
   @ApiConsumes('multipart/form-data')
   @ApiOperation({
     summary: '⚠️ TEMPORARY (local storage mode only): receives the raw video file for a key ' +
