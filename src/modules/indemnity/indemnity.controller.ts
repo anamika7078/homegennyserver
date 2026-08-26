@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Param, Body, Query, UseGuards, Request } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Post, Param, Body, Query, UseGuards, Request } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -23,6 +23,12 @@ export class IndemnityController {
   @Roles(UserRole.RM, UserRole.ADMIN)
   @ApiOperation({ summary: 'RM sends an indemnity clause to a client' })
   send(@Body() body: { placement_id: string; clause_version: string; clause_text: string }, @Request() req: AuthedRequest) {
+    // Same fix as SowController.create — an omitted placement_id previously fell through
+    // to prisma.placement.findUnique({ where: { id: undefined } }) and 500'd instead of
+    // a clean 400 (confirmed live during the S4/S5 flow audit).
+    if (!body.placement_id) throw new BadRequestException('placement_id is required');
+    if (!body.clause_version) throw new BadRequestException('clause_version is required');
+    if (!body.clause_text) throw new BadRequestException('clause_text is required');
     return this.indemnity.send({ placementId: body.placement_id, clauseVersion: body.clause_version, clauseText: body.clause_text }, req.user.id);
   }
 
