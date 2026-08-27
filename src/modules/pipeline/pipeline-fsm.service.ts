@@ -299,6 +299,92 @@ export class PipelineFsmService {
   }
 
   /**
+   * Identity/background verification tracks — Aadhaar eKYC, Police Verification,
+   * Medical/Sobriety, and (DR-only) Driving Licence + eChallan. This is exactly
+   * what S2_VERIFY exists for, and exactly what the mobile RM app's S2 hub
+   * (rm_verification_dashboard_screen.dart's `allDone`) already shows and
+   * requires before its "Advance" button enables — but until now that was a
+   * client-side-only check with no server-side gate backing it, so a stale
+   * app build or a raw API call could skip S2_VERIFY straight through with
+   * nothing actually verified. Mirrors the same checks inside
+   * checkDeploymentEligibility above (which re-checks defensively at the final
+   * S5_DEPLOY gate too, since a lot can happen between S2 and S5) — kept as a
+   * separate function rather than shared so this gate never also blocks on
+   * S5-only concerns (video-cert, signed agreement, practical driving test).
+   */
+  private async checkIdentityVerification(
+    manager: { query: (sql: string, params?: any[]) => Promise<any[]> },
+    staffId: string,
+    seriesShort: string,
+    pvStatus: string,
+  ): Promise<{ eligible: boolean; blockers: string[]; flags: Record<string, any> }> {
+    const blockers: string[] = [];
+    const flags: Record<string, any> = {};
+
+    const aadhaarRows = await manager.query(
+      `SELECT status FROM verification_tracks WHERE staff_id = $1 AND track_type = 'AADHAAR_EKYC'`,
+      [staffId],
+    );
+    const aadhaarStatus = aadhaarRows[0]?.status;
+    flags.aadhaar_verified = aadhaarStatus === 'CLEAR';
+    if (aadhaarStatus !== 'CLEAR') {
+      blockers.push(`Aadhaar eKYC not verified — status=${aadhaarStatus ?? 'NOT_STARTED'}`);
+    }
+
+    if (seriesShort === 'MAID') {
+      flags.pv_pending = pvStatus === 'NOT_INITIATED' || pvStatus === 'IN_PROGRESS';
+      flags.pv_failed = pvStatus === 'ADVERSE';
+      if (flags.pv_failed) blockers.push(`Police verification failed (Pillar 4) — pv_status=${pvStatus}`);
+    } else {
+      flags.pv_pending = pvStatus !== 'CLEAR';
+      flags.pv_failed = pvStatus === 'ADVERSE';
+      if (pvStatus !== 'CLEAR') {
+        blockers.push(`Police verification not CLEAR (Pillar 4) — pv_status=${pvStatus}, ${seriesShort} requires CLEAR`);
+      }
+    }
+
+    if (seriesShort === 'SC' || seriesShort === 'UC' || seriesShort === 'DR') {
+      const medRows = await manager.query(
+        `SELECT status FROM verification_tracks WHERE staff_id = $1 AND track_type = 'HEALTH_SCREENING'`,
+        [staffId],
+      );
+      const medStatus = medRows[0]?.status;
+      flags.medical_failed = medStatus === 'FAILED';
+      if (medStatus !== 'CLEAR') {
+        blockers.push(`Medical/sobriety not CLEAR (Pillar 3) — status=${medStatus ?? 'NOT_SUBMITTED'}`);
+      }
+    }
+
+    if (seriesShort === 'DR') {
+      const dlRows = await manager.query(
+        `SELECT status FROM verification_tracks WHERE staff_id = $1 AND track_type = 'SARATHI_API'`,
+        [staffId],
+      );
+      const dlStatus = dlRows[0]?.status;
+      flags.dl_expired = dlStatus === 'EXPIRED';
+      flags.dl_suspended = dlStatus === 'FAILED';
+      if (dlStatus !== 'CLEAR') {
+        blockers.push(`Driving licence not verified CLEAR (Pillar 1) — status=${dlStatus ?? 'NOT_CHECKED'}`);
+      }
+
+      const echallanRows = await manager.query(
+        `SELECT status, result FROM verification_tracks WHERE staff_id = $1 AND track_type = 'ECHALLAN_API'`,
+        [staffId],
+      );
+      if (!echallanRows.length) {
+        blockers.push('eChallan not checked');
+      } else {
+        flags.challan_count = echallanRows[0].result?.count ?? null;
+        if (echallanRows[0].status === 'FAILED') {
+          blockers.push(`eChallan check shows severe violation count (>=3, DR-07) — count=${flags.challan_count}`);
+        }
+      }
+    }
+
+    return { eligible: blockers.length === 0, blockers, flags };
+  }
+
+  /**
    * Advance pipeline stage with full audit trail.
    *
    * Phase 3 adds business validation on top of the FSM's existing transition-
@@ -353,6 +439,26 @@ export class PipelineFsmService {
         if (!input.terminalOutcome || !VALID_TERMINAL_OUTCOMES.has(input.terminalOutcome)) {
           throw new BadRequestException(
             `terminalOutcome is required when moving to TERMINAL — one of: ${Array.from(VALID_TERMINAL_OUTCOMES).join(', ')}`,
+          );
+        }
+      }
+
+      // ── S2_VERIFY exit gate — Aadhaar/PV/medical/DL/eChallan must actually
+      // be CLEAR, not just attempted. The mobile RM app's S2 hub already shows
+      // this exact requirement to the RM (button disabled until all clear),
+      // but that was client-side only — nothing server-side backed it, so a
+      // stale app build or a raw API call could skip straight through S2 with
+      // nothing verified. ────────────────────────────────────────────────────
+      if (
+        current === PipelineStage.S2_VERIFY &&
+        (toStage === PipelineStage.S2_5_ASSESS || toStage === PipelineStage.S3_TRAIN)
+      ) {
+        const { eligible, blockers } = await this.checkIdentityVerification(
+          manager, staffId, seriesShort, staff[0].pv_status,
+        );
+        if (!eligible) {
+          throw new BadRequestException(
+            `Verification incomplete — ${blockers.length} prerequisite(s) not met: ${blockers.join('; ')}`,
           );
         }
       }
