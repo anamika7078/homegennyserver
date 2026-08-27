@@ -1,5 +1,16 @@
 import { Injectable, ConflictException, NotFoundException, BadRequestException, OnModuleInit, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { ConfigService } from '@nestjs/config';
+import { HttpService } from '@nestjs/axios';
+import { AxiosResponse } from 'axios';
+import { firstValueFrom } from 'rxjs';
+
+export interface PanVerificationResult {
+  pan_number: string;
+  name_on_pan: string;
+  verified: boolean;
+  raw: Record<string, any>;
+}
 
 export interface BranchItemDto {
   unit_code: string;
@@ -60,7 +71,11 @@ function buildBillPrefix(month: number, year: number): string {
 export class FinanceCustomerService implements OnModuleInit {
   private readonly logger = new Logger(FinanceCustomerService.name);
 
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly config: ConfigService,
+    private readonly http: HttpService,
+  ) {}
 
   async onModuleInit() {
     await this.ensureTablesExist();
@@ -234,7 +249,7 @@ export class FinanceCustomerService implements OnModuleInit {
     let sql = `
       SELECT c.id, c.customer_name, c.address, c.city, c.state, c.pincode, c.pan_card, c.gstn,
              c.bill_no_prefix, c.bill_seq, c.unit_code, c.unit_name,
-             c.status, c.created_at, c.updated_at
+             c.status, c.metadata, c.created_at, c.updated_at
       FROM finance_customers c
     `;
     const params: unknown[] = [];
@@ -250,13 +265,64 @@ export class FinanceCustomerService implements OnModuleInit {
     const rows = await this.dataSource.query(
       `SELECT c.id, c.customer_name, c.address, c.city, c.state, c.pincode, c.pan_card, c.gstn,
               c.bill_no_prefix, c.bill_seq, c.unit_code, c.unit_name,
-              c.status, c.created_at, c.updated_at
+              c.status, c.metadata, c.created_at, c.updated_at
        FROM finance_customers c
        WHERE c.id = $1`,
       [id],
     );
     if (!rows.length) throw new NotFoundException(`Customer ${id} not found`);
     return rows[0];
+  }
+
+  /**
+   * PAN verification — mirrors VerificationService.verifyAadhaar's shape
+   * (mock mode until a real provider is configured), but finance_customers
+   * has no dedicated VerificationTrack-style table, so the result is merged
+   * into its existing `metadata` JSON column instead — same "no migration
+   * needed" pattern already used for Placement.wage_config/wage_breakup.
+   */
+  async verifyPan(customerId: string): Promise<PanVerificationResult> {
+    const customer = await this.getCustomer(customerId);
+    const panNumber = String(customer.pan_card ?? '').toUpperCase().trim();
+    if (!panNumber) throw new BadRequestException('Customer has no PAN on file');
+
+    const apiUrl = this.config.get<string>('app.panVerification.apiUrl') ?? '';
+    const apiKey = this.config.get<string>('app.panVerification.apiKey') ?? '';
+    const mockMode = !apiKey || this.config.get('app.panVerification.mockMode') === 'true';
+
+    let result: PanVerificationResult;
+    if (mockMode) {
+      this.logger.warn(`[PAN] Mock mode active for ${panNumber} — no PAN_VERIFICATION_API_KEY configured`);
+      result = { pan_number: panNumber, name_on_pan: customer.customer_name, verified: true, raw: { mock: true } };
+    } else {
+      try {
+        const res = await firstValueFrom<AxiosResponse<Record<string, unknown>>>(
+          this.http.post(`${apiUrl}/pan/verify`, { pan: panNumber },
+            { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 10000 }),
+        );
+        result = this.mapPanResponse(panNumber, res.data);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.error(`PAN verification error ${panNumber}: ${msg}`);
+        throw new BadRequestException(`PAN verification failed: ${msg}`);
+      }
+    }
+
+    await this.dataSource.query(
+      `UPDATE finance_customers SET metadata = metadata || $2::jsonb, updated_at = now() WHERE id = $1`,
+      [customerId, JSON.stringify({ pan_verification: { ...result, verified_at: new Date().toISOString() } })],
+    );
+
+    return result;
+  }
+
+  private mapPanResponse(panNumber: string, data: Record<string, unknown>): PanVerificationResult {
+    return {
+      pan_number: panNumber,
+      name_on_pan: String(data['registered_name'] ?? data['name'] ?? ''),
+      verified: data['status'] === 'VALID' || data['category'] != null,
+      raw: data,
+    };
   }
 
   async getCustomerBranches(customerId: string) {

@@ -196,7 +196,21 @@ export class PipelineFsmService {
     pvStatus: string,
   ): Promise<{ eligible: boolean; blockers: string[]; flags: Record<string, any> }> {
     const blockers: string[] = [];
-    const flags: Record<string, any> = { aadhaar_verified: true };
+    const flags: Record<string, any> = {};
+
+    // Aadhaar eKYC — required for every series (verification.service.ts's
+    // REQUIRED_BY_SERIES). Was hardcoded `aadhaar_verified: true` here, so a
+    // staff could reach S5_DEPLOY whether or not RM ever actually verified
+    // Aadhaar — the VerificationTrack row was recorded but never read back.
+    const aadhaarRows = await manager.query(
+      `SELECT status FROM verification_tracks WHERE staff_id = $1 AND track_type = 'AADHAAR_EKYC'`,
+      [staffId],
+    );
+    const aadhaarStatus = aadhaarRows[0]?.status;
+    flags.aadhaar_verified = aadhaarStatus === 'CLEAR';
+    if (aadhaarStatus !== 'CLEAR') {
+      blockers.push(`Aadhaar eKYC not verified — status=${aadhaarStatus ?? 'NOT_STARTED'}`);
+    }
 
     // Pillar 4 — Police Verification. Maid has a documented exception:
     // pending PV does not block deployment, only an adverse (failed) result does.

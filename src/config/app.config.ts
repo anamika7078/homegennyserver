@@ -88,6 +88,15 @@ export default registerAs('app', () => ({
     mockMode: process.env.ECHALLAN_MOCK_MODE === 'true' || !process.env.ECHALLAN_API_KEY,
   },
 
+  // PAN verification (NSDL/Protean, or a licensed KYC aggregator — Sandbox/Karza/Digio) —
+  // no direct-to-company Income Tax API, same "mock until a real provider is onboarded"
+  // shape as uidai/sarathi above.
+  panVerification: {
+    apiUrl: process.env.PAN_VERIFICATION_API_URL || '',
+    apiKey: process.env.PAN_VERIFICATION_API_KEY,
+    mockMode: process.env.PAN_VERIFICATION_MOCK_MODE === 'true' || !process.env.PAN_VERIFICATION_API_KEY,
+  },
+
   // Security
   bcryptRounds: parseInt(process.env.BCRYPT_ROUNDS || '12', 10),
   maxLoginAttempts: parseInt(process.env.MAX_LOGIN_ATTEMPTS || '5', 10),

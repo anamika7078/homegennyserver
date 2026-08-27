@@ -80,6 +80,15 @@ export class FinanceCustomerController {
     return this.service.updateCustomer(id, body);
   }
 
+  @Post(':id/verify-pan')
+  @ApiOperation({
+    summary: 'Verify a customer\'s PAN card',
+    description: '⚠️ Mock mode active (no PAN_VERIFICATION_API_KEY configured) — always returns a deterministic verified mock result. Result is merged into the customer\'s metadata.pan_verification.',
+  })
+  verifyPan(@Param('id') id: string) {
+    return this.service.verifyPan(id);
+  }
+
   @Post(':id/bill-number')
   @ApiOperation({ summary: 'Generate next bill number for a customer (month-wise counter)' })
   generateBillNumber(@Param('id') id: string) {
