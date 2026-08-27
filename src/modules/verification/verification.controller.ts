@@ -63,24 +63,49 @@ export class VerificationController {
     return this.verificationService.checkEchallan(dlNumber, staffId);
   }
 
-  @Post('aadhaar')
+  @Post('aadhaar/generate-otp')
   @ApiOperation({
-    summary: 'Verify Aadhaar via UIDAI API',
-    description: '⚠️ Mock mode active (no UIDAI_LICENSE_KEY configured) — always returns a deterministic verified mock result and persists it to VerificationTrack.',
+    summary: 'Step 1/2 — Send Aadhaar OTP via Sandbox KYC API',
+    description:
+      '⚠️ Mock mode active (no SANDBOX_API_KEY/SANDBOX_API_SECRET configured) — returns a deterministic ' +
+      'fake reference_id, no real OTP sent. In real mode, UIDAI sends a 6-digit OTP to the mobile number ' +
+      "linked to this Aadhaar. Nothing is persisted yet — call aadhaar/verify-otp next with the OTP the " +
+      'staff receives.',
   })
   @ApiBody({
     schema: {
       type: 'object',
-      required: ['aadhaar_number', 'otp'],
+      required: ['aadhaar_number'],
       properties: {
-        aadhaar_number: { type: 'string', example: '999988887777' },
+        aadhaar_number: { type: 'string', example: '999988887777', description: '12-digit Aadhaar number' },
+      },
+    },
+  })
+  async generateAadhaarOtp(@Body() body: { aadhaar_number: string }) {
+    return this.verificationService.generateAadhaarOtp(body.aadhaar_number);
+  }
+
+  @Post('aadhaar/verify-otp')
+  @ApiOperation({
+    summary: 'Step 2/2 — Verify the Aadhaar OTP and persist the result',
+    description:
+      '⚠️ Mock mode active (no SANDBOX_API_KEY/SANDBOX_API_SECRET configured) — always returns a deterministic ' +
+      'verified mock result and persists it to VerificationTrack.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['reference_id', 'otp', 'aadhaar_number'],
+      properties: {
+        reference_id: { type: 'string', description: 'From aadhaar/generate-otp' },
         otp: { type: 'string', example: '123456', description: 'Any value accepted in mock mode' },
+        aadhaar_number: { type: 'string', example: '999988887777', description: 'Same number sent to generate-otp — only used for the last-4-digits display value' },
         staff_id: { type: 'string', description: 'Pass this so the result is persisted to VerificationTrack', example: 'b0116bc6-b2db-45e3-a6af-530b285a777e' },
       },
     },
   })
-  async verifyAadhaar(@Body() body: { aadhaar_number: string; otp: string; staff_id?: string }) {
-    return this.verificationService.verifyAadhaar(body.aadhaar_number, body.otp, body.staff_id);
+  async verifyAadhaarOtp(@Body() body: { reference_id: string; otp: string; aadhaar_number: string; staff_id?: string }) {
+    return this.verificationService.verifyAadhaarOtp(body.reference_id, body.otp, body.aadhaar_number, body.staff_id);
   }
 
   @Post('pv/submit/:staffId')

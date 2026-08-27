@@ -12,6 +12,10 @@ export interface SarathiResult {
   dl_number: string; name: string; dob: string; valid_from: string; valid_to: string;
   status: 'VALID' | 'EXPIRED' | 'SUSPENDED' | 'REVOKED'; vehicle_classes: string[]; raw: Record<string, any>;
 }
+export interface AadhaarOtpResult {
+  reference_id: string;
+  message: string;
+}
 export interface AadhaarResult {
   aadhaar_number_last4: string; name: string; dob: string; gender: string;
   address: string; verified: boolean; raw: Record<string, any>;
@@ -24,12 +28,40 @@ export interface PoliceVerificationResult {
 export class VerificationService {
   private readonly logger = new Logger(VerificationService.name);
 
+  // Sandbox's /authenticate JWT is valid 24h — cache in memory and refresh a
+  // little early rather than re-authenticating on every single KYC call.
+  private sandboxToken: string | null = null;
+  private sandboxTokenExpiresAt = 0;
+
   constructor(
     private readonly config: ConfigService,
     private readonly http: HttpService,
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
   ) {}
+
+  private async getSandboxToken(): Promise<string> {
+    if (this.sandboxToken && Date.now() < this.sandboxTokenExpiresAt) {
+      return this.sandboxToken;
+    }
+    const apiUrl = this.config.get<string>('app.sandboxKyc.apiUrl') ?? '';
+    const apiKey = this.config.get<string>('app.sandboxKyc.apiKey') ?? '';
+    const apiSecret = this.config.get<string>('app.sandboxKyc.apiSecret') ?? '';
+    const apiVersion = this.config.get<string>('app.sandboxKyc.apiVersion') ?? '1.0';
+
+    const res = await firstValueFrom<AxiosResponse<{ data?: { access_token?: string } }>>(
+      this.http.post(`${apiUrl}/authenticate`, undefined, {
+        headers: { 'x-api-key': apiKey, 'x-api-secret': apiSecret, 'x-api-version': apiVersion },
+        timeout: 10000,
+      }),
+    );
+    const token = res.data?.data?.access_token;
+    if (!token) throw new Error('Sandbox /authenticate did not return an access_token');
+
+    this.sandboxToken = token;
+    this.sandboxTokenExpiresAt = Date.now() + 23 * 60 * 60 * 1000; // refresh a bit before the real 24h expiry
+    return token;
+  }
 
   async verifyDrivingLicence(dlNumber: string, dob: string, staffId?: string): Promise<SarathiResult> {
     const apiUrl = this.config.get<string>('app.sarathi.apiUrl') ?? '';
@@ -109,27 +141,82 @@ export class VerificationService {
     return result;
   }
 
-  async verifyAadhaar(aadhaarNumber: string, otp: string, staffId?: string): Promise<AadhaarResult> {
-    const apiUrl = this.config.get<string>('app.uidai.apiUrl') ?? '';
-    const apiKey = this.config.get<string>('app.uidai.licenseKey') ?? '';
-    const mockMode = !apiKey || this.config.get('app.uidai.mockMode') === 'true';
+  /**
+   * Step 1/2 — Sandbox sends an OTP to the mobile number linked to this
+   * Aadhaar via UIDAI and returns a `reference_id` that must be passed to
+   * verifyAadhaarOtp() below along with the OTP the staff receives. Nothing
+   * is persisted yet — a VerificationTrack row is only written once step 2
+   * actually confirms the OTP (see verifyAadhaarOtp).
+   */
+  async generateAadhaarOtp(aadhaarNumber: string): Promise<AadhaarOtpResult> {
+    const apiUrl = this.config.get<string>('app.sandboxKyc.apiUrl') ?? '';
+    const apiVersion = this.config.get<string>('app.sandboxKyc.apiVersion') ?? '1.0';
+    const apiKey = this.config.get<string>('app.sandboxKyc.apiKey') ?? '';
+    const mockMode = this.config.get('app.sandboxKyc.mockMode') === true;
+
+    if (mockMode) {
+      this.logger.warn('[SANDBOX-KYC] Mock mode active — no SANDBOX_API_KEY/SANDBOX_API_SECRET configured');
+      return { reference_id: `MOCK-${aadhaarNumber.slice(-4)}-${Date.now()}`, message: 'OTP sent successfully (mock)' };
+    }
+
+    try {
+      const token = await this.getSandboxToken();
+      const res = await firstValueFrom<AxiosResponse<{ data?: { reference_id?: number | string; message?: string } }>>(
+        this.http.post(`${apiUrl}/kyc/aadhaar/okyc/otp`, {
+          '@entity': 'in.co.sandbox.kyc.aadhaar.okyc.otp.request',
+          aadhaar_number: aadhaarNumber,
+          consent: 'Y',
+          reason: 'HomeGenny staff onboarding KYC (Pillar 1)',
+        }, {
+          headers: { Authorization: token, 'x-api-key': apiKey, 'x-api-version': apiVersion },
+          timeout: 15000,
+        }),
+      );
+      const data = res.data?.data;
+      if (!data?.reference_id) throw new Error('Sandbox did not return a reference_id');
+      return { reference_id: String(data.reference_id), message: data.message ?? 'OTP sent successfully' };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Sandbox Aadhaar generate-OTP error: ${msg}`);
+      throw new Error(`Could not send Aadhaar OTP: ${msg}`);
+    }
+  }
+
+  /**
+   * Step 2/2 — verify the OTP against the reference_id from generateAadhaarOtp().
+   * `aadhaarNumber` is passed through again only for the last-4-digits display
+   * value below — Sandbox's verify response doesn't echo the Aadhaar number
+   * back (by design, it only returns the KYC details it was asked to fetch).
+   */
+  async verifyAadhaarOtp(referenceId: string, otp: string, aadhaarNumber: string, staffId?: string): Promise<AadhaarResult> {
+    const apiUrl = this.config.get<string>('app.sandboxKyc.apiUrl') ?? '';
+    const apiVersion = this.config.get<string>('app.sandboxKyc.apiVersion') ?? '1.0';
+    const apiKey = this.config.get<string>('app.sandboxKyc.apiKey') ?? '';
+    const mockMode = this.config.get('app.sandboxKyc.mockMode') === true;
 
     let result: AadhaarResult;
     if (mockMode) {
-      this.logger.warn('[UIDAI] Mock mode active');
+      this.logger.warn('[SANDBOX-KYC] Mock mode active');
       result = { aadhaar_number_last4: aadhaarNumber.slice(-4), name: 'MOCK APPLICANT',
         dob: '1990-01-01', gender: 'M', address: 'Mumbai, Maharashtra',
-        verified: true, raw: { mock: true } };
+        verified: true, raw: { mock: true, reference_id: referenceId } };
     } else {
       try {
-        const res = await firstValueFrom<AxiosResponse<Record<string, unknown>>>(
-          this.http.post(`${apiUrl}/v3/aadhaar/ekyc`, { uid: aadhaarNumber, otp },
-            { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 15000 })
+        const token = await this.getSandboxToken();
+        const res = await firstValueFrom<AxiosResponse<{ data?: Record<string, unknown> }>>(
+          this.http.post(`${apiUrl}/kyc/aadhaar/okyc/otp/verify`, {
+            '@entity': 'in.co.sandbox.kyc.aadhaar.okyc.request',
+            reference_id: referenceId,
+            otp,
+          }, {
+            headers: { Authorization: token, 'x-api-key': apiKey, 'x-api-version': apiVersion },
+            timeout: 15000,
+          }),
         );
-        result = this.mapAadhaarResponse(res.data);
+        result = this.mapAadhaarResponse(res.data?.data ?? {}, aadhaarNumber);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        this.logger.error(`UIDAI error: ${msg}`);
+        this.logger.error(`Sandbox Aadhaar verify-OTP error: ${msg}`);
         throw new Error(`Aadhaar verification failed: ${msg}`);
       }
     }
@@ -336,16 +423,15 @@ export class VerificationService {
     };
   }
 
-  private mapAadhaarResponse(data: Record<string, unknown>): AadhaarResult {
-    const parts = ['house','street','loc','dist','state','pc']
-      .map(k => data[k]).filter((v): v is string => typeof v === 'string' && v.length > 0);
+  /** Maps Sandbox's real /kyc/aadhaar/okyc/otp/verify response shape. */
+  private mapAadhaarResponse(data: Record<string, unknown>, aadhaarNumber: string): AadhaarResult {
     return {
-      aadhaar_number_last4: String(data['uid'] ?? '').slice(-4),
+      aadhaar_number_last4: aadhaarNumber.slice(-4),
       name: String(data['name'] ?? ''),
-      dob: String(data['dob'] ?? ''),
+      dob: String(data['date_of_birth'] ?? data['year_of_birth'] ?? ''),
       gender: String(data['gender'] ?? ''),
-      address: parts.join(', '),
-      verified: data['authStatus'] === 'y',
+      address: String(data['full_address'] ?? ''),
+      verified: data['status'] === 'VALID',
       raw: data as Record<string, any>,
     };
   }

@@ -69,11 +69,18 @@ export default registerAs('app', () => ({
   },
 
   // Government APIs (mock mode when not approved)
-  uidai: {
-    apiUrl: process.env.UIDAI_API_URL || 'https://resident.uidai.gov.in',
-    auaCode: process.env.UIDAI_AUA_CODE,
-    licenseKey: process.env.UIDAI_LICENSE_KEY,
-    mockMode: process.env.UIDAI_MOCK_MODE === 'true' || !process.env.UIDAI_AUA_CODE,
+  // Aadhaar eKYC — via Sandbox (sandbox.co.in), a licensed KYC-API aggregator,
+  // not a direct UIDAI/AUA integration (that requires a much heavier
+  // registration UIDAI only grants to large regulated entities). Sandbox's
+  // auth is a 2-step exchange: api_key + api_secret -> POST /authenticate ->
+  // short-lived JWT, which is then sent on the actual KYC calls.
+  sandboxKyc: {
+    apiUrl: process.env.SANDBOX_API_URL
+      || (process.env.SANDBOX_MOCK_MODE === 'false' ? 'https://api.sandbox.co.in' : 'https://test-api.sandbox.co.in'),
+    apiKey: process.env.SANDBOX_API_KEY,
+    apiSecret: process.env.SANDBOX_API_SECRET,
+    apiVersion: process.env.SANDBOX_API_VERSION || '1.0',
+    mockMode: process.env.SANDBOX_MOCK_MODE === 'true' || !process.env.SANDBOX_API_KEY || !process.env.SANDBOX_API_SECRET,
   },
 
   sarathi: {
