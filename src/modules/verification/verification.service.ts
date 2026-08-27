@@ -1,12 +1,26 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
-import { AxiosResponse } from 'axios';
+import { AxiosResponse, isAxiosError } from 'axios';
 import * as crypto from 'crypto';
 import { firstValueFrom } from 'rxjs';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '@prisma/client';
+
+/** axios's err.message is a generic "Request failed with status code 500" —
+ * the actual reason (expired OTP, insufficient Sandbox wallet balance, a
+ * deprecated/blocked endpoint, etc.) is in the response body. Surface that
+ * instead so a masked 500 doesn't hide what's actually wrong. */
+function extractSandboxError(err: unknown): string {
+  if (isAxiosError(err)) {
+    const body = err.response?.data as Record<string, unknown> | undefined;
+    const detail = (body?.['message'] as unknown) ?? (body?.['error'] as unknown) ?? body;
+    if (detail) return typeof detail === 'string' ? detail : JSON.stringify(detail);
+    return err.message;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
 
 export interface SarathiResult {
   dl_number: string; name: string; dob: string; valid_from: string; valid_to: string;
@@ -176,9 +190,9 @@ export class VerificationService {
       if (!data?.reference_id) throw new Error('Sandbox did not return a reference_id');
       return { reference_id: String(data.reference_id), message: data.message ?? 'OTP sent successfully' };
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = extractSandboxError(err);
       this.logger.error(`Sandbox Aadhaar generate-OTP error: ${msg}`);
-      throw new Error(`Could not send Aadhaar OTP: ${msg}`);
+      throw new BadRequestException(`Could not send Aadhaar OTP: ${msg}`);
     }
   }
 
@@ -215,9 +229,9 @@ export class VerificationService {
         );
         result = this.mapAadhaarResponse(res.data?.data ?? {}, aadhaarNumber);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = extractSandboxError(err);
         this.logger.error(`Sandbox Aadhaar verify-OTP error: ${msg}`);
-        throw new Error(`Aadhaar verification failed: ${msg}`);
+        throw new BadRequestException(`Aadhaar verification failed: ${msg}`);
       }
     }
 
