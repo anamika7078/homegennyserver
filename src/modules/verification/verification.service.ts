@@ -397,10 +397,15 @@ export class VerificationService {
       POLICE_VERIFICATION: 'pv',
       HEALTH_SCREENING: 'medical',
     };
+    // Keyed by the StaffSeries enum values actually stored on staff.series
+    // (MAID/SKILLED_CARE/UNSKILLED_CARE/DRIVER) — NOT the DR/SC/UC short codes
+    // the mobile app displays. Keying this by the short codes previously made
+    // every lookup below miss for non-MAID series, silently returning
+    // `required: []` and making `all_required_clear` vacuously true.
     const REQUIRED_BY_SERIES: Record<string, string[]> = {
-      DR: ['AADHAAR_EKYC', 'SARATHI_API', 'ECHALLAN_API', 'POLICE_VERIFICATION', 'HEALTH_SCREENING'],
-      SC: ['AADHAAR_EKYC', 'POLICE_VERIFICATION', 'HEALTH_SCREENING'],
-      UC: ['AADHAAR_EKYC', 'POLICE_VERIFICATION'],
+      DRIVER: ['AADHAAR_EKYC', 'SARATHI_API', 'ECHALLAN_API', 'POLICE_VERIFICATION', 'HEALTH_SCREENING'],
+      SKILLED_CARE: ['AADHAAR_EKYC', 'POLICE_VERIFICATION', 'HEALTH_SCREENING'],
+      UNSKILLED_CARE: ['AADHAAR_EKYC', 'POLICE_VERIFICATION'],
       MAID: ['AADHAAR_EKYC', 'POLICE_VERIFICATION'],
     };
 

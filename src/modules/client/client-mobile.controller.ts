@@ -7,13 +7,21 @@ import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { IncidentsService } from '../incidents/incidents.service';
 
-/** Same series-based required-track logic used in staff-mobile.controller.ts, so a
+/**
+ * Same series-based required-track logic used in staff-mobile.controller.ts, so a
  * client sees the same "verified" signal staff/RM do — kept as a local copy since
- * these are file-local consts there too (not currently exported/shared). */
+ * these are file-local consts there too (not currently exported/shared).
+ *
+ * Keyed by the StaffSeries enum values stored on staff.series
+ * (MAID/SKILLED_CARE/UNSKILLED_CARE/DRIVER) — NOT the DR/SC/UC short codes the
+ * mobile app displays. Keying this by the short codes previously made every lookup
+ * below miss for non-MAID series, silently returning `requiredTracks: []` and making
+ * `isVerified` true for staff with zero verification tracks on record.
+ */
 const REQUIRED_VERIFICATION_TRACKS: Record<string, string[]> = {
-  DR: ['AADHAAR_EKYC', 'SARATHI_API', 'ECHALLAN_API', 'HEALTH_SCREENING'],
-  SC: ['AADHAAR_EKYC', 'HEALTH_SCREENING'],
-  UC: ['AADHAAR_EKYC'],
+  DRIVER: ['AADHAAR_EKYC', 'SARATHI_API', 'ECHALLAN_API', 'HEALTH_SCREENING'],
+  SKILLED_CARE: ['AADHAAR_EKYC', 'HEALTH_SCREENING'],
+  UNSKILLED_CARE: ['AADHAAR_EKYC'],
   MAID: ['AADHAAR_EKYC'],
 };
 
