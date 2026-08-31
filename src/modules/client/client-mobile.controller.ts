@@ -10,10 +10,12 @@ import { IncidentsService } from '../incidents/incidents.service';
 /** Same series-based required-track logic used in staff-mobile.controller.ts, so a
  * client sees the same "verified" signal staff/RM do — kept as a local copy since
  * these are file-local consts there too (not currently exported/shared). */
+// Keyed by the long-form StaffSeries enum (MAID | SKILLED_CARE | UNSKILLED_CARE | DRIVER) —
+// staff.series is that enum, not the DR/SC/UC/MAID short codes mobile displays.
 const REQUIRED_VERIFICATION_TRACKS: Record<string, string[]> = {
-  DR: ['AADHAAR_EKYC', 'SARATHI_API', 'ECHALLAN_API', 'HEALTH_SCREENING'],
-  SC: ['AADHAAR_EKYC', 'HEALTH_SCREENING'],
-  UC: ['AADHAAR_EKYC'],
+  DRIVER: ['AADHAAR_EKYC', 'SARATHI_API', 'ECHALLAN_API', 'HEALTH_SCREENING'],
+  SKILLED_CARE: ['AADHAAR_EKYC', 'HEALTH_SCREENING'],
+  UNSKILLED_CARE: ['AADHAAR_EKYC'],
   MAID: ['AADHAAR_EKYC'],
 };
 

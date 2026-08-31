@@ -29,10 +29,12 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
 };
 
 /** Verification tracks (beyond Police Verification, tracked separately via pvStatus) required per series before S2 is considered complete. */
+// Keyed by the long-form StaffSeries enum (MAID | SKILLED_CARE | UNSKILLED_CARE | DRIVER) —
+// staff.series is that enum, not the DR/SC/UC/MAID short codes mobile displays.
 const REQUIRED_VERIFICATION_TRACKS: Record<string, string[]> = {
-  DR: ['AADHAAR_EKYC', 'SARATHI_API', 'ECHALLAN_API', 'HEALTH_SCREENING'],
-  SC: ['AADHAAR_EKYC', 'HEALTH_SCREENING'],
-  UC: ['AADHAAR_EKYC'],
+  DRIVER: ['AADHAAR_EKYC', 'SARATHI_API', 'ECHALLAN_API', 'HEALTH_SCREENING'],
+  SKILLED_CARE: ['AADHAAR_EKYC', 'HEALTH_SCREENING'],
+  UNSKILLED_CARE: ['AADHAAR_EKYC'],
   MAID: ['AADHAAR_EKYC'],
 };
 

@@ -397,10 +397,12 @@ export class VerificationService {
       POLICE_VERIFICATION: 'pv',
       HEALTH_SCREENING: 'medical',
     };
+    // Keyed by the long-form StaffSeries enum (MAID | SKILLED_CARE | UNSKILLED_CARE | DRIVER) —
+    // staff.series below is that enum, not the DR/SC/UC/MAID short codes mobile displays.
     const REQUIRED_BY_SERIES: Record<string, string[]> = {
-      DR: ['AADHAAR_EKYC', 'SARATHI_API', 'ECHALLAN_API', 'POLICE_VERIFICATION', 'HEALTH_SCREENING'],
-      SC: ['AADHAAR_EKYC', 'POLICE_VERIFICATION', 'HEALTH_SCREENING'],
-      UC: ['AADHAAR_EKYC', 'POLICE_VERIFICATION'],
+      DRIVER: ['AADHAAR_EKYC', 'SARATHI_API', 'ECHALLAN_API', 'POLICE_VERIFICATION', 'HEALTH_SCREENING'],
+      SKILLED_CARE: ['AADHAAR_EKYC', 'POLICE_VERIFICATION', 'HEALTH_SCREENING'],
+      UNSKILLED_CARE: ['AADHAAR_EKYC', 'POLICE_VERIFICATION'],
       MAID: ['AADHAAR_EKYC', 'POLICE_VERIFICATION'],
     };
 
@@ -416,6 +418,10 @@ export class VerificationService {
         status: row?.status ?? 'NOT_STARTED',
         verified_at: row?.verifiedAt ?? null,
         notes: row?.notes ?? null,
+        // Raw verify-call payload (e.g. Aadhaar's name/dob/address), so a
+        // screen re-opened after a track already cleared can show what was
+        // verified instead of re-prompting for input it already has.
+        result: row?.result ?? null,
       };
     });
 
