@@ -10,11 +10,13 @@ import { DepositModule } from './deposit/deposit.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { FinanceCustomerModule } from './customer/customer.module';
 import { CommercialModule } from './commercial/commercial.module';
+import { TaxModule } from './tax/tax.module';
 
 @Module({
   controllers: [FinanceController],
   providers: [FinanceService],
   imports: [
+    TaxModule,
     FinancePayrollModule,
     InvoiceModule,
     SettlementModule,

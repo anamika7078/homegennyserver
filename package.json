@@ -22,7 +22,10 @@
     "prisma:seed": "ts-node prisma/seed.ts",
     "seed:demo": "ts-node scratch/seed_demo_data.ts",
     "prisma:studio": "prisma studio",
-    "render:start": "node scratch/render_pre_migrate.js && npx prisma db push --accept-data-loss && node scratch/apply_security_triggers.js && node scratch/seed_users_now.js && node dist/main"
+    "render:start": "node scratch/render_pre_migrate.js && npx prisma db push --accept-data-loss && node scratch/apply_security_triggers.js && node scratch/seed_users_now.js && node dist/main",
+    "test:hr": "node scratch/_live_test_hr_pipeline.js && node scratch/_live_test_attendance_projection.js && node scratch/_live_test_employee_profile.js && node scratch/_live_test_staff_checkin_visibility.js",
+    "test:finance": "node scratch/_live_test_finance_f1.js && node -e \"console.log('cooling down for the auth rate limit (5 logins/60s)...');setTimeout(()=>{},65000)\" && node scratch/_live_test_finance_f19.js && node -e \"console.log('cooling down for the auth rate limit (5 logins/60s)...');setTimeout(()=>{},65000)\" && node scratch/_live_test_finance_f10_f11.js && node -e \"console.log('cooling down for the auth rate limit (5 logins/60s)...');setTimeout(()=>{},65000)\" && node scratch/_live_test_finance_f06_f07.js && node -e \"console.log('cooling down for the auth rate limit (5 logins/60s)...');setTimeout(()=>{},65000)\" && node scratch/_live_test_finance_f09_f12.js && node -e \"console.log(\\\"cooling down for the auth rate limit (5 logins/60s)...\\\");setTimeout(()=>{},65000)\" && node scratch/_live_test_finance_f13_f14_f15.js && node -e \"console.log('cooling down for the auth rate limit (5 logins/60s)...');setTimeout(()=>{},65000)\" && node scratch/_live_test_finance_f16_f17.js && node -e \"console.log('cooling down for the auth rate limit (5 logins/60s)...');setTimeout(()=>{},65000)\" && node scratch/_live_test_finance_f18_f20.js",
+    "migrate:f1": "node scratch/_f1_finance_migration.js && node scratch/_f19_recovery_migration.js && node scratch/_f06_f07_migration.js && node scratch/_f09_f12_migration.js && node scratch/_f13_f14_f15_migration.js && node scratch/_f16_f17_migration.js && node scratch/_f18_f20_migration.js"
   },
   "dependencies": {
     "@google-cloud/logging": "^11.0.0",
@@ -60,6 +63,7 @@
     "otplib": "^13.4.0",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
+    "pdfkit": "^0.15.2",
     "pg": "^8.11.5",
     "razorpay": "^2.9.2",
     "reflect-metadata": "^0.2.1",
@@ -80,6 +84,7 @@
     "@types/node": "^20.12.7",
     "@types/nodemailer": "^6.4.15",
     "@types/passport-jwt": "^4.0.1",
+    "@types/pdfkit": "^0.17.6",
     "prisma": "^5.22.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.5"

@@ -278,11 +278,17 @@ export class ClientMobileController {
       orderBy: { dueDate: 'desc' },
     });
 
+    // Employer ESIC/PF are part of what the client is billed, so leaving them
+    // out made the four numbers below add up to less than totalAmount — on the
+    // screen the paying customer actually looks at. Same defect as F-03 on the
+    // Finance console, on a worse surface. See docs/FINANCE_MODULE_AUDIT.md.
     return {
       invoices: invoices.map((i) => ({
         id: i.invoiceNumber,
         billingMonth: `${i.periodMonth}/${i.periodYear}`,
         salaryComponent: Number(i.staffSalaryComponent),
+        employerEsic: Number(i.esicEmployer),
+        employerPf: Number(i.pfEmployer),
         managementFee: Number(i.managementFee),
         gstAmount: Number(i.gstAmount),
         totalAmount: Number(i.totalAmount),

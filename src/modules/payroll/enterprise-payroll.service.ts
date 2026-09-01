@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { PayrollService } from './payroll.service';
 import { calculateEsic } from '../../common/finance/statutory-calc.util';
+import { StatutoryTaxService } from '../finance/tax/statutory-tax.service';
 import {
   ProcessEnterpriseBatchDto,
   ApproveBatchTierDto,
@@ -13,7 +15,15 @@ import { Prisma, PayrollApprovalStatus, BankTransferStatus, LoanStatus, Calculat
 export class EnterprisePayrollService {
   private readonly logger = new Logger(EnterprisePayrollService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    // Reused rather than reimplemented: countAttendanceForEmployee() is the
+    // same audited reader the HR payroll path uses, so both engines now
+    // count a month the same way instead of disagreeing (see F-01/F-11 in
+    // docs/FINANCE_MODULE_AUDIT.md).
+    private readonly payroll: PayrollService,
+    private readonly tax: StatutoryTaxService,
+  ) {}
 
   /**
    * 10-Step Enterprise Payroll Processing Pipeline
@@ -74,15 +84,46 @@ export class EnterprisePayrollService {
     let totalReimbursement = 0;
     let totalDeductions = 0;
     let totalNet = 0;
+    /** Employees left out of the batch, with the reason — returned, not persisted. */
+    const skipped: { employeeId: string; employeeCode: string; fullName: string; reason: string }[] = [];
+    /** Set when any tax figure came from a slab Finance has not signed off (F-16). */
+    let unconfirmedRates = false;
 
     const startOfMonth = new Date(year, month - 1, 1);
     const endOfMonth = new Date(year, month, 0, 23, 59, 59);
 
     for (const emp of employees) {
+      // Attendance used to be `workingDays = 30, presentDays = 30` hardcoded,
+      // so prorationRatio was always exactly 1 and an employee present four
+      // days in the month was paid in full — while the UI advertised
+      // "auto-calculates attendance proration". This reads the same
+      // `attendance` table the HR payroll path reads.
+      const summary = await this.payroll.countAttendanceForEmployee(emp.id, month, year);
+      const markedDays =
+        summary.present_days + summary.absent_days + summary.leave_days + summary.overtime_days;
+
+      // No attendance rows at all for this period is not the same as "absent
+      // every day". Paying such an employee zero would be as wrong as paying
+      // them in full, and silently doing either is worse — so leave them out
+      // of the batch and report them, the way runAttendancePayroll() refuses
+      // rather than writing a zero row.
+      if (markedDays <= 0) {
+        skipped.push({
+          employeeId: emp.id,
+          employeeCode: emp.employeeId,
+          fullName: emp.fullName,
+          reason: 'No attendance marked for this period',
+        });
+        continue;
+      }
+
       totalEmployees++;
-      const workingDays = 30;
-      const presentDays = 30; // Default assuming full attendance unless docked
-      const lwpDays = 0;
+      const workingDays = summary.days_in_month;
+      // billable_days already folds in Late (full) and Half Day (0.5), and
+      // deliberately excludes Leave — matching the HR path, which has no
+      // paid-leave concept today.
+      const presentDays = summary.billable_days;
+      const lwpDays = Math.round((workingDays - presentDays) * 10) / 10;
       const prorationRatio = presentDays / workingDays;
 
       // Step 4: Calculate basic salary & allowances
@@ -145,51 +186,88 @@ export class EnterprisePayrollService {
       const grossSalary = Math.round((grossFromProfile + overtimeAmount + bonusAmount + reimbursementAmount) * 100) / 100;
 
       // Step 8: Calculate Deductions (Statutory + Loans/Advances)
-      // PF: 12% on basic up to 15,000 ceiling
-      const pfBase = Math.min(basicSalary, 15000);
+      //
+      // Both sides of PF and ESIC are computed now. Only the employee side used
+      // to be, so the company's own 12% PF and 3.25% ESIC — its actual
+      // liability — existed nowhere, and these employees could not be included
+      // in a challan at all. See F-07.
+      //
+      // PF base here is basic, not gross (the statutory reading), and it is
+      // deliberately left as it was rather than changed to match the EOR path,
+      // which uses gross. That divergence is real and is flagged as F-20; it is
+      // a policy question, not something to settle inside a bug fix.
+      // Basic is this employee's agreed PF base; the resolver applies the
+      // configured rule and falls back to gross where no basic exists. Both
+      // payroll paths go through it, so they cannot diverge again. See F-20.
+      const pfBaseResolved = await this.tax.resolvePfBase({
+        gross: grossSalary,
+        agreedBase: basicSalary > 0 ? basicSalary : null,
+      });
+      const pfBase = Math.min(pfBaseResolved.base, 15000);
       const pfDeduction = Math.round(pfBase * 0.12 * 100) / 100;
+      const pfEmployer = pfDeduction;
 
-      // ESIC: employee-side, statutory threshold + rate from the shared util
-      const esicDeduction = calculateEsic(grossSalary).employee;
+      const esic = calculateEsic(grossSalary);
+      const esicDeduction = esic.employee;
+      const esicEmployer = esic.employer;
 
-      // PT (Professional Tax standard approximation)
-      const ptDeduction = grossSalary > 15000 ? 200 : 0;
+      // Professional tax by state, and TDS from an annual projection —
+      // the same engine the HR path uses, so the two cannot disagree.
+      // Both were flat approximations before, and PT in particular was being
+      // charged in states that do not levy it at all. See F-16.
+      const ptResult = await this.tax.professionalTax({
+        state: emp.state,
+        monthlyGross: grossSalary,
+        month,
+        gender: emp.gender,
+      });
+      const tdsResult = await this.tax.tds({
+        employeeId: emp.id, monthlyGross: grossSalary, month, year,
+      });
+      const ptDeduction = ptResult.amount;
+      const tdsDeduction = tdsResult.monthlyAmount;
+      if (ptResult.needsConfirmation || tdsResult.needsConfirmation) unconfirmedRates = true;
 
-      // TDS approximation (e.g. 5% if gross > 50,000 monthly)
-      const tdsDeduction = grossSalary > 50000 ? Math.round(grossSalary * 0.05 * 100) / 100 : 0;
+      // Loan EMI and salary-advance recovery.
+      //
+      // Calculated here, but the balances are NOT written until the batch is
+      // locked (see applyRecoveries, called from lockBatch). Deducting during
+      // calculation meant that re-running a still-DRAFT batch — which this
+      // method explicitly supports, and which the UI's "Run 10-Step Pipeline"
+      // button does — took another EMI off the loan every single time, while
+      // the recalculated payroll_details gave no sign of it. See F-19.
+      //
+      // The per-loan split is recorded so the lock step replays exactly the
+      // figures the payslip showed, rather than recomputing against balances
+      // that may have moved in between.
+      const recoveryBreakdown: {
+        loans: { loanId: string; amount: number }[];
+        advances: { advanceId: string; amount: number }[];
+      } = { loans: [], advances: [] };
 
-      // Loan EMI deduction
       let loanEmiDeduction = 0;
       for (const loan of emp.loans) {
         if (loan.autoDeduction) {
           const emi = Math.min(Number(loan.monthlyEmi), Number(loan.remainingAmount));
-          loanEmiDeduction += emi;
-          // Deduct from remaining loan balance
-          const newBal = Number(loan.remainingAmount) - emi;
-          await this.prisma.employeeLoan.update({
-            where: { id: loan.id },
-            data: {
-              remainingAmount: newBal,
-              status: newBal <= 0 ? LoanStatus.CLOSED : LoanStatus.ACTIVE,
-            },
-          });
+          if (emi > 0) {
+            loanEmiDeduction += emi;
+            recoveryBreakdown.loans.push({ loanId: loan.id, amount: Math.round(emi * 100) / 100 });
+          }
         }
       }
 
-      // Salary Advance recovery
       let advanceDeduction = 0;
       for (const adv of emp.salaryAdvances) {
         const advAmt = Number(adv.remainingAmount);
-        advanceDeduction += advAmt;
-        await this.prisma.salaryAdvance.update({
-          where: { id: adv.id },
-          data: {
-            remainingAmount: 0,
-            status: LoanStatus.CLOSED,
-          },
-        });
+        if (advAmt > 0) {
+          advanceDeduction += advAmt;
+          recoveryBreakdown.advances.push({ advanceId: adv.id, amount: Math.round(advAmt * 100) / 100 });
+        }
       }
 
+      // Stays zero on purpose. Loss of pay is already expressed by
+      // prorationRatio shrinking basic + allowances above; charging lwpDays a
+      // second time here would deduct the same absence twice.
       const lwpDeduction = 0;
       const totalDeduction = Math.round((pfDeduction + esicDeduction + ptDeduction + tdsDeduction + loanEmiDeduction + advanceDeduction + lwpDeduction) * 100) / 100;
 
@@ -219,6 +297,8 @@ export class EnterprisePayrollService {
           grossSalary,
           pfDeduction,
           esicDeduction,
+          esicEmployer,
+          pfEmployer,
           tdsDeduction,
           ptDeduction,
           loanEmiDeduction: Math.round(loanEmiDeduction * 100) / 100,
@@ -226,6 +306,7 @@ export class EnterprisePayrollService {
           lwpDeduction,
           totalDeduction,
           netSalary,
+          recoveryBreakdown,
           paymentStatus: BankTransferStatus.PENDING,
         },
       });
@@ -263,7 +344,21 @@ export class EnterprisePayrollService {
       },
     });
 
-    return updatedBatch;
+    if (skipped.length) {
+      this.logger.warn(
+        `[ENTERPRISE_PAYROLL] ${batch.batchNumber}: ${skipped.length} employee(s) excluded for ` +
+        `missing attendance — ${skipped.map((s) => s.employeeCode).join(', ')}`,
+      );
+    }
+
+    if (unconfirmedRates) {
+      this.logger.warn(
+        `[ENTERPRISE_PAYROLL] ${batch.batchNumber}: tax slabs are not confirmed — ` +
+        `figures come from seeded defaults.`,
+      );
+    }
+
+    return { ...updatedBatch, skipped, unconfirmedTaxRates: unconfirmedRates };
   }
 
   async getBatches(query: any) {
@@ -407,20 +502,117 @@ export class EnterprisePayrollService {
     });
   }
 
+  /**
+   * Applies the loan/advance recovery that the batch's payslips promised.
+   *
+   * Runs once, at lock, inside the same transaction that locks the batch —
+   * so a balance only moves against a payroll that is final and immutable,
+   * and a recalculated draft can no longer eat an EMI per run (F-19).
+   *
+   * `recoveries_applied_at` makes it idempotent independently of the status
+   * check, so even a future code path that re-locks cannot double-recover.
+   */
+  private async applyRecoveries(
+    tx: Prisma.TransactionClient,
+    batchId: string,
+  ): Promise<{ loans: number; advances: number; totalRecovered: number }> {
+    const batch = await tx.payrollProcessingBatch.findUnique({
+      where: { id: batchId },
+      select: { recoveriesAppliedAt: true },
+    });
+    if (batch?.recoveriesAppliedAt) {
+      return { loans: 0, advances: 0, totalRecovered: 0 };
+    }
+
+    const details = await tx.payrollDetail.findMany({
+      where: { batchId },
+      select: { recoveryBreakdown: true },
+    });
+
+    let loans = 0;
+    let advances = 0;
+    let totalRecovered = 0;
+
+    for (const detail of details) {
+      const breakdown = (detail.recoveryBreakdown ?? {}) as {
+        loans?: { loanId: string; amount: number }[];
+        advances?: { advanceId: string; amount: number }[];
+      };
+
+      for (const entry of breakdown.loans ?? []) {
+        const loan = await tx.employeeLoan.findUnique({
+          where: { id: entry.loanId },
+          select: { remainingAmount: true },
+        });
+        if (!loan) continue;
+        // Never drive a balance negative, even if the loan was partly repaid
+        // by some other route between calculation and lock.
+        const applied = Math.min(entry.amount, Number(loan.remainingAmount));
+        if (applied <= 0) continue;
+        const newBal = Math.round((Number(loan.remainingAmount) - applied) * 100) / 100;
+        await tx.employeeLoan.update({
+          where: { id: entry.loanId },
+          data: {
+            remainingAmount: newBal,
+            status: newBal <= 0 ? LoanStatus.CLOSED : LoanStatus.ACTIVE,
+          },
+        });
+        loans++;
+        totalRecovered += applied;
+      }
+
+      for (const entry of breakdown.advances ?? []) {
+        const adv = await tx.salaryAdvance.findUnique({
+          where: { id: entry.advanceId },
+          select: { remainingAmount: true },
+        });
+        if (!adv) continue;
+        const applied = Math.min(entry.amount, Number(adv.remainingAmount));
+        if (applied <= 0) continue;
+        const newBal = Math.round((Number(adv.remainingAmount) - applied) * 100) / 100;
+        await tx.salaryAdvance.update({
+          where: { id: entry.advanceId },
+          data: {
+            remainingAmount: newBal,
+            status: newBal <= 0 ? LoanStatus.CLOSED : LoanStatus.ACTIVE,
+          },
+        });
+        advances++;
+        totalRecovered += applied;
+      }
+    }
+
+    return { loans, advances, totalRecovered: Math.round(totalRecovered * 100) / 100 };
+  }
+
   async lockBatch(batchId: string) {
     const batch = await this.getBatchById(batchId);
     if (batch.status !== PayrollApprovalStatus.APPROVED) {
       throw new BadRequestException('Only approved payroll batches can be locked.');
     }
 
-    return this.prisma.payrollProcessingBatch.update({
-      where: { id: batchId },
-      data: {
-        status: PayrollApprovalStatus.LOCKED,
-        lockedAt: new Date(),
-      },
-      include: { approvals: true },
+    const { locked, recovered } = await this.prisma.$transaction(async (tx) => {
+      const recovered = await this.applyRecoveries(tx, batchId);
+      const locked = await tx.payrollProcessingBatch.update({
+        where: { id: batchId },
+        data: {
+          status: PayrollApprovalStatus.LOCKED,
+          lockedAt: new Date(),
+          recoveriesAppliedAt: new Date(),
+        },
+        include: { approvals: true },
+      });
+      return { locked, recovered };
     });
+
+    if (recovered.totalRecovered > 0) {
+      this.logger.log(
+        `[ENTERPRISE_PAYROLL] ${locked.batchNumber} locked — recovered ` +
+        `${recovered.totalRecovered} across ${recovered.loans} loan(s) and ${recovered.advances} advance(s)`,
+      );
+    }
+
+    return { ...locked, recovered };
   }
 
   /**
@@ -530,19 +722,36 @@ export class EnterprisePayrollService {
       where: { batch: whereBatch },
     });
 
-    const pfTotal = details.reduce((s, d) => s + Number(d.pfDeduction), 0);
-    const esicTotal = details.reduce((s, d) => s + Number(d.esicDeduction), 0);
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    const pfEmployee = details.reduce((s, d) => s + Number(d.pfDeduction), 0);
+    const pfEmployer = details.reduce((s, d) => s + Number(d.pfEmployer), 0);
+    const esicEmployee = details.reduce((s, d) => s + Number(d.esicDeduction), 0);
+    const esicEmployer = details.reduce((s, d) => s + Number(d.esicEmployer), 0);
     const ptTotal = details.reduce((s, d) => s + Number(d.ptDeduction), 0);
     const tdsTotal = details.reduce((s, d) => s + Number(d.tdsDeduction), 0);
+
+    const withheld = pfEmployee + esicEmployee + ptTotal + tdsTotal;
+    const employerCost = pfEmployer + esicEmployer;
 
     return {
       period: { month, year },
       complianceTotals: {
-        providentFund: Math.round(pfTotal * 100) / 100,
-        esic: Math.round(esicTotal * 100) / 100,
-        professionalTax: Math.round(ptTotal * 100) / 100,
-        tds: Math.round(tdsTotal * 100) / 100,
-        totalStatutoryDeduction: Math.round((pfTotal + esicTotal + ptTotal + tdsTotal) * 100) / 100,
+        // Withheld from the employee's salary…
+        providentFund: r2(pfEmployee),
+        esic: r2(esicEmployee),
+        professionalTax: r2(ptTotal),
+        tds: r2(tdsTotal),
+        totalStatutoryDeduction: r2(withheld),
+
+        // …and what the company owes on top of it. Previously absent, which
+        // made the report look like the whole statutory bill when it was only
+        // the half taken out of salaries (F-07).
+        providentFundEmployer: r2(pfEmployer),
+        esicEmployer: r2(esicEmployer),
+        totalEmployerContribution: r2(employerCost),
+
+        /** Everything payable to the authorities for this period. */
+        totalStatutoryLiability: r2(withheld + employerCost),
       },
     };
   }

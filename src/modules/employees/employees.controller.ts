@@ -8,10 +8,19 @@ import {
   Body,
   Param,
   Query,
+  Req,
+  Res,
   UseGuards,
   BadRequestException,
 } from '@nestjs/common';
 import { EmployeesService } from './employees.service';
+import {
+  EmployeeOnboardingService,
+  OnboardFromPipelineDto,
+} from './employee-onboarding.service';
+import { EmployeeProfileService } from './employee-profile.service';
+import { EmployeePayslipService } from './employee-payslip.service';
+import type { Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
@@ -25,6 +34,9 @@ import { UserProvisioningService } from '../auth/user-provisioning.service';
 export class EmployeesController {
   constructor(
     private readonly service: EmployeesService,
+    private readonly onboarding: EmployeeOnboardingService,
+    private readonly profile: EmployeeProfileService,
+    private readonly payslips: EmployeePayslipService,
     private readonly userProvisioning: UserProvisioningService,
   ) {}
 
@@ -63,6 +75,50 @@ export class EmployeesController {
       designation: e.designation,
       branchId: e.branchId,
     }));
+  }
+
+  // Declared above @Get(':id') on purpose — Nest matches routes in declaration
+  // order, so a literal path registered after the parameterised one would be
+  // swallowed by it and arrive as an employee lookup for the id
+  // "pending-onboarding".
+  @Get('pending-onboarding')
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.BM)
+  @ApiOperation({
+    summary: 'Deployed pipeline candidates who do not have an employee record yet',
+    description:
+      'HR onboarding worklist: staff who reached S5_DEPLOY in the RM pipeline but have ' +
+      'never been converted into an employees row, so they are invisible to attendance, ' +
+      'salary and payslips.',
+  })
+  async pendingOnboarding(
+    @Query('branchId') branchId?: string,
+    @Query('search') search?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.onboarding.listPendingOnboarding({
+      branchId,
+      search,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
+  @Post('onboard-from-pipeline')
+  @Roles(UserRole.HR, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Convert an S5_DEPLOY candidate into an employee',
+    description:
+      'The supported S5 -> employee handover. Copies identity from the staff_applicants ' +
+      'row, takes the HR-only fields the pipeline never collected (department, ' +
+      'designation, category, employment type, salary, joining date, gender), links the ' +
+      'two records by foreign key and reuses the candidate existing login rather than ' +
+      'creating a second account. The pipeline row is left untouched as the permanent ' +
+      'record of how this person was hired.',
+  })
+  async onboardFromPipeline(@Body() body: OnboardFromPipelineDto, @Req() req: any) {
+    if (!body?.staffApplicantId) {
+      throw new BadRequestException('staffApplicantId is required');
+    }
+    return this.onboarding.onboardFromPipeline(body, req.user.id);
   }
 
   @Get(':id')
@@ -132,6 +188,91 @@ export class EmployeesController {
       throw new BadRequestException('channel, reason, and exitDate are required');
     }
     return this.service.processExit(id, body);
+  }
+
+  // ── Per-employee reads: the pipeline side of a person, from HR's screen ──
+  // These sit after @Get(':id') on purpose — they have an extra path segment,
+  // so there is no ambiguity with the parameterised route above.
+
+  @Get(':id/pipeline-history')
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.BM, UserRole.RM)
+  @ApiOperation({
+    summary: 'Stage-by-stage history of how this employee was hired',
+    description:
+      'Every pipeline_events row for the linked candidate record, newest first, with the ' +
+      'acting user resolved. Returns linkedToPipeline: false for a direct HR hire.',
+  })
+  async pipelineHistory(@Param('id') id: string) {
+    return this.profile.pipelineHistory(id);
+  }
+
+  @Get(':id/incidents')
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.BM, UserRole.RM)
+  @ApiOperation({ summary: 'Incidents raised against this employee during deployment' })
+  async incidents(@Param('id') id: string) {
+    return this.profile.incidents(id);
+  }
+
+  @Get(':id/attendance-month')
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.BM, UserRole.FINANCE)
+  @ApiOperation({
+    summary: 'One month of attendance, HR ledger merged with the field record',
+    description:
+      'Each day carries a source (HR / FIELD / PIPELINE_ONLY) and a divergesFromField flag, ' +
+      'so a day HR corrected and a day the projection has not picked up yet are both ' +
+      'visible rather than silently reconciled.',
+  })
+  async attendanceMonth(
+    @Param('id') id: string,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
+  ) {
+    const now = new Date();
+    const m = Number(month ?? now.getMonth() + 1);
+    const y = Number(year ?? now.getFullYear());
+    if (!Number.isInteger(m) || m < 1 || m > 12) {
+      throw new BadRequestException('month must be a whole number between 1 and 12');
+    }
+    if (!Number.isInteger(y) || y < 2000 || y > 2100) {
+      throw new BadRequestException('year must be a whole number between 2000 and 2100');
+    }
+    return this.profile.attendanceMonth(id, m, y);
+  }
+
+  @Get(':id/payslips')
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.FINANCE)
+  @ApiOperation({
+    summary: 'Every payslip for this employee, across all three payroll paths',
+    description:
+      'Merges employee_payrolls (HR), payroll_details/payslip_documents (enterprise) and ' +
+      'payroll_records (field/placement) into one period-sorted list. Each row carries a ref ' +
+      'usable with the PDF endpoint.',
+  })
+  async listPayslips(@Param('id') id: string) {
+    return this.payslips.listForEmployee(id);
+  }
+
+  @Get(':id/payslips/pdf')
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.FINANCE)
+  @ApiOperation({
+    summary: 'Download one payslip as a PDF',
+    description:
+      'Pass the ref from the payslips list (e.g. HR_PAYROLL:<uuid>). The PDF is rendered ' +
+      'from live data so every payslip looks the same regardless of which payroll path ' +
+      'produced it.',
+  })
+  async payslipPdf(
+    @Param('id') id: string,
+    @Query('ref') ref: string,
+    @Res() res: Response,
+  ) {
+    if (!ref) throw new BadRequestException('ref is required — take it from GET :id/payslips');
+    EmployeePayslipService.parseRef(ref);
+    const { buffer, filename } = await this.payslips.renderPdf(id, ref);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', String(buffer.length));
+    res.end(buffer);
   }
 
   @Delete(':id')

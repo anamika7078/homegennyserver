@@ -12,6 +12,11 @@ async function bootstrap() {
   const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule, {
     logger: ['log', 'warn', 'error', 'debug'],
+    // Keeps the exact bytes of each request body on `req.rawBody`. The
+    // Razorpay webhook signs the raw payload, so re-serialising the parsed
+    // JSON would produce a different string and every valid signature would
+    // fail to verify. See F-08 in docs/FINANCE_MODULE_AUDIT.md.
+    rawBody: true,
   });
 
   const configService = app.get(ConfigService);

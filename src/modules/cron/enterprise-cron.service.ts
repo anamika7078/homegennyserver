@@ -118,14 +118,78 @@ export class EnterpriseCronService {
     this.events.emit('cron.video_cert_renewal', { checkedAt: new Date() });
   }
 
-  @Cron(CronExpression.EVERY_1ST_DAY_OF_MONTH_AT_MIDNIGHT)
+  /**
+   * Chases invoices that are due or overdue.
+   *
+   * Ran monthly against `status = 'PENDING'` — a status that no longer exists
+   * (F-12 replaced it) and that would have matched nothing anyway once an
+   * invoice was sent. Now runs daily against the states an unpaid invoice can
+   * actually be in, and records each reminder in `payment_reminders`, which
+   * had no writer at all (F-13). The table is what stops the same client being
+   * chased twice on the same day.
+   */
+  @Cron(CronExpression.EVERY_DAY_AT_9AM)
   async invoiceReminders() {
     const rows = await this.dataSource.query(`
-      SELECT id, invoice_number, due_date, total_amount
-      FROM client_invoices
-      WHERE status = 'PENDING' AND due_date <= CURRENT_DATE + INTERVAL '7 days'
+      SELECT ci.id, ci.invoice_number, ci.due_date, ci.total_amount, ci.status,
+             ci.client_id, fc.customer_name,
+             GREATEST(0, (CURRENT_DATE - ci.due_date))::int AS days_overdue
+      FROM client_invoices ci
+      LEFT JOIN finance_customers fc ON fc.id = ci.client_id
+      WHERE ci.status IN ('SENT', 'PARTIALLY_PAID', 'OVERDUE')
+        AND ci.due_date <= CURRENT_DATE + INTERVAL '3 days'
     `).catch(() => []);
-    if (rows.length) this.events.emit('cron.invoice_reminder', rows);
+
+    if (!rows.length) return;
+
+    // Spec §5: chase on day 1, 3 and 7 past due. A reminder before the due
+    // date goes out once, as a heads-up.
+    const DUE_DAY_MARKS = [0, 1, 3, 7];
+    let recorded = 0;
+
+    for (const inv of rows) {
+      const days = Number(inv.days_overdue ?? 0);
+      if (!DUE_DAY_MARKS.includes(days) && days <= 7) continue;
+      if (days > 7 && days % 7 !== 0) continue; // weekly after the first week
+
+      const already = await this.dataSource.query(
+        `SELECT 1 FROM payment_reminders
+         WHERE invoice_id = $1 AND reminder_day = $2 LIMIT 1`,
+        [inv.id, days],
+      ).catch(() => []);
+      if (already.length) continue;
+
+      await this.dataSource.query(
+        `INSERT INTO payment_reminders (id, invoice_id, type, reminder_day, sent_at, channel, status, metadata)
+         VALUES (gen_random_uuid(), $1, $2, $3, NOW(), 'IN_APP', 'SENT', $4::jsonb)
+         ON CONFLICT (invoice_id, reminder_day) DO NOTHING`,
+        [
+          inv.id,
+          days === 0 ? 'DUE_SOON' : 'OVERDUE',
+          days,
+          JSON.stringify({
+            invoice_number: inv.invoice_number,
+            customer: inv.customer_name,
+            amount: inv.total_amount,
+            days_overdue: days,
+          }),
+        ],
+      ).catch((e: Error) => this.logger.warn(`[INVOICE_REMINDER] could not record: ${e.message}`));
+      recorded++;
+
+      // Past due and still unpaid is a different state from merely sent.
+      if (days > 0 && inv.status !== 'OVERDUE') {
+        await this.dataSource.query(
+          `UPDATE client_invoices SET status = 'OVERDUE' WHERE id = $1 AND status IN ('SENT','PARTIALLY_PAID')`,
+          [inv.id],
+        ).catch(() => undefined);
+      }
+    }
+
+    if (recorded) {
+      this.logger.log(`[INVOICE_REMINDER] ${recorded} reminder(s) recorded`);
+      this.events.emit('cron.invoice_reminder', rows);
+    }
   }
 
   @Cron(CronExpression.EVERY_DAY_AT_5AM)

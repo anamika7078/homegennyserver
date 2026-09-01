@@ -14,6 +14,7 @@ import {
   PF_RATE_DEFAULT,
   PF_WAGE_CEILING,
 } from '../../common/finance/statutory-calc.util';
+import { StatutoryTaxService } from '../finance/tax/statutory-tax.service';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const Razorpay = require('razorpay');
@@ -78,6 +79,25 @@ function ratesFromPlacementMetadata(metadata: unknown): WageConfigRates | undefi
   return wageConfig && typeof wageConfig === 'object' ? wageConfig : undefined;
 }
 
+/**
+ * The PF base agreed for this placement, if the RM used the wage-breakup form.
+ *
+ * `wage_breakup.pfBase` is the figure the commercial calculator quoted the
+ * client (basic + skilled allowance + leave wages). Deducting PF on gross
+ * instead meant payroll charged a different number from the one agreed with
+ * the client for the same person. See F-20. A placement without a breakup has
+ * an undifferentiated wage, so there is no separate base and the caller
+ * correctly falls back to gross.
+ */
+function pfBaseFromPlacementMetadata(metadata: unknown): number | null {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const breakup = (metadata as { wage_breakup?: Record<string, unknown> }).wage_breakup;
+  if (!breakup || typeof breakup !== 'object') return null;
+  const raw = breakup.pfBase;
+  const n = typeof raw === 'number' ? raw : parseFloat(String(raw ?? ''));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 interface ShiftCountRow { shift_days: string; }
 
 interface AttendanceCountRow { status: string; count: string; }
@@ -100,6 +120,7 @@ export class PayrollService {
   constructor(
     private readonly config: ConfigService,
     private readonly dataSource: DataSource,
+    private readonly tax: StatutoryTaxService,
   ) {
     // Razorpay is initialised lazily in getRazorpay() so that the module
     // boots cleanly in dev even when credentials are placeholders.
@@ -180,13 +201,19 @@ export class PayrollService {
     };
   }
 
+  /**
+   * @param pfBase The base PF is computed on. Defaults to gross, which is
+   *               correct only when the wage carries no separately agreed
+   *               base — see pfBaseFromPlacementMetadata and F-20.
+   */
   calculatePayrollWithAbsoluteFee(
     grossSalary: number,
     managementFee: number,
     rates?: WageConfigRates,
+    pfBase?: number,
   ): PayrollCalculation {
     const esic = calculateEsic(grossSalary, rates?.employee_esic_pct, rates?.employer_esic_pct);
-    const pf = calculatePfFlat(grossSalary, rates?.employee_pf_pct, rates?.employer_pf_pct, rates?.employer_pf_max);
+    const pf = calculatePfFlat(pfBase ?? grossSalary, rates?.employee_pf_pct, rates?.employer_pf_pct, rates?.employer_pf_max);
     const netSalary = calculateNetSalary(grossSalary, esic.employee, pf.employee);
     const gstOnFee = calculateGstOnFee(managementFee, rates?.gst_pct);
     const clientTotalCharge = calculateClientTotal(grossSalary, esic.employer, pf.employer, managementFee, gstOnFee);
@@ -253,6 +280,77 @@ export class PayrollService {
     };
   }
 
+  /**
+   * Writes the client invoice and its line items together.
+   *
+   * Both payroll paths used to inline their own near-identical INSERT, which
+   * is how they drifted apart before (one had a duplicate guard, the other
+   * didn't). More importantly, neither stored employer ESIC/PF nor wrote any
+   * `invoice_items` at all — so the four line items the invoice rendered
+   * summed to less than the total it charged, with the employer
+   * contributions unexplained. See F-03 in docs/FINANCE_MODULE_AUDIT.md.
+   */
+  private async insertInvoiceWithItems(
+    manager: { query: <T>(sql: string, params?: unknown[]) => Promise<T> },
+    args: {
+      placementId: string;
+      clientId: string;
+      month: number;
+      year: number;
+      calc: PayrollCalculation;
+    },
+  ): Promise<Record<string, unknown>> {
+    const { placementId, clientId, month, year, calc } = args;
+
+    const invoiceNo = `INV-${year}${String(month).padStart(2, '0')}-${placementId.slice(0, 6).toUpperCase()}`;
+    const dueDate = new Date(year, month, 5); // 5th of the following month
+
+    const items: { description: string; amount: number; taxable: boolean }[] = [
+      { description: 'Staff Salary Component', amount: calc.grossSalary, taxable: false },
+      { description: `Employer ESIC (${calc.ratesUsed.esicEmployerPct}%)`, amount: calc.esicEmployer, taxable: false },
+      { description: `Employer PF (${calc.ratesUsed.pfEmployerPct}%)`, amount: calc.pfEmployer, taxable: false },
+      { description: 'Management Fee', amount: calc.managementFee, taxable: true },
+      { description: `GST on Management Fee (${calc.ratesUsed.gstPct}%)`, amount: calc.gstOnFee, taxable: false },
+    ];
+
+    // The invoice must be able to explain its own total. If these ever
+    // disagree the invoice is not sendable, so fail the transaction rather
+    // than persist a document a client would rightly query.
+    const itemsTotal = round2(items.reduce((sum, i) => sum + i.amount, 0));
+    if (Math.abs(itemsTotal - calc.clientTotalCharge) > 0.01) {
+      throw new BadRequestException(
+        `Invoice line items (${itemsTotal}) do not reconcile to the total charge ` +
+        `(${calc.clientTotalCharge}) for placement ${placementId} ${month}/${year}.`,
+      );
+    }
+
+    const [invoice] = await manager.query<Record<string, unknown>[]>(
+      // Starts at DRAFT, not PENDING: a freshly computed invoice has been
+      // approved by nobody, and the state machine's first move is DRAFT →
+      // APPROVED. See F-12.
+      `INSERT INTO client_invoices
+         (id, placement_id, client_id, invoice_number, period_month, period_year,
+          staff_salary_component, management_fee, gst_amount,
+          esic_employer, pf_employer, total_amount, due_date, status)
+       VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'DRAFT') RETURNING *`,
+      [
+        placementId, clientId, invoiceNo, month, year,
+        calc.grossSalary, calc.managementFee, calc.gstOnFee,
+        calc.esicEmployer, calc.pfEmployer, calc.clientTotalCharge, dueDate,
+      ],
+    );
+
+    for (const item of items) {
+      await manager.query(
+        `INSERT INTO invoice_items (id, invoice_id, description, amount, is_taxable)
+         VALUES (gen_random_uuid(), $1, $2, $3, $4)`,
+        [invoice.id, item.description, item.amount, item.taxable],
+      );
+    }
+
+    return invoice;
+  }
+
   async runMonthlyPayroll(
     placementId: string,
     month: number,
@@ -299,7 +397,13 @@ export class PayrollService {
       const dim = this.daysInMonth(month, year);
       const proratedGross = this.calculateProratedGross(monthlySalary, shiftDays, dim);
       const proratedFee = this.calculateProratedGross(monthlyFee, shiftDays, dim);
-      const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee, ratesFromPlacementMetadata(p.metadata));
+      // PF follows the base agreed with the client, pro-rated the same way the
+      // salary is. Without a wage breakup the whole wage is the base. See F-20.
+      const agreedPfBase = pfBaseFromPlacementMetadata(p.metadata);
+      const proratedPfBase = agreedPfBase != null
+        ? this.calculateProratedGross(agreedPfBase, shiftDays, dim)
+        : undefined;
+      const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee, ratesFromPlacementMetadata(p.metadata), proratedPfBase);
 
       const [payroll] = await manager.query<Record<string, unknown>[]>(
         `INSERT INTO payroll_records
@@ -316,19 +420,13 @@ export class PayrollService {
         ],
       );
 
-      const invoiceNo = `INV-${year}${String(month).padStart(2, '0')}-${placementId.slice(0, 6).toUpperCase()}`;
-      const dueDate = new Date(year, month, 5);  // 5th of following month
-
-      const [invoice] = await manager.query<Record<string, unknown>[]>(
-        `INSERT INTO client_invoices
-           (id, placement_id, client_id, invoice_number, period_month, period_year,
-            staff_salary_component, management_fee, gst_amount, total_amount, due_date)
-         VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-        [
-          placementId, p.client_id, invoiceNo, month, year,
-          calc.grossSalary, calc.managementFee, calc.gstOnFee, calc.clientTotalCharge, dueDate,
-        ],
-      );
+      const invoice = await this.insertInvoiceWithItems(manager, {
+        placementId,
+        clientId: p.client_id,
+        month,
+        year,
+        calc,
+      });
 
       this.logger.log(`[PAYROLL] Completed placement ${placementId} ${month}/${year}`);
       return { payroll, invoice, calculation: calc };
@@ -375,7 +473,13 @@ export class PayrollService {
       summary.billable_days,
       summary.days_in_month,
     );
-    const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee, ratesFromPlacementMetadata(p.metadata));
+    // PF follows the base agreed with the client, pro-rated the same way the
+    // salary is. Without a wage breakup the whole wage is the base. See F-20.
+    const agreedPfBase = pfBaseFromPlacementMetadata(p.metadata);
+    const proratedPfBase = agreedPfBase != null
+      ? this.calculateProratedGross(agreedPfBase, summary.billable_days, summary.days_in_month)
+      : undefined;
+    const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee, ratesFromPlacementMetadata(p.metadata), proratedPfBase);
 
     return {
       placement_id: placementId,
@@ -444,27 +548,13 @@ export class PayrollService {
         ],
       );
 
-      const invoiceNo = `INV-${year}${String(month).padStart(2, '0')}-${placementId.slice(0, 6).toUpperCase()}`;
-      const dueDate = new Date(year, month, 5);
-
-      const [invoice] = await manager.query<Record<string, unknown>[]>(
-        `INSERT INTO client_invoices
-           (id, placement_id, client_id, invoice_number, period_month, period_year,
-            staff_salary_component, management_fee, gst_amount, total_amount, due_date)
-         VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-        [
-          placementId,
-          p.client_id,
-          invoiceNo,
-          month,
-          year,
-          calc.grossSalary,
-          calc.managementFee,
-          calc.gstOnFee,
-          calc.clientTotalCharge,
-          dueDate,
-        ],
-      );
+      const invoice = await this.insertInvoiceWithItems(manager, {
+        placementId,
+        clientId: p.client_id,
+        month,
+        year,
+        calc,
+      });
 
       this.logger.log(`[ATTENDANCE_PAYROLL] placement ${placementId} ${month}/${year}`);
       return { payroll, invoice, preview, calculation: calc };
@@ -563,22 +653,91 @@ export class PayrollService {
     if (isNaN(monthlySalary)) {
       throw new BadRequestException(`Employee ${employeeId} has no valid salary set`);
     }
-    const proratedGross = this.calculateProratedGross(
+    const proratedBase = this.calculateProratedGross(
       monthlySalary,
       summary.billable_days,
       summary.days_in_month,
     );
 
-    // Basic calculation for internal staff (no management fee, no client charge)
+    // Overtime, bonuses, reimbursements, loan EMIs and salary advances all have
+    // their own modules, and the enterprise batch has always read them — this
+    // path did not, so the same employee's same month produced two different
+    // numbers depending on which screen ran it. See F-11.
+    const earnings = await this.employeeEarningsForPeriod(employeeId, month, year);
+    const proratedGross = round2(
+      proratedBase + earnings.overtimeAmount + earnings.bonusAmount + earnings.reimbursementAmount,
+    );
+
     const esic = calculateEsic(proratedGross);
-    const pf = calculatePfFlat(proratedGross);
-    const netSalary = calculateNetSalary(proratedGross, esic.employee, pf.employee);
+
+    // PF is computed on the agreed base, not automatically on gross. For an
+    // office employee that base is the salary structure basic; where no
+    // breakdown exists the whole wage is the base. See F-20.
+    const structure = await this.dataSource.query<{ basic: string | null }[]>(
+      `SELECT st.basic_salary AS basic
+         FROM employee_salary_profiles esp
+         JOIN salary_structures st ON st.id = esp.template_id
+        WHERE esp.employee_id = $1::uuid`,
+      [employeeId],
+    ).catch(() => [] as { basic: string | null }[]);
+    const structureBasic = structure[0]?.basic != null ? parseFloat(structure[0].basic) : null;
+    const pfBaseResult = await this.tax.resolvePfBase({
+      gross: proratedGross,
+      agreedBase: structureBasic,
+      proration: summary.days_in_month > 0 ? summary.billable_days / summary.days_in_month : 1,
+    });
+    const pf = calculatePfFlat(pfBaseResult.base);
+
+    // Professional tax is a state levy, and TDS is an annual liability spread
+    // across the year — neither is the flat figure this used to apply. See F-16.
+    const employee = await this.dataSource.query<{ state: string | null; gender: string | null }[]>(
+      `SELECT state, gender FROM employees WHERE id = $1::uuid`, [employeeId],
+    ).catch(() => []);
+    const pt = await this.tax.professionalTax({
+      state: employee[0]?.state,
+      monthlyGross: proratedGross,
+      month,
+      gender: employee[0]?.gender,
+    });
+    const tdsResult = await this.tax.tds({ employeeId, monthlyGross: proratedGross, month, year });
+    const ptDeduction = pt.amount;
+    const tdsDeduction = tdsResult.monthlyAmount;
+
+    const recovery = await this.employeeRecoveryForPeriod(employeeId, month, year);
+
+    const totalDeductions = round2(
+      esic.employee + pf.employee + ptDeduction + tdsDeduction +
+      recovery.loanEmiDeduction + recovery.advanceDeduction,
+    );
+    const netSalary = Math.max(0, round2(proratedGross - totalDeductions));
 
     const calculation = {
+      basicProrated: proratedBase,
+      overtimeAmount: earnings.overtimeAmount,
+      bonusAmount: earnings.bonusAmount,
+      reimbursementAmount: earnings.reimbursementAmount,
       grossSalary: proratedGross,
       esicEmployee: esic.employee,
+      esicEmployer: esic.employer,
       pfEmployee: pf.employee,
+      pfEmployer: pf.employer,
+      ptDeduction,
+      tdsDeduction,
+      loanEmiDeduction: recovery.loanEmiDeduction,
+      advanceDeduction: recovery.advanceDeduction,
+      totalDeductions,
       netSalary,
+      // Why each statutory figure is what it is, so a payslip query can be
+      // answered without reading the code.
+      taxExplanation: {
+        professionalTax: pt.reason,
+        professionalTaxState: pt.state,
+        tds: tdsResult.reason,
+        tdsRegime: tdsResult.regime,
+        // Surfaced rather than buried: a seeded slab nobody has verified
+        // should not look like a confirmed one.
+        needsConfirmation: pt.needsConfirmation || tdsResult.needsConfirmation,
+      },
     };
 
     return {
@@ -589,6 +748,86 @@ export class PayrollService {
       ...summary,
       prorated_gross: proratedGross,
       calculation,
+      // Balances are NOT moved here. Loan/advance recovery is applied once, when
+      // an enterprise payroll batch is locked (see F-19) — this path has no
+      // lock step, so it shows the deduction without performing it.
+      recovery_breakdown: recovery.breakdown,
+      recovery_applied: false,
+    };
+  }
+
+  /** Approved overtime / bonus / reimbursement for an employee in one period. */
+  private async employeeEarningsForPeriod(employeeId: string, month: number, year: number) {
+    const start = new Date(year, month - 1, 1);
+    const end = new Date(year, month, 0, 23, 59, 59);
+
+    const [ot] = await this.dataSource.query<{ total: string }[]>(
+      `SELECT COALESCE(SUM(total_amount), 0) AS total FROM overtime_records
+       WHERE employee_id = $1::uuid AND status = 'APPROVED' AND date BETWEEN $2 AND $3`,
+      [employeeId, start, end],
+    );
+    const [bonus] = await this.dataSource.query<{ total: string }[]>(
+      `SELECT COALESCE(SUM(amount), 0) AS total FROM bonus_records
+       WHERE employee_id = $1::uuid AND status = 'APPROVED' AND month = $2 AND year = $3`,
+      [employeeId, month, year],
+    );
+    const [reimb] = await this.dataSource.query<{ total: string }[]>(
+      `SELECT COALESCE(SUM(amount), 0) AS total FROM reimbursement_requests
+       WHERE employee_id = $1::uuid AND status = 'APPROVED' AND expense_date BETWEEN $2 AND $3`,
+      [employeeId, start, end],
+    );
+
+    return {
+      overtimeAmount: round2(parseFloat(ot?.total ?? '0')),
+      bonusAmount: round2(parseFloat(bonus?.total ?? '0')),
+      reimbursementAmount: round2(parseFloat(reimb?.total ?? '0')),
+    };
+  }
+
+  /**
+   * What this employee owes this period, and against which loan/advance.
+   * Computed only — see the note in previewEmployeePayroll about F-19.
+   */
+  private async employeeRecoveryForPeriod(employeeId: string, month: number, year: number) {
+    const loans = await this.dataSource.query<{ id: string; monthly_emi: string; remaining_amount: string }[]>(
+      `SELECT id, monthly_emi, remaining_amount FROM employee_loans
+       WHERE employee_id = $1::uuid AND status = 'ACTIVE' AND auto_deduction = true`,
+      [employeeId],
+    );
+    const advances = await this.dataSource.query<{ id: string; remaining_amount: string }[]>(
+      `SELECT id, remaining_amount FROM salary_advances
+       WHERE employee_id = $1::uuid AND status = 'ACTIVE'
+         AND recovery_month = $2 AND recovery_year = $3`,
+      [employeeId, month, year],
+    );
+
+    const breakdown: {
+      loans: { loanId: string; amount: number }[];
+      advances: { advanceId: string; amount: number }[];
+    } = { loans: [], advances: [] };
+
+    let loanEmiDeduction = 0;
+    for (const l of loans) {
+      const emi = Math.min(parseFloat(l.monthly_emi), parseFloat(l.remaining_amount));
+      if (emi > 0) {
+        loanEmiDeduction += emi;
+        breakdown.loans.push({ loanId: l.id, amount: round2(emi) });
+      }
+    }
+
+    let advanceDeduction = 0;
+    for (const a of advances) {
+      const amt = parseFloat(a.remaining_amount);
+      if (amt > 0) {
+        advanceDeduction += amt;
+        breakdown.advances.push({ advanceId: a.id, amount: round2(amt) });
+      }
+    }
+
+    return {
+      loanEmiDeduction: round2(loanEmiDeduction),
+      advanceDeduction: round2(advanceDeduction),
+      breakdown,
     };
   }
 
@@ -614,17 +853,35 @@ export class PayrollService {
 
     return this.dataSource.transaction(async (manager) => {
       const [payroll] = await manager.query<Record<string, unknown>[]>(
+        // Statutory contributions go into columns as well as the deductions
+        // blob: a government filing aggregates across engines and cannot be
+        // asked to parse JSON, and the employer side had no home at all
+        // before this. See F-06 / F-07.
         `INSERT INTO employee_payrolls
            (id, employee_id, period_month, period_year, present_days,
-            gross_salary, deductions, net_salary, updated_at)
-         VALUES (gen_random_uuid(), $1::uuid, $2, $3, $4, $5, $6, $7, NOW()) RETURNING *`,
+            gross_salary, deductions, esic_employee, esic_employer,
+            pf_employee, pf_employer, net_salary, updated_at)
+         VALUES (gen_random_uuid(), $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW()) RETURNING *`,
         [
           employeeId,
           month,
           year,
           preview.billable_days,
           calc.grossSalary,
-          JSON.stringify({ esic: calc.esicEmployee, pf: calc.pfEmployee }),
+          // Every component, not just ESIC + PF — the payslip renders straight
+          // from this, so anything omitted here is invisible to the employee.
+          JSON.stringify({
+            esic: calc.esicEmployee,
+            pf: calc.pfEmployee,
+            professionalTax: calc.ptDeduction,
+            tds: calc.tdsDeduction,
+            loanEmi: calc.loanEmiDeduction,
+            advance: calc.advanceDeduction,
+          }),
+          calc.esicEmployee,
+          calc.esicEmployer,
+          calc.pfEmployee,
+          calc.pfEmployer,
           calc.netSalary,
         ],
       );

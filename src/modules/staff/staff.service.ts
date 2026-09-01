@@ -79,8 +79,25 @@ export class StaffService {
       where: isUuid
         ? { id, deletedAt: null }
         : { staffCode: id, deletedAt: null },
+      include: {
+        // The deposit lives in `deposits` — intake writes it there. The
+        // staff_applicants.deposit_amount/deposit_paid columns default to 0
+        // and false and nothing has ever written them, so the staff detail
+        // screen showed "₹0 Pending" for everyone. Same root cause as F-05.
+        deposits: { orderBy: { createdAt: 'desc' }, take: 1 },
+      },
     });
-    if (row) return toStaffDto(row);
+    if (row) {
+      const deposit = row.deposits?.[0];
+      return {
+        ...toStaffDto(row),
+        deposit_amount: deposit ? Number(deposit.amount) : 0,
+        deposit_paid: deposit ? deposit.status === 'COLLECTED' : false,
+        deposit_status: deposit
+          ? (deposit.event ?? (deposit.status === 'COLLECTED' ? 'PAID' : 'UNPAID'))
+          : 'NONE',
+      };
+    }
 
     // Fall back to internal HR employees table
     const emp = await this.prisma.employee.findFirst({

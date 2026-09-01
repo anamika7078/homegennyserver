@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Param, Body, Query, UseGuards, DefaultValuePipe } from '@nestjs/common';
+import { Controller, Get, Post, Param, Body, Query, Req, UseGuards, DefaultValuePipe } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guards/roles.guard';
@@ -27,11 +27,30 @@ export class DepositController {
   }
 
   @Post(':staffId/event')
-  @ApiOperation({ summary: 'Record deposit event (refund, forfeiture, partial refund)' })
+  @ApiOperation({
+    summary: 'Record deposit event (refund, forfeiture, partial refund)',
+    description:
+      'Resolves the staff member\'s most recent deposit. PARTIAL_REFUND requires refund_amount; ' +
+      'REFUND refunds the full held amount and FORFEITURE refunds nothing. A deposit that is ' +
+      'already resolved is rejected rather than overwritten.',
+  })
   recordEvent(
     @Param('staffId') staffId: string,
-    @Body() body: { event: 'REFUND' | 'FORFEITURE' | 'PARTIAL_REFUND'; notes?: string; scenario_code?: string },
+    @Body() body: {
+      event: 'REFUND' | 'FORFEITURE' | 'PARTIAL_REFUND';
+      notes?: string;
+      scenario_code?: string;
+      refund_amount?: number;
+    },
+    @Req() req: { user?: { id?: string } },
   ) {
-    return this.service.recordDepositEvent(staffId, body.event, body.notes, body.scenario_code);
+    return this.service.recordDepositEvent(
+      staffId,
+      body.event,
+      body.notes,
+      body.scenario_code,
+      body.refund_amount,
+      req.user?.id,
+    );
   }
 }

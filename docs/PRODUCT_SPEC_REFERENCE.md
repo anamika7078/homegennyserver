@@ -216,6 +216,10 @@ gaps found and fixed, live-tested both:
   manually today.
 
 ## 7. Where to go for endpoint-level detail
+- `docs/FINANCE_MODULE_AUDIT.md` — full audit of the finance/payroll domain against §4's payroll
+  rules and §3's Finance role definition: three parallel payroll engines, 18 findings with
+  `file:line` evidence, the end-to-end calculation flow, and an F1–F5 implementation plan. Read it
+  before touching anything under `modules/finance` or `modules/payroll`.
 - `docs/MOBILE_API_REFERENCE.md` — Auth/RM/Staff/Client endpoint list, demo accounts, response shapes.
 - `docs/RM_MOBILE_APP_INTEGRATION_PLAN.md` — screen-by-screen plan mapping the *current* dummy-data Flutter RM feature to real endpoints.
 - `docs/RM_CLAUDE_PROMPT.md` — ready-to-paste implementation prompt (corrected pipeline-stage naming) derived from the plan above.

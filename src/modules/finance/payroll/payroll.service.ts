@@ -2,9 +2,7 @@ import { Injectable, Logger, NotFoundException, BadRequestException } from '@nes
 import { DataSource } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { PayrollService as CorePayrollService } from '../../payroll/payroll.service';
-
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const Razorpay = require('razorpay');
+import { PayoutService, type PayoutResult } from './payout.service';
 
 interface PlacementRow {
   id: string;
@@ -46,28 +44,13 @@ export interface PayrollRecordRow {
 @Injectable()
 export class FinancePayrollService {
   private readonly logger = new Logger(FinancePayrollService.name);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _razorpay: any;
 
   constructor(
     private readonly dataSource: DataSource,
     private readonly config: ConfigService,
     private readonly corePayroll: CorePayrollService,
+    private readonly payouts: PayoutService,
   ) {}
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private getRazorpay(): any {
-    if (!this._razorpay) {
-      const keyId = this.config.get<string>('app.razorpay.keyId', '');
-      const keySecret = this.config.get<string>('app.razorpay.keySecret', '');
-      if (!keyId || keyId.startsWith('YOUR_') || !keySecret || keySecret.startsWith('YOUR_')) {
-        throw new Error('Razorpay credentials not configured.');
-      }
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
-      this._razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
-    }
-    return this._razorpay;
-  }
 
   /** List all payroll records for a given month/year (placement EOR + HR employee payrolls) */
   async listPayrollRuns(month?: number, year?: number): Promise<PayrollRecordRow[]> {
@@ -177,7 +160,7 @@ export class FinancePayrollService {
          sa.full_name,
          p.id AS placement_id,
          p.staff_salary AS monthly_salary,
-         c.full_name AS client_name,
+         c.customer_name AS client_name,
          p.status AS placement_status
        FROM staff_applicants sa
        LEFT JOIN LATERAL (
@@ -187,7 +170,9 @@ export class FinancePayrollService {
          ORDER BY created_at DESC
          LIMIT 1
        ) p ON true
-       LEFT JOIN clients c ON c.id = p.client_id
+       -- placements.client_id is a finance_customers id, not a legacy
+       -- clients id — see invoice.service.ts getInvoice().
+       LEFT JOIN finance_customers c ON c.id = p.client_id
        WHERE UPPER(sa.staff_code) = UPPER($1)
        LIMIT 1`,
       [trimmed],
@@ -449,18 +434,66 @@ export class FinancePayrollService {
     };
   }
 
-  /** Trigger Razorpay disbursement for a specific payroll record (placement OR employee) */
-  async triggerDisbursement(payrollId: string) {
-    // Try placement payroll first
-    const placementRows = await this.dataSource.query<PayrollRecordRow[]>(
-      `SELECT pr.*, sa.full_name AS staff_name, 'PLACEMENT' AS type
+  /**
+   * Approves an EOR payroll record, which is what makes it payable.
+   *
+   * The EOR path had no approval step at all — a cron or a single POST wrote
+   * straight to the database and disbursement would pay whatever was there.
+   * See F-12.
+   */
+  async approvePayrollRecord(payrollId: string, actorId?: string) {
+    const rows = await this.dataSource.query<{ id: string; status: string; net_salary: string }[]>(
+      `SELECT id, status, net_salary FROM payroll_records WHERE id = $1`, [payrollId],
+    );
+    if (!rows.length) throw new NotFoundException(`Payroll record ${payrollId} not found`);
+
+    const current = rows[0].status ?? 'PENDING';
+    if (current !== 'PENDING') {
+      throw new BadRequestException(
+        `Payroll ${payrollId} is ${current}; only a PENDING record can be approved.`,
+      );
+    }
+
+    const [updated] = await this.dataSource.query<Record<string, unknown>[]>(
+      `UPDATE payroll_records
+       SET status = 'APPROVED', approved_by = $1, approved_at = NOW(), locked_at = NOW()
+       WHERE id = $2 RETURNING *`,
+      [actorId ?? null, payrollId],
+    );
+    this.logger.log(`[PAYROLL_APPROVE] ${payrollId} approved by ${actorId ?? 'unknown'}`);
+    return updated;
+  }
+
+  /**
+   * Pays one payroll record out to the staff member's bank account.
+   *
+   * Three things changed here (F-09):
+   *  - it uses RazorpayX Payouts, not Orders. An Order collects money from a
+   *    customer; it never moved a rupee toward the staff member.
+   *  - `disbursed_at` is only stamped when money actually moved. A simulated
+   *    run is recorded as SIMULATED, so nothing downstream reads it as paid.
+   *  - it refuses without bank details rather than "succeeding" with nowhere
+   *    to send the money.
+   *
+   * And one from F-12: an unapproved payroll cannot be paid.
+   */
+  async triggerDisbursement(payrollId: string, actorId?: string) {
+    const placementRows = await this.dataSource.query<(PayrollRecordRow & {
+      status: string; disbursement_status: string; staff_code: string;
+      account_holder_name: string | null; account_number: string | null; ifsc: string | null;
+      razorpay_contact_id: string | null; razorpay_fund_account_id: string | null;
+      bank_account_id: string | null;
+    })[]>(
+      `SELECT pr.*, sa.full_name AS staff_name, sa.staff_code, 'PLACEMENT' AS type,
+              b.id AS bank_account_id, b.account_holder_name, b.account_number, b.ifsc,
+              b.razorpay_contact_id, b.razorpay_fund_account_id
        FROM payroll_records pr
        JOIN staff_applicants sa ON sa.id = pr.staff_id
+       LEFT JOIN staff_bank_accounts b ON b.staff_id = pr.staff_id
        WHERE pr.id = $1`,
       [payrollId],
     );
 
-    // Try employee payroll if not found in placement records
     const employeeRows = !placementRows.length
       ? await this.dataSource.query<PayrollRecordRow[]>(
           `SELECT ep.*, e.full_name AS staff_name, 'EMPLOYEE' AS type
@@ -471,45 +504,180 @@ export class FinancePayrollService {
         )
       : [];
 
-    const record = placementRows[0] ?? employeeRows[0];
+    const record = (placementRows[0] ?? employeeRows[0]) as (PayrollRecordRow & Record<string, any>) | undefined;
     if (!record) throw new NotFoundException(`Payroll record ${payrollId} not found`);
     if (record.disbursed_at) {
-      throw new BadRequestException('Already disbursed: ' + record.disbursement_ref);
+      throw new BadRequestException(`Already disbursed (${record.disbursement_ref ?? 'no reference'}).`);
     }
 
-    // Create a Razorpay order or fallback to simulated disbursement in local/demo mode
-    let ref = `sim_payout_${Date.now()}`;
-    let order: Record<string, unknown> = { id: ref, status: 'simulated', amount: Math.round(parseFloat(record.net_salary) * 100) };
+    const isEmployee = employeeRows.length > 0;
+    const amount = parseFloat(record.net_salary);
+    if (!(amount > 0)) {
+      throw new BadRequestException('Net salary is not a positive amount — nothing to disburse.');
+    }
 
+    // ── F-12 gate ────────────────────────────────────────────────────────────
+    if (!isEmployee && record.status !== 'APPROVED') {
+      throw new BadRequestException(
+        `Payroll ${payrollId} is ${record.status ?? 'PENDING'}. Approve it before disbursing.`,
+      );
+    }
+
+    // ── F-09: refuse rather than pay into nowhere ────────────────────────────
+    if (!isEmployee && !record.account_number) {
+      throw new BadRequestException(
+        `No bank account on file for ${record.staff_code ?? 'this staff member'}. ` +
+        `Add one via POST /finance/payroll/staff/${record.staff_id}/bank-account before disbursing.`,
+      );
+    }
+
+    let result: PayoutResult;
     try {
-      const rz = this.getRazorpay();
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const rzOrder = await rz.orders.create({
-        amount: Math.round(parseFloat(record.net_salary) * 100),
-        currency: 'INR',
-        receipt: payrollId,
-        notes: { payrollId, staffName: record.staff_name },
-      }) as Record<string, unknown>;
-      order = rzOrder;
-      ref = (rzOrder['id'] as string) || ref;
-    } catch (err: any) {
-      this.logger.warn(`[DISBURSEMENT] Razorpay API unavailable (${err.message}). Performing simulated disbursement.`);
+      result = await this.payouts.payout({
+        payrollId,
+        staffName: record.staff_name,
+        staffRef: record.staff_code ?? payrollId,
+        amount,
+        narration: 'HomeGenny Salary',
+        bank: {
+          accountHolderName: record.account_holder_name ?? record.staff_name,
+          accountNumber: record.account_number ?? '',
+          ifsc: record.ifsc ?? '',
+          razorpayContactId: record.razorpay_contact_id,
+          razorpayFundAccountId: record.razorpay_fund_account_id,
+        },
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      if (!isEmployee) {
+        await this.dataSource.query(
+          `UPDATE payroll_records
+           SET status = 'FAILED', disbursement_status = 'FAILED', disbursement_failure_reason = $1
+           WHERE id = $2`,
+          [reason, payrollId],
+        );
+      }
+      throw err;
     }
 
-    // Update the correct table
-    const isEmployee = record.type === 'EMPLOYEE' || employeeRows.length > 0;
+    // Only a genuinely settled payout stamps disbursed_at. PROCESSING and
+    // SIMULATED leave it null, so "has this person been paid?" stays honest.
+    const settled = result.status === 'PAID';
+
     if (isEmployee) {
       await this.dataSource.query(
-        `UPDATE employee_payrolls SET disbursed_at = NOW() WHERE id = $1`,
-        [payrollId],
+        `UPDATE employee_payrolls SET disbursed_at = ${settled ? 'NOW()' : 'NULL'}, status = $1 WHERE id = $2`,
+        [settled ? 'PAID' : 'APPROVED', payrollId],
       );
     } else {
       await this.dataSource.query(
-        `UPDATE payroll_records SET disbursed_at = NOW(), disbursement_ref = $1 WHERE id = $2`,
-        [ref, payrollId],
+        `UPDATE payroll_records
+         SET disbursement_status = $1,
+             disbursement_ref = $2,
+             status = $3,
+             disbursed_at = ${settled ? 'NOW()' : 'disbursed_at'},
+             disbursement_failure_reason = NULL
+         WHERE id = $4`,
+        [result.status, result.reference, settled ? 'PAID' : 'APPROVED', payrollId],
       );
+
+      // Cache the RazorpayX ids so later payouts skip contact/fund-account creation.
+      if (result.contactId && result.fundAccountId && record.bank_account_id) {
+        await this.dataSource.query(
+          `UPDATE staff_bank_accounts
+           SET razorpay_contact_id = $1, razorpay_fund_account_id = $2, updated_at = NOW()
+           WHERE id = $3`,
+          [result.contactId, result.fundAccountId, record.bank_account_id],
+        ).catch(() => undefined);
+      }
     }
 
-    return { payrollId, razorpay_order: order, disbursement_ref: ref };
+    this.logger.log(`[DISBURSEMENT] ${payrollId} → ${result.status} (${result.reference}) by ${actorId ?? 'unknown'}`);
+
+    return {
+      payrollId,
+      disbursement_status: result.status,
+      disbursement_ref: result.reference,
+      settled,
+      // Says plainly why no money moved, instead of returning a fake order.
+      note: result.status === 'SIMULATED' ? this.payouts.configurationHint() : undefined,
+    };
+  }
+
+  // ── Staff bank accounts (F-09) ────────────────────────────────────────────
+
+  /** Never returns a full account number — only enough to recognise it. */
+  async getStaffBankAccount(staffId: string) {
+    const rows = await this.dataSource.query<{
+      id: string; account_holder_name: string; account_number: string; ifsc: string;
+      bank_name: string | null; is_verified: boolean; verified_at: string | null;
+    }[]>(
+      `SELECT id, account_holder_name, account_number, ifsc, bank_name, is_verified, verified_at
+       FROM staff_bank_accounts WHERE staff_id = $1`,
+      [staffId],
+    );
+    if (!rows.length) return null;
+    const r = rows[0];
+    return {
+      id: r.id,
+      account_holder_name: r.account_holder_name,
+      account_number_masked: `••••${r.account_number.slice(-4)}`,
+      ifsc: r.ifsc,
+      bank_name: r.bank_name,
+      is_verified: r.is_verified,
+      verified_at: r.verified_at,
+    };
+  }
+
+  async upsertStaffBankAccount(
+    staffId: string,
+    body: { account_holder_name: string; account_number: string; ifsc: string; bank_name?: string },
+    actorId?: string,
+  ) {
+    const accountNumber = String(body.account_number ?? '').replace(/\s/g, '');
+    const ifsc = String(body.ifsc ?? '').trim().toUpperCase();
+
+    if (!body.account_holder_name?.trim()) {
+      throw new BadRequestException('Account holder name is required.');
+    }
+    if (!/^\d{6,20}$/.test(accountNumber)) {
+      throw new BadRequestException('Account number must be 6–20 digits.');
+    }
+    // Standard IFSC shape: 4 letters, a 0, then 6 alphanumerics. Catching this
+    // here beats discovering it when a payout bounces.
+    if (!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)) {
+      throw new BadRequestException('IFSC must look like ABCD0123456.');
+    }
+
+    const staff = await this.dataSource.query<{ id: string }[]>(
+      `SELECT id FROM staff_applicants WHERE id = $1`, [staffId],
+    );
+    if (!staff.length) throw new NotFoundException(`Staff ${staffId} not found`);
+
+    // Changing the destination invalidates the cached RazorpayX fund account,
+    // which is bound to the old bank details.
+    await this.dataSource.query(
+      `INSERT INTO staff_bank_accounts
+         (id, staff_id, account_holder_name, account_number, ifsc, bank_name, created_by, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW(), NOW())
+       ON CONFLICT (staff_id) DO UPDATE
+       SET account_holder_name = EXCLUDED.account_holder_name,
+           account_number = EXCLUDED.account_number,
+           ifsc = EXCLUDED.ifsc,
+           bank_name = EXCLUDED.bank_name,
+           razorpay_fund_account_id = NULL,
+           is_verified = false,
+           verified_at = NULL,
+           updated_at = NOW()`,
+      [staffId, body.account_holder_name.trim(), accountNumber, ifsc, body.bank_name?.trim() ?? null, actorId ?? null],
+    );
+
+    return this.getStaffBankAccount(staffId);
+  }
+
+  /** Whether the payout rail is live, for the UI to show before anyone clicks. */
+  payoutReadiness() {
+    const configured = this.payouts.isConfigured();
+    return { configured, hint: configured ? null : this.payouts.configurationHint() };
   }
 }

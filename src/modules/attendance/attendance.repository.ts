@@ -6,16 +6,23 @@ import { Prisma } from '@prisma/client';
 export class AttendanceRepository {
   constructor(private readonly prisma: PrismaService) {}
 
+  // UTC, deliberately. `attendance.date` is a Postgres DATE column and Prisma
+  // serialises a JS Date to it by UTC calendar day, so local-midnight bounds in
+  // IST straddle the wrong day. See StaffAttendanceMirrorService.toUtcDateOnly.
   private dayRange(date: Date) {
-    const startOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
-    const endOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+    const startOfDay = new Date(
+      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0),
+    );
+    const endOfDay = new Date(
+      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 23, 59, 59, 999),
+    );
     return { startOfDay, endOfDay };
   }
 
   private parseDateOnly(dateStr: string): Date {
     const [y, m, d] = String(dateStr).split('T')[0].split('-').map(Number);
     if (!y || !m || !d) return new Date(dateStr);
-    return new Date(y, m - 1, d);
+    return new Date(Date.UTC(y, m - 1, d));
   }
 
   async findByEmployeeIdAndDate(employeeId: string, date: Date) {
@@ -35,7 +42,9 @@ export class AttendanceRepository {
   async findEmployeeById(id: string) {
     return this.prisma.employee.findFirst({
       where: { id, deletedAt: null },
-      select: { id: true },
+      // staffApplicantId decides whether this day also has to be mirrored into
+      // the pipeline's staff_daily_attendance (the table payroll counts).
+      select: { id: true, fullName: true, branchId: true, staffApplicantId: true },
     });
   }
 

@@ -87,6 +87,11 @@ export class EmployeesService {
       status: dto.status || 'Active',
       branch: { connect: { id: validBranchId } },
       category: { connect: { id: validCategoryId } },
+      // Set only by EmployeeOnboardingService, when this employee is being
+      // converted out of the S1-S5 pipeline. Direct HR hires leave it null.
+      ...(dto.staffApplicantId
+        ? { staffApplicant: { connect: { id: dto.staffApplicantId } } }
+        : {}),
     };
 
     return this.repo.create(createData);

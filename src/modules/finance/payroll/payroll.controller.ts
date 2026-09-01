@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Param, Query, Body, UseGuards,
+  Controller, Get, Post, Param, Query, Body, Req, UseGuards,
   ParseIntPipe, DefaultValuePipe, Res,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
@@ -91,9 +91,65 @@ export class FinancePayrollController {
     return this.service.confirmPayrollBatch(body.month, body.year);
   }
 
+  @Get('payout-readiness')
+  @ApiOperation({
+    summary: 'Whether real payouts can be made',
+    description:
+      'Returns `{ configured, hint }`. When false, disbursement still runs but records a ' +
+      'SIMULATED result — no money moves. Lets the UI say so before anyone clicks Disburse.',
+  })
+  payoutReadiness() {
+    return this.service.payoutReadiness();
+  }
+
+  @Get('staff/:staffId/bank-account')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: "A staff member's payout account",
+    description: 'The account number comes back masked — only the last four digits.',
+  })
+  getBankAccount(@Param('staffId') staffId: string) {
+    return this.service.getStaffBankAccount(staffId);
+  }
+
+  @Post('staff/:staffId/bank-account')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Add or replace the account salary is paid into',
+    description:
+      'Validates the IFSC shape and account number before saving. Replacing the details clears ' +
+      'the cached RazorpayX fund account, which was bound to the old ones.',
+  })
+  upsertBankAccount(
+    @Param('staffId') staffId: string,
+    @Body() body: { account_holder_name: string; account_number: string; ifsc: string; bank_name?: string },
+    @Req() req: { user?: { id?: string } },
+  ) {
+    return this.service.upsertStaffBankAccount(staffId, body, req.user?.id);
+  }
+
+  @Post(':id/approve')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Approve an EOR payroll record so it can be paid',
+    description:
+      'The EOR path had no approval step — disbursement would pay whatever a cron had written. ' +
+      'Approving locks the record; only an APPROVED record can be disbursed.',
+  })
+  approve(@Param('id') id: string, @Req() req: { user?: { id?: string } }) {
+    return this.service.approvePayrollRecord(id, req.user?.id);
+  }
+
   @Post(':id/disburse')
-  @ApiOperation({ summary: 'Trigger Razorpay disbursement for a payroll record' })
-  disburse(@Param('id') id: string) {
-    return this.service.triggerDisbursement(id);
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Pay a payroll record out to the staff member',
+    description:
+      'Uses RazorpayX Payouts. Requires the record to be APPROVED and the staff member to have ' +
+      'a bank account on file. `disbursed_at` is stamped only when the payout actually settles — ' +
+      'a PROCESSING or SIMULATED result leaves it null.',
+  })
+  disburse(@Param('id') id: string, @Req() req: { user?: { id?: string } }) {
+    return this.service.triggerDisbursement(id, req.user?.id);
   }
 }

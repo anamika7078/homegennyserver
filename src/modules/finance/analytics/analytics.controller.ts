@@ -44,6 +44,17 @@ export class FinanceAnalyticsController {
     return this.service.getBranchPnl();
   }
 
+  @Get('credit-notes')
+  @ApiOperation({
+    summary: 'What has been credited back, by period',
+    description:
+      'Revenue elsewhere is reported net of these. Shown separately so a month with heavy ' +
+      'credits is visible rather than just looking like a weak month.',
+  })
+  creditNotes() {
+    return this.service.getCreditNoteSummary();
+  }
+
   @Get('invoice-aging')
   @ApiOperation({ summary: 'Invoice aging report (overdue buckets)' })
   getInvoiceAging() {

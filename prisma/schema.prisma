@@ -32,26 +32,25 @@ model RolePermission {
 }
 
 model Branch {
-  id               String                  @id @default(uuid()) @db.Uuid
-  name             String                  @db.VarChar(100)
-  city             String                  @db.VarChar(100)
-  state            String                  @db.VarChar(100)
-  gstin            String?                 @db.VarChar(20)
-  address          String?
-  phone            String?                 @db.VarChar(20)
-  email            String?                 @db.VarChar(100)
-  feeStructure     Json?                   @default("{}") @map("fee_structure")
-  agreementTemplate String?                @map("agreement_template")
-  isActive         Boolean                 @default(true) @map("is_active")
-  createdAt        DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime                @updatedAt @map("updated_at") @db.Timestamptz(6)
-  financialReports BranchFinancialReport[]
-  employees        Employee[]
-  placements       Placement[]
-  staffApplicants  StaffApplicant[]
-  dailyAttendance  StaffDailyAttendance[]
-  users            User[]
-  salaryStructures       SalaryStructure[]
+  id                       String                   @id @default(uuid()) @db.Uuid
+  name                     String                   @db.VarChar(100)
+  city                     String                   @db.VarChar(100)
+  state                    String                   @db.VarChar(100)
+  gstin                    String?                  @db.VarChar(20)
+  address                  String?
+  phone                    String?                  @db.VarChar(20)
+  email                    String?                  @db.VarChar(100)
+  feeStructure             Json?                    @default("{}") @map("fee_structure")
+  agreementTemplate        String?                  @map("agreement_template")
+  isActive                 Boolean                  @default(true) @map("is_active")
+  createdAt                DateTime                 @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime                 @updatedAt @map("updated_at") @db.Timestamptz(6)
+  employees                Employee[]
+  placements               Placement[]
+  staffApplicants          StaffApplicant[]
+  dailyAttendance          StaffDailyAttendance[]
+  users                    User[]
+  salaryStructures         SalaryStructure[]
   payrollProcessingBatches PayrollProcessingBatch[]
 
   @@map("branches")
@@ -123,13 +122,15 @@ model StaffApplicant {
   careLogs               CareLog[]
   deferredRecords        DeferredRecord[]
   deployments            Deployment[]
+  employeeRecord         Employee?              @relation("EmployeeStaffApplicant")
   deposits               Deposit[]
+  bankAccount            StaffBankAccount?
   escalationLogs         EscalationLog[]
   incidents              Incident[]
   medicationLogs         MedicationLog[]
-  payrollEntries         PayrollEntry[]
+
   pipelineEvents         PipelineEvent[]
-  salaryLedgers          SalaryLedger[]
+
   scenarioLogs           ScenarioLog[]
   shiftLogs              ShiftLog[]
   assignedRm             User?                  @relation("AssignedRm", fields: [assignedRmId], references: [id])
@@ -327,19 +328,19 @@ model BatchEnrollment {
 }
 
 model Agreement {
-  id          String          @id @default(uuid()) @db.Uuid
-  staffId     String?         @map("staff_id") @db.Uuid
-  clientId    String?         @map("client_id") @db.Uuid
-  placementId String?         @map("placement_id") @db.Uuid
-  type        String          @db.VarChar(40)
-  status      AgreementStatus @default(PENDING)
-  signatures  Json            @default("[]")
-  pdfUrl      String?         @map("pdf_url")
-  otpVerified Boolean         @default(false) @map("otp_verified")
-  rejectedAt  DateTime?       @map("rejected_at") @db.Timestamptz(6)
-  metadata    Json            @default("{}")
-  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id          String           @id @default(uuid()) @db.Uuid
+  staffId     String?          @map("staff_id") @db.Uuid
+  clientId    String?          @map("client_id") @db.Uuid
+  placementId String?          @map("placement_id") @db.Uuid
+  type        String           @db.VarChar(40)
+  status      AgreementStatus  @default(PENDING)
+  signatures  Json             @default("[]")
+  pdfUrl      String?          @map("pdf_url")
+  otpVerified Boolean          @default(false) @map("otp_verified")
+  rejectedAt  DateTime?        @map("rejected_at") @db.Timestamptz(6)
+  metadata    Json             @default("{}")
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
   // Was ClientProfile (`clients` table) — the same identity-mismatch bug fixed
   // for SOW/Indemnity/Incidents earlier: real CLIENT logins are linked to
   // FinanceCustomer (via userId), placements.client_id/sow.client_id are that
@@ -347,7 +348,7 @@ model Agreement {
   // a real FinanceCustomer id would FK-violate on insert. No agreements rows
   // existed anywhere (local or prod) when this was fixed, so no migration risk.
   client      FinanceCustomer? @relation(fields: [clientId], references: [id])
-  staff       StaffApplicant? @relation(fields: [staffId], references: [id])
+  staff       StaffApplicant?  @relation(fields: [staffId], references: [id])
 
   @@index([staffId])
   @@map("agreements")
@@ -377,25 +378,28 @@ model Deployment {
 }
 
 model Placement {
-  id             String          @id @default(uuid()) @db.Uuid
-  staffId        String          @map("staff_id") @db.Uuid
-  clientId       String          @map("client_id") @db.Uuid
-  branchId       String          @map("branch_id") @db.Uuid
-  rmId           String?         @map("rm_id") @db.Uuid
-  status         PlacementStatus @default(TRIAL)
-  trialStartDate DateTime?       @map("trial_start_date") @db.Date
-  trialEndDate   DateTime?       @map("trial_end_date") @db.Date
-  staffSalary    Decimal?        @map("staff_salary") @db.Decimal(10, 2)
-  managementFee  Decimal?        @map("management_fee") @db.Decimal(10, 2)
+  id               String          @id @default(uuid()) @db.Uuid
+  staffId          String          @map("staff_id") @db.Uuid
+  clientId         String          @map("client_id") @db.Uuid
+  branchId         String          @map("branch_id") @db.Uuid
+  rmId             String?         @map("rm_id") @db.Uuid
+  status           PlacementStatus @default(TRIAL)
+  trialStartDate   DateTime?       @map("trial_start_date") @db.Date
+  trialEndDate     DateTime?       @map("trial_end_date") @db.Date
+  /// When the trial was confirmed. The late-exit fee band depends on how long
+  /// after this the exit happened, and nothing recorded it before. See F-17.
+  confirmedAt      DateTime?       @map("confirmed_at") @db.Timestamptz(6)
+  staffSalary      Decimal?        @map("staff_salary") @db.Decimal(10, 2)
+  managementFee    Decimal?        @map("management_fee") @db.Decimal(10, 2)
   // Written by exit() (placement.service.ts) — used to silently no-op via a
   // raw-SQL catch fallback because these columns never existed until now.
-  exitDate           DateTime? @map("exit_date") @db.Date
-  exitScenarioCode   String?   @map("exit_scenario_code") @db.VarChar(20)
-  metadata       Json            @default("{}")
-  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
-  payrolls       PayrollRecord[]
-  branch         Branch          @relation(fields: [branchId], references: [id])
+  exitDate         DateTime?       @map("exit_date") @db.Date
+  exitScenarioCode String?         @map("exit_scenario_code") @db.VarChar(20)
+  metadata         Json            @default("{}")
+  createdAt        DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  payrolls         PayrollRecord[]
+  branch           Branch          @relation(fields: [branchId], references: [id])
 
   @@map("placements")
 }
@@ -451,6 +455,29 @@ model EscalationLog {
   @@map("escalation_logs")
 }
 
+/// Where a staff member's salary is actually sent.
+///
+/// Payouts had nowhere to read bank details from — only `EmployeeSalaryProfile`
+/// had them, and that is the HR side, not pipeline staff. See F-09.
+model StaffBankAccount {
+  id                    String         @id @default(uuid()) @db.Uuid
+  staffId               String         @unique @map("staff_id") @db.Uuid
+  accountHolderName     String         @map("account_holder_name") @db.VarChar(200)
+  accountNumber         String         @map("account_number") @db.VarChar(40)
+  ifsc                  String         @db.VarChar(20)
+  bankName              String?        @map("bank_name") @db.VarChar(160)
+  isVerified            Boolean        @default(false) @map("is_verified")
+  verifiedAt            DateTime?      @map("verified_at") @db.Timestamptz(6)
+  razorpayFundAccountId String?        @map("razorpay_fund_account_id") @db.VarChar(100)
+  razorpayContactId     String?        @map("razorpay_contact_id") @db.VarChar(100)
+  createdBy             String?        @map("created_by") @db.Uuid
+  createdAt             DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  staff                 StaffApplicant @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@map("staff_bank_accounts")
+}
+
 model Deposit {
   id          String         @id @default(uuid()) @db.Uuid
   staffId     String         @map("staff_id") @db.Uuid
@@ -458,11 +485,20 @@ model Deposit {
   status      String         @default("PENDING") @db.VarChar(20)
   paymentRef  String?        @map("payment_ref") @db.VarChar(100)
   collectedAt DateTime?      @map("collected_at") @db.Timestamptz(6)
+  // Refund / forfeiture used to be recorded on staff_applicants.metadata —
+  // i.e. not on the deposit it described, and unreadable by anything that
+  // started from this table. See F-05 in FINANCE_MODULE_AUDIT.
+  event             String?   @map("event") @db.VarChar(20)
+  eventAt           DateTime? @map("event_at") @db.Timestamptz(6)
+  eventNotes        String?   @map("event_notes")
+  eventScenarioCode String?   @map("event_scenario_code") @db.VarChar(20)
+  refundAmount      Decimal?  @map("refund_amount") @db.Decimal(10, 2)
+  recordedBy        String?   @map("recorded_by") @db.Uuid
   metadata    Json           @default("{}")
   createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   staff       StaffApplicant @relation(fields: [staffId], references: [id])
-  refunds     Refund[]
 
+  @@index([staffId])
   @@map("deposits")
 }
 
@@ -484,6 +520,17 @@ model PayrollRecord {
   shiftDays         Int?      @map("shift_days")
   client_invoice_id String?   @db.Uuid
   disbursement_ref  String?   @db.VarChar(100)
+  // The EOR path had no approval step, so disbursement paid whatever a cron
+  // had written. Only an APPROVED record is payable now. See F-12.
+  status            String    @default("PENDING") @db.VarChar(20)
+  approvedBy        String?   @map("approved_by") @db.Uuid
+  approvedAt        DateTime? @map("approved_at") @db.Timestamptz(6)
+  lockedAt          DateTime? @map("locked_at") @db.Timestamptz(6)
+  // NOT_STARTED / SIMULATED / PROCESSING / PAID / FAILED. Kept separate from
+  // `status` because a payout settles asynchronously — and `disbursed_at` is
+  // stamped only on PAID, so it never claims money moved when it did not (F-09).
+  disbursementStatus        String  @default("NOT_STARTED") @map("disbursement_status") @db.VarChar(20)
+  disbursementFailureReason String? @map("disbursement_failure_reason")
   placement         Placement @relation(fields: [placementId], references: [id])
 
   @@map("payroll_records")
@@ -491,14 +538,42 @@ model PayrollRecord {
 
 model Invoice {
   id                   String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  placementId          String            @map("placement_id") @db.Uuid
+  // Nullable since F-15: a consolidated invoice covers every placement a
+  // customer has for the month, so it belongs to none of them individually.
+  placementId          String?           @map("placement_id") @db.Uuid
   clientId             String            @map("client_id") @db.Uuid
   invoiceNumber        String            @unique @map("invoice_number") @db.VarChar(50)
+  invoiceSeq           Int?              @map("invoice_seq")
+  isConsolidated       Boolean           @default(false) @map("is_consolidated")
+  // Tax-invoice fields (F-14). `documentType` is BILL_OF_SUPPLY until a valid
+  // supplier GSTIN is configured — the correct document for an unregistered
+  // supplier, rather than a Tax Invoice with a missing number on it.
+  documentType         String            @default("BILL_OF_SUPPLY") @map("document_type") @db.VarChar(20)
+  supplierGstin        String?           @map("supplier_gstin") @db.VarChar(20)
+  supplierState        String?           @map("supplier_state") @db.VarChar(100)
+  recipientGstin       String?           @map("recipient_gstin") @db.VarChar(20)
+  recipientState       String?           @map("recipient_state") @db.VarChar(100)
+  placeOfSupply        String?           @map("place_of_supply") @db.VarChar(100)
+  sacCode              String?           @map("sac_code") @db.VarChar(20)
+  /// Only the management fee is a taxable supply — salary and employer
+  /// contributions are a reimbursement.
+  taxableValue         Decimal           @default(0) @map("taxable_value") @db.Decimal(10, 2)
+  cgstAmount           Decimal           @default(0) @map("cgst_amount") @db.Decimal(10, 2)
+  sgstAmount           Decimal           @default(0) @map("sgst_amount") @db.Decimal(10, 2)
+  igstAmount           Decimal           @default(0) @map("igst_amount") @db.Decimal(10, 2)
+  /// Running total credited back against this invoice, so a partial credit
+  /// can be netted without summing credit_notes on every read. See F-18.
+  creditedAmount       Decimal           @default(0) @map("credited_amount") @db.Decimal(10, 2)
   periodMonth          Int               @map("period_month")
   periodYear           Int               @map("period_year")
   staffSalaryComponent Decimal           @map("staff_salary_component") @db.Decimal(10, 2)
   managementFee        Decimal           @map("management_fee") @db.Decimal(10, 2)
   gstAmount            Decimal           @map("gst_amount") @db.Decimal(10, 2)
+  // Billed to the client inside total_amount but previously itemised nowhere,
+  // so the invoice's own line items summed to less than its total. Stored so
+  // the invoice can be reconstructed exactly. See F-03 in FINANCE_MODULE_AUDIT.
+  esicEmployer         Decimal           @default(0) @map("esic_employer") @db.Decimal(10, 2)
+  pfEmployer           Decimal           @default(0) @map("pf_employer") @db.Decimal(10, 2)
   totalAmount          Decimal           @map("total_amount") @db.Decimal(10, 2)
   dueDate              DateTime          @map("due_date") @db.Date
   paidAt               DateTime?         @map("paid_at") @db.Timestamptz(6)
@@ -509,6 +584,7 @@ model Invoice {
   items                InvoiceItem[]
   payments             InvoicePayment[]
   reminders            PaymentReminder[]
+  creditNotes          CreditNote[]
 
   @@map("client_invoices")
 }
@@ -798,63 +874,8 @@ model LoginAudit {
   @@map("login_audits")
 }
 
-model PayrollBatch {
-  id          String         @id @default(uuid()) @db.Uuid
-  batchNumber String         @unique @map("batch_number") @db.VarChar(50)
-  month       Int
-  year        Int
-  status      String         @default("DRAFT") @db.VarChar(20)
-  totalGross  Decimal        @default(0) @map("total_gross") @db.Decimal(12, 2)
-  totalNet    Decimal        @default(0) @map("total_net") @db.Decimal(12, 2)
-  totalEsic   Decimal        @default(0) @map("total_esic") @db.Decimal(12, 2)
-  totalPf     Decimal        @default(0) @map("total_pf") @db.Decimal(12, 2)
-  createdBy   String?        @map("created_by") @db.Uuid
-  approvedBy  String?        @map("approved_by") @db.Uuid
-  approvedAt  DateTime?      @map("approved_at") @db.Timestamptz(6)
-  processedAt DateTime?      @map("processed_at") @db.Timestamptz(6)
-  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
-  entries     PayrollEntry[]
 
-  @@map("payroll_batches")
-}
 
-model PayrollEntry {
-  id               String          @id @default(uuid()) @db.Uuid
-  batchId          String          @map("batch_id") @db.Uuid
-  staffId          String          @map("staff_id") @db.Uuid
-  branchId         String?         @map("branch_id") @db.Uuid
-  shiftDays        Int             @default(0) @map("shift_days")
-  grossSalary      Decimal         @default(0) @map("gross_salary") @db.Decimal(10, 2)
-  esicEmployee     Decimal         @default(0) @map("esic_employee") @db.Decimal(10, 2)
-  esicEmployer     Decimal         @default(0) @map("esic_employer") @db.Decimal(10, 2)
-  pfEmployee       Decimal         @default(0) @map("pf_employee") @db.Decimal(10, 2)
-  pfEmployer       Decimal         @default(0) @map("pf_employer") @db.Decimal(10, 2)
-  netSalary        Decimal         @default(0) @map("net_salary") @db.Decimal(10, 2)
-  status           String          @default("PENDING") @db.VarChar(20)
-  razorpayPayoutId String?         @map("razorpay_payout_id") @db.VarChar(100)
-  razorpayStatus   String?         @map("razorpay_status") @db.VarChar(50)
-  paymentDate      DateTime?       @map("payment_date") @db.Timestamptz(6)
-  metadata         Json            @default("{}")
-  createdAt        DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
-  batch            PayrollBatch    @relation(fields: [batchId], references: [id])
-  staff            StaffApplicant  @relation(fields: [staffId], references: [id])
-  payslip          PayrollPayslip?
-
-  @@map("payroll_entries")
-}
-
-model PayrollPayslip {
-  id          String       @id @default(uuid()) @db.Uuid
-  entryId     String       @unique @map("entry_id") @db.Uuid
-  payslipUrl  String?      @map("payslip_url")
-  generatedAt DateTime     @default(now()) @map("generated_at") @db.Timestamptz(6)
-  metadata    Json         @default("{}")
-  entry       PayrollEntry @relation(fields: [entryId], references: [id])
-
-  @@map("payroll_payslips")
-}
 
 model InvoiceItem {
   id          String   @id @default(uuid()) @db.Uuid
@@ -862,6 +883,13 @@ model InvoiceItem {
   description String
   amount      Decimal  @db.Decimal(10, 2)
   isTaxable   Boolean  @default(false) @map("is_taxable")
+  // Which staff member this line is for — a consolidated invoice groups its
+  // items per person, so the client can see what each one cost (F-15).
+  staffId     String?  @map("staff_id") @db.Uuid
+  staffName   String?  @map("staff_name") @db.VarChar(200)
+  placementId String?  @map("placement_id") @db.Uuid
+  sacCode     String?  @map("sac_code") @db.VarChar(20)
+  sortOrder   Int      @default(0) @map("sort_order")
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   invoice     Invoice  @relation(fields: [invoiceId], references: [id])
 
@@ -900,19 +928,6 @@ model RazorpayTransaction {
   @@map("razorpay_transactions")
 }
 
-model SalaryLedger {
-  id          String         @id @default(uuid()) @db.Uuid
-  staffId     String         @map("staff_id") @db.Uuid
-  date        DateTime       @db.Date
-  shiftId     String?        @map("shift_id") @db.Uuid
-  amount      Decimal        @db.Decimal(10, 2)
-  type        String         @default("CREDIT") @db.VarChar(20)
-  description String?
-  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
-  staff       StaffApplicant @relation(fields: [staffId], references: [id])
-
-  @@map("salary_ledgers")
-}
 
 model EsicReport {
   id                        String    @id @default(uuid()) @db.Uuid
@@ -925,6 +940,8 @@ model EsicReport {
   status                    String    @default("DRAFT") @db.VarChar(20)
   fileUrl                   String?   @map("file_url")
   generatedAt               DateTime? @map("generated_at") @db.Timestamptz(6)
+  mismatchCount             Int       @default(0) @map("mismatch_count")
+  bySource                  Json      @default("{}") @map("by_source")
   createdAt                 DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt                 DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -943,6 +960,8 @@ model PfReport {
   status                    String    @default("DRAFT") @db.VarChar(20)
   ecrFileUrl                String?   @map("ecr_file_url")
   generatedAt               DateTime? @map("generated_at") @db.Timestamptz(6)
+  mismatchCount             Int       @default(0) @map("mismatch_count")
+  bySource                  Json      @default("{}") @map("by_source")
   createdAt                 DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt                 DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -950,22 +969,6 @@ model PfReport {
   @@map("pf_reports")
 }
 
-model BranchFinancialReport {
-  id           String   @id @default(uuid()) @db.Uuid
-  branchId     String   @map("branch_id") @db.Uuid
-  month        Int
-  year         Int
-  totalRevenue Decimal  @default(0) @map("total_revenue") @db.Decimal(12, 2)
-  totalPayroll Decimal  @default(0) @map("total_payroll") @db.Decimal(12, 2)
-  totalGst     Decimal  @default(0) @map("total_gst") @db.Decimal(12, 2)
-  profitMargin Decimal  @default(0) @map("profit_margin") @db.Decimal(5, 2)
-  metadata     Json     @default("{}")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  branch       Branch   @relation(fields: [branchId], references: [id])
-
-  @@unique([branchId, month, year])
-  @@map("branch_financial_reports")
-}
 
 model PaymentReminder {
   id        String   @id @default(uuid()) @db.Uuid
@@ -973,27 +976,16 @@ model PaymentReminder {
   type      String   @db.VarChar(50)
   sentAt    DateTime @default(now()) @map("sent_at") @db.Timestamptz(6)
   status    String   @default("SENT") @db.VarChar(20)
-  channel   String   @db.VarChar(20)
+  channel   String   @default("IN_APP") @db.VarChar(20)
+  /// Days past due this reminder was for — unique per invoice so the same
+  /// client is never chased twice for the same milestone (F-13).
+  reminderDay Int    @default(0) @map("reminder_day")
   metadata  Json     @default("{}")
   invoice   Invoice  @relation(fields: [invoiceId], references: [id])
 
   @@map("payment_reminders")
 }
 
-model Refund {
-  id          String    @id @default(uuid()) @db.Uuid
-  depositId   String?   @map("deposit_id") @db.Uuid
-  amount      Decimal   @db.Decimal(10, 2)
-  reason      String
-  status      String    @default("PENDING") @db.VarChar(20)
-  approvedBy  String?   @map("approved_by") @db.Uuid
-  processedAt DateTime? @map("processed_at") @db.Timestamptz(6)
-  metadata    Json      @default("{}")
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  deposit     Deposit?  @relation(fields: [depositId], references: [id])
-
-  @@map("refunds")
-}
 
 model SupportTicket {
   id          String   @id @default(uuid()) @db.Uuid
@@ -1077,42 +1069,48 @@ model EmployeeCategory {
 }
 
 model Employee {
-  id               String               @id @default(uuid()) @db.Uuid
-  userId           String?              @unique @map("user_id") @db.Uuid
-  employeeId       String               @unique @map("employee_id") @db.VarChar(50)
-  fullName         String               @map("full_name") @db.VarChar(200)
-  profilePhoto     String?              @map("profile_photo")
-  mobile           String               @db.VarChar(20)
-  alternateMobile  String?              @map("alternate_mobile") @db.VarChar(20)
-  email            String?              @db.VarChar(200)
-  dateOfBirth      DateTime             @map("date_of_birth") @db.Date
-  gender           String               @db.VarChar(20)
-  bloodGroup       String?              @map("blood_group") @db.VarChar(10)
-  maritalStatus    String?              @map("marital_status") @db.VarChar(20)
+  id               String                 @id @default(uuid()) @db.Uuid
+  userId           String?                @unique @map("user_id") @db.Uuid
+  // Set when this employee was onboarded out of the RM pipeline (S5_DEPLOY ->
+  // employee). Null for office/back-office hires who never went through S1-S5.
+  // Nullable + @unique is deliberate: Postgres treats NULLs as distinct, so any
+  // number of direct hires coexist while each applicant converts at most once.
+  staffApplicantId String?                @unique @map("staff_applicant_id") @db.Uuid
+  employeeId       String                 @unique @map("employee_id") @db.VarChar(50)
+  fullName         String                 @map("full_name") @db.VarChar(200)
+  profilePhoto     String?                @map("profile_photo")
+  mobile           String                 @db.VarChar(20)
+  alternateMobile  String?                @map("alternate_mobile") @db.VarChar(20)
+  email            String?                @db.VarChar(200)
+  dateOfBirth      DateTime               @map("date_of_birth") @db.Date
+  gender           String                 @db.VarChar(20)
+  bloodGroup       String?                @map("blood_group") @db.VarChar(10)
+  maritalStatus    String?                @map("marital_status") @db.VarChar(20)
   address          String
-  city             String               @db.VarChar(100)
-  state            String               @db.VarChar(100)
-  pincode          String               @db.VarChar(20)
-  emergencyContact Json                 @map("emergency_contact")
-  joiningDate      DateTime             @map("joining_date") @db.Date
-  branchId         String               @map("branch_id") @db.Uuid
-  department       String               @db.VarChar(100)
-  designation      String               @db.VarChar(100)
-  categoryId       String               @map("category_id") @db.Uuid
-  reportingManager String?              @map("reporting_manager") @db.VarChar(100)
-  employmentType   String               @map("employment_type") @db.VarChar(50)
-  salary           Decimal              @db.Decimal(10, 2)
-  status           String               @db.VarChar(50)
-  createdAt        DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
-  deletedAt        DateTime?            @map("deleted_at") @db.Timestamptz(6)
+  city             String                 @db.VarChar(100)
+  state            String                 @db.VarChar(100)
+  pincode          String                 @db.VarChar(20)
+  emergencyContact Json                   @map("emergency_contact")
+  joiningDate      DateTime               @map("joining_date") @db.Date
+  branchId         String                 @map("branch_id") @db.Uuid
+  department       String                 @db.VarChar(100)
+  designation      String                 @db.VarChar(100)
+  categoryId       String                 @map("category_id") @db.Uuid
+  reportingManager String?                @map("reporting_manager") @db.VarChar(100)
+  employmentType   String                 @map("employment_type") @db.VarChar(50)
+  salary           Decimal                @db.Decimal(10, 2)
+  status           String                 @db.VarChar(50)
+  createdAt        DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime               @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt        DateTime?              @map("deleted_at") @db.Timestamptz(6)
   attendance       EmployeeAttendance[]
   batchEnrollments BatchEnrollment[]
   documents        EmployeeDocument[]
   payrolls         EmployeePayroll[]
-  branch           Branch               @relation(fields: [branchId], references: [id])
-  category         EmployeeCategory     @relation(fields: [categoryId], references: [id])
-  user             User?                @relation(fields: [userId], references: [id])
+  branch           Branch                 @relation(fields: [branchId], references: [id])
+  category         EmployeeCategory       @relation(fields: [categoryId], references: [id])
+  user             User?                  @relation(fields: [userId], references: [id])
+  staffApplicant   StaffApplicant?        @relation("EmployeeStaffApplicant", fields: [staffApplicantId], references: [id])
   salaryProfile    EmployeeSalaryProfile?
   salaryRevisions  SalaryRevision[]
   bonusRecords     BonusRecord[]
@@ -1122,6 +1120,7 @@ model Employee {
   salaryAdvances   SalaryAdvance[]
   payrollDetails   PayrollDetail[]
   payslips         PayslipDocument[]
+  taxProfile       EmployeeTaxProfile?
 
   @@map("employees")
 }
@@ -1173,6 +1172,13 @@ model EmployeePayroll {
   presentDays Decimal   @map("present_days") @db.Decimal(5, 2)
   grossSalary Decimal   @map("gross_salary") @db.Decimal(10, 2)
   deductions  Json      @default("{}")
+  // Statutory contributions as columns, not only inside the deductions blob —
+  // a government filing has to be able to aggregate them without parsing JSON,
+  // and the employer side was never recorded at all. See F-06 / F-07.
+  esicEmployee Decimal  @default(0) @map("esic_employee") @db.Decimal(10, 2)
+  esicEmployer Decimal  @default(0) @map("esic_employer") @db.Decimal(10, 2)
+  pfEmployee   Decimal  @default(0) @map("pf_employee") @db.Decimal(10, 2)
+  pfEmployer   Decimal  @default(0) @map("pf_employer") @db.Decimal(10, 2)
   netSalary   Decimal   @map("net_salary") @db.Decimal(10, 2)
   status      String    @default("PENDING") @db.VarChar(20)
   disbursedAt DateTime? @map("disbursed_at") @db.Timestamptz(6)
@@ -1196,6 +1202,9 @@ model FinanceCustomer {
   gstn                            String?                           @db.VarChar(20)
   billNoPrefix                    String                            @map("bill_no_prefix") @db.VarChar(30)
   billSeq                         Int                               @default(0) @map("bill_seq")
+  /// Credit notes take a separate sequence from invoices — mixing them into
+  /// one series is what makes a numbering audit fail. See F-18.
+  creditNoteSeq                   Int                               @default(0) @map("credit_note_seq")
   unitCode                        String                            @unique @map("unit_code") @db.VarChar(20)
   unitName                        String                            @map("unit_name") @db.VarChar(255)
   status                          String                            @default("ACTIVE") @db.VarChar(20)
@@ -1207,6 +1216,7 @@ model FinanceCustomer {
   finance_quotations              finance_quotations[]
   finance_rate_cards              finance_rate_cards[]
   agreements                      Agreement[]
+  branches                        FinanceCustomerBranch[]
 
   @@index([unitCode])
   @@index([panCard])
@@ -1362,6 +1372,21 @@ model finance_rate_cards {
 
 model finance_wage_config {
   id                       String                     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // Which components this wage configuration switches on. Present in the
+  // database with 21 rows behind them, but never declared here — so
+  // `prisma db push` would have dropped all eleven columns and the data in
+  // them. Declared now so the schema matches what actually exists.
+  pf_applicable            Boolean                    @default(true)
+  esic_applicable          Boolean                    @default(true)
+  bonus_applicable         Boolean                    @default(true)
+  bonus_frequency          String                     @default("monthly") @db.VarChar(10)
+  lwf_applicable           Boolean                    @default(true)
+  uniform_applicable       Boolean                    @default(true)
+  relieving_applicable     Boolean                    @default(true)
+  nfh_applicable           Boolean                    @default(true)
+  shift_pattern            String                     @default("8") @db.VarChar(10)
+  gst_applicable           Boolean                    @default(true)
+  gst_type                 String                     @default("intra_state") @db.VarChar(20)
   state                    String                     @db.VarChar(100)
   zone                     String                     @db.VarChar(100)
   effective_date           DateTime                   @db.Date
@@ -1436,29 +1461,29 @@ enum BankTransferStatus {
 }
 
 model SalaryStructure {
-  id             String            @id @default(uuid()) @db.Uuid
-  templateName   String            @map("template_name") @db.VarChar(150)
-  department     String            @db.VarChar(100)
-  designation    String            @db.VarChar(100)
-  employmentType String            @map("employment_type") @db.VarChar(50)
-  basicSalary    Decimal           @map("basic_salary") @db.Decimal(10, 2)
-  hra            Decimal           @default(0) @db.Decimal(10, 2)
-  specialAllowance Decimal         @default(0) @map("special_allowance") @db.Decimal(10, 2)
-  medical        Decimal           @default(0) @db.Decimal(10, 2)
-  travel         Decimal           @default(0) @db.Decimal(10, 2)
-  internet       Decimal           @default(0) @db.Decimal(10, 2)
-  foodAllowance  Decimal           @default(0) @map("food_allowance") @db.Decimal(10, 2)
-  bonus          Decimal           @default(0) @db.Decimal(10, 2)
-  professionalTax Decimal          @default(0) @map("professional_tax") @db.Decimal(10, 2)
-  pf             Decimal           @default(0) @db.Decimal(10, 2)
-  esic           Decimal           @default(0) @db.Decimal(10, 2)
-  tds            Decimal           @default(0) @db.Decimal(10, 2)
-  effectiveDate  DateTime          @default(now()) @map("effective_date") @db.Date
-  status         String            @default("ACTIVE") @db.VarChar(20)
-  branchId       String?           @map("branch_id") @db.Uuid
-  branch         Branch?           @relation(fields: [branchId], references: [id])
-  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id               String   @id @default(uuid()) @db.Uuid
+  templateName     String   @map("template_name") @db.VarChar(150)
+  department       String   @db.VarChar(100)
+  designation      String   @db.VarChar(100)
+  employmentType   String   @map("employment_type") @db.VarChar(50)
+  basicSalary      Decimal  @map("basic_salary") @db.Decimal(10, 2)
+  hra              Decimal  @default(0) @db.Decimal(10, 2)
+  specialAllowance Decimal  @default(0) @map("special_allowance") @db.Decimal(10, 2)
+  medical          Decimal  @default(0) @db.Decimal(10, 2)
+  travel           Decimal  @default(0) @db.Decimal(10, 2)
+  internet         Decimal  @default(0) @db.Decimal(10, 2)
+  foodAllowance    Decimal  @default(0) @map("food_allowance") @db.Decimal(10, 2)
+  bonus            Decimal  @default(0) @db.Decimal(10, 2)
+  professionalTax  Decimal  @default(0) @map("professional_tax") @db.Decimal(10, 2)
+  pf               Decimal  @default(0) @db.Decimal(10, 2)
+  esic             Decimal  @default(0) @db.Decimal(10, 2)
+  tds              Decimal  @default(0) @db.Decimal(10, 2)
+  effectiveDate    DateTime @default(now()) @map("effective_date") @db.Date
+  status           String   @default("ACTIVE") @db.VarChar(20)
+  branchId         String?  @map("branch_id") @db.Uuid
+  branch           Branch?  @relation(fields: [branchId], references: [id])
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   components       SalaryComponent[]
   employeeProfiles EmployeeSalaryProfile[]
@@ -1467,53 +1492,53 @@ model SalaryStructure {
 }
 
 model SalaryComponent {
-  id                String              @id @default(uuid()) @db.Uuid
-  structureId       String              @map("structure_id") @db.Uuid
-  structure         SalaryStructure     @relation(fields: [structureId], references: [id], onDelete: Cascade)
-  name              String              @db.VarChar(100)
-  type              SalaryComponentType @default(EARNING)
-  calculationType   CalculationType     @default(FLAT) @map("calculation_type")
-  amount            Decimal             @default(0) @db.Decimal(10, 2)
-  percentageValue   Decimal?            @map("percentage_value") @db.Decimal(5, 2)
-  isTaxable         Boolean             @default(true) @map("is_taxable")
-  isMandatory       Boolean             @default(false) @map("is_mandatory")
-  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  id              String              @id @default(uuid()) @db.Uuid
+  structureId     String              @map("structure_id") @db.Uuid
+  structure       SalaryStructure     @relation(fields: [structureId], references: [id], onDelete: Cascade)
+  name            String              @db.VarChar(100)
+  type            SalaryComponentType @default(EARNING)
+  calculationType CalculationType     @default(FLAT) @map("calculation_type")
+  amount          Decimal             @default(0) @db.Decimal(10, 2)
+  percentageValue Decimal?            @map("percentage_value") @db.Decimal(5, 2)
+  isTaxable       Boolean             @default(true) @map("is_taxable")
+  isMandatory     Boolean             @default(false) @map("is_mandatory")
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@map("salary_components")
 }
 
 model EmployeeSalaryProfile {
-  id               String           @id @default(uuid()) @db.Uuid
-  employeeId       String           @unique @map("employee_id") @db.Uuid
-  employee         Employee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  templateId       String?          @map("template_id") @db.Uuid
-  template         SalaryStructure? @relation(fields: [templateId], references: [id])
-  grossSalary      Decimal          @default(0) @map("gross_salary") @db.Decimal(12, 2)
-  bankName         String?          @map("bank_name") @db.VarChar(100)
-  accountNumber    String?          @map("account_number") @db.VarChar(50)
-  ifsc             String?          @db.VarChar(20)
-  pan              String?          @db.VarChar(20)
-  uan              String?          @db.VarChar(30)
-  esicNumber       String?          @map("esic_number") @db.VarChar(30)
-  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id            String           @id @default(uuid()) @db.Uuid
+  employeeId    String           @unique @map("employee_id") @db.Uuid
+  employee      Employee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  templateId    String?          @map("template_id") @db.Uuid
+  template      SalaryStructure? @relation(fields: [templateId], references: [id])
+  grossSalary   Decimal          @default(0) @map("gross_salary") @db.Decimal(12, 2)
+  bankName      String?          @map("bank_name") @db.VarChar(100)
+  accountNumber String?          @map("account_number") @db.VarChar(50)
+  ifsc          String?          @db.VarChar(20)
+  pan           String?          @db.VarChar(20)
+  uan           String?          @db.VarChar(30)
+  esicNumber    String?          @map("esic_number") @db.VarChar(30)
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("employee_salary_profiles")
 }
 
 model SalaryRevision {
-  id               String    @id @default(uuid()) @db.Uuid
-  employeeId       String    @map("employee_id") @db.Uuid
-  employee         Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  previousGross    Decimal   @map("previous_gross") @db.Decimal(12, 2)
-  newGross         Decimal   @map("new_gross") @db.Decimal(12, 2)
-  incrementAmount  Decimal   @map("increment_amount") @db.Decimal(12, 2)
-  incrementPercent Decimal   @map("increment_percent") @db.Decimal(5, 2)
-  revisionType     String    @default("INCREMENT") @map("revision_type") @db.VarChar(50)
-  effectiveDate    DateTime  @map("effective_date") @db.Date
+  id               String   @id @default(uuid()) @db.Uuid
+  employeeId       String   @map("employee_id") @db.Uuid
+  employee         Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  previousGross    Decimal  @map("previous_gross") @db.Decimal(12, 2)
+  newGross         Decimal  @map("new_gross") @db.Decimal(12, 2)
+  incrementAmount  Decimal  @map("increment_amount") @db.Decimal(12, 2)
+  incrementPercent Decimal  @map("increment_percent") @db.Decimal(5, 2)
+  revisionType     String   @default("INCREMENT") @map("revision_type") @db.VarChar(50)
+  effectiveDate    DateTime @map("effective_date") @db.Date
   notes            String?
-  approvedBy       String?   @map("approved_by") @db.Uuid
-  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  approvedBy       String?  @map("approved_by") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@map("salary_revisions")
 }
@@ -1533,92 +1558,92 @@ model OvertimeRule {
 }
 
 model OvertimeRecord {
-  id               String    @id @default(uuid()) @db.Uuid
-  employeeId       String    @map("employee_id") @db.Uuid
-  employee         Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  date             DateTime  @db.Date
-  hours            Decimal   @db.Decimal(4, 2)
-  rateMultiplier   Decimal   @default(1.0) @map("rate_multiplier") @db.Decimal(4, 2)
-  totalAmount      Decimal   @map("total_amount") @db.Decimal(10, 2)
-  isWeekend        Boolean   @default(false) @map("is_weekend")
-  isHoliday        Boolean   @default(false) @map("is_holiday")
-  status           String    @default("PENDING") @db.VarChar(20)
-  managerApproval  Boolean   @default(false) @map("manager_approval")
-  hrApproval       Boolean   @default(false) @map("hr_approval")
-  payrollApproval  Boolean   @default(false) @map("payroll_approval")
-  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id              String   @id @default(uuid()) @db.Uuid
+  employeeId      String   @map("employee_id") @db.Uuid
+  employee        Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  date            DateTime @db.Date
+  hours           Decimal  @db.Decimal(4, 2)
+  rateMultiplier  Decimal  @default(1.0) @map("rate_multiplier") @db.Decimal(4, 2)
+  totalAmount     Decimal  @map("total_amount") @db.Decimal(10, 2)
+  isWeekend       Boolean  @default(false) @map("is_weekend")
+  isHoliday       Boolean  @default(false) @map("is_holiday")
+  status          String   @default("PENDING") @db.VarChar(20)
+  managerApproval Boolean  @default(false) @map("manager_approval")
+  hrApproval      Boolean  @default(false) @map("hr_approval")
+  payrollApproval Boolean  @default(false) @map("payroll_approval")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("overtime_records")
 }
 
 model BonusRecord {
-  id               String   @id @default(uuid()) @db.Uuid
-  employeeId       String   @map("employee_id") @db.Uuid
-  employee         Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  category         String   @db.VarChar(50)
-  amount           Decimal  @db.Decimal(10, 2)
-  month            Int
-  year             Int
-  isRecurring      Boolean  @default(false) @map("is_recurring")
-  status           String   @default("APPROVED") @db.VarChar(20)
-  reason           String?
-  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id          String   @id @default(uuid()) @db.Uuid
+  employeeId  String   @map("employee_id") @db.Uuid
+  employee    Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  category    String   @db.VarChar(50)
+  amount      Decimal  @db.Decimal(10, 2)
+  month       Int
+  year        Int
+  isRecurring Boolean  @default(false) @map("is_recurring")
+  status      String   @default("APPROVED") @db.VarChar(20)
+  reason      String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("bonus_records")
 }
 
 model ReimbursementRequest {
-  id               String              @id @default(uuid()) @db.Uuid
-  employeeId       String              @map("employee_id") @db.Uuid
-  employee         Employee            @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  category         String              @db.VarChar(50)
-  amount           Decimal             @db.Decimal(10, 2)
-  expenseDate      DateTime            @map("expense_date") @db.Date
-  description      String?
-  billUrl          String?             @map("bill_url")
-  status           ReimbursementStatus @default(PENDING)
-  managerApproval  Boolean             @default(false) @map("manager_approval")
-  financeApproval  Boolean             @default(false) @map("finance_approval")
-  payrollApproval  Boolean             @default(false) @map("payroll_approval")
-  rejectionReason  String?             @map("rejection_reason")
-  createdAt        DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id              String              @id @default(uuid()) @db.Uuid
+  employeeId      String              @map("employee_id") @db.Uuid
+  employee        Employee            @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  category        String              @db.VarChar(50)
+  amount          Decimal             @db.Decimal(10, 2)
+  expenseDate     DateTime            @map("expense_date") @db.Date
+  description     String?
+  billUrl         String?             @map("bill_url")
+  status          ReimbursementStatus @default(PENDING)
+  managerApproval Boolean             @default(false) @map("manager_approval")
+  financeApproval Boolean             @default(false) @map("finance_approval")
+  payrollApproval Boolean             @default(false) @map("payroll_approval")
+  rejectionReason String?             @map("rejection_reason")
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("reimbursement_requests")
 }
 
 model EmployeeLoan {
-  id               String     @id @default(uuid()) @db.Uuid
-  employeeId       String     @map("employee_id") @db.Uuid
-  employee         Employee   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  loanAmount       Decimal    @map("loan_amount") @db.Decimal(10, 2)
-  remainingAmount  Decimal    @map("remaining_amount") @db.Decimal(10, 2)
-  monthlyEmi       Decimal    @map("monthly_emi") @db.Decimal(10, 2)
-  interestRate     Decimal    @default(0) @map("interest_rate") @db.Decimal(5, 2)
-  startDate        DateTime   @map("start_date") @db.Date
-  status           LoanStatus @default(ACTIVE)
-  autoDeduction    Boolean    @default(true) @map("auto_deduction")
-  reason           String?
-  createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id              String     @id @default(uuid()) @db.Uuid
+  employeeId      String     @map("employee_id") @db.Uuid
+  employee        Employee   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  loanAmount      Decimal    @map("loan_amount") @db.Decimal(10, 2)
+  remainingAmount Decimal    @map("remaining_amount") @db.Decimal(10, 2)
+  monthlyEmi      Decimal    @map("monthly_emi") @db.Decimal(10, 2)
+  interestRate    Decimal    @default(0) @map("interest_rate") @db.Decimal(5, 2)
+  startDate       DateTime   @map("start_date") @db.Date
+  status          LoanStatus @default(ACTIVE)
+  autoDeduction   Boolean    @default(true) @map("auto_deduction")
+  reason          String?
+  createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("employee_loans")
 }
 
 model SalaryAdvance {
-  id               String     @id @default(uuid()) @db.Uuid
-  employeeId       String     @map("employee_id") @db.Uuid
-  employee         Employee   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  amount           Decimal    @db.Decimal(10, 2)
-  remainingAmount  Decimal    @map("remaining_amount") @db.Decimal(10, 2)
-  recoveryMonth    Int        @map("recovery_month")
-  recoveryYear     Int        @map("recovery_year")
-  status           LoanStatus @default(ACTIVE)
-  reason           String?
-  createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id              String     @id @default(uuid()) @db.Uuid
+  employeeId      String     @map("employee_id") @db.Uuid
+  employee        Employee   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  amount          Decimal    @db.Decimal(10, 2)
+  remainingAmount Decimal    @map("remaining_amount") @db.Decimal(10, 2)
+  recoveryMonth   Int        @map("recovery_month")
+  recoveryYear    Int        @map("recovery_year")
+  status          LoanStatus @default(ACTIVE)
+  reason          String?
+  createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("salary_advances")
 }
@@ -1640,11 +1665,14 @@ model PayrollProcessingBatch {
   createdBy          String?               @map("created_by") @db.Uuid
   approvedAt         DateTime?             @map("approved_at") @db.Timestamptz(6)
   lockedAt           DateTime?             @map("locked_at") @db.Timestamptz(6)
+  // Loan/advance balances move once, at lock. Stamped so recovery is
+  // idempotent regardless of status transitions — see F-19.
+  recoveriesAppliedAt DateTime?            @map("recoveries_applied_at") @db.Timestamptz(6)
   createdAt          DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  details            PayrollDetail[]
-  approvals          PayrollApprovalWorkflow[]
+  details   PayrollDetail[]
+  approvals PayrollApprovalWorkflow[]
 
   @@map("payroll_processing_batches")
 }
@@ -1667,6 +1695,11 @@ model PayrollDetail {
   grossSalary         Decimal                @default(0) @map("gross_salary") @db.Decimal(10, 2)
   pfDeduction         Decimal                @default(0) @map("pf_deduction") @db.Decimal(10, 2)
   esicDeduction       Decimal                @default(0) @map("esic_deduction") @db.Decimal(10, 2)
+  // The company's own share. Never computed before, so the statutory
+  // compliance report understated the real outflow and these employees could
+  // not appear in a challan at all. See F-07.
+  esicEmployer        Decimal                @default(0) @map("esic_employer") @db.Decimal(10, 2)
+  pfEmployer          Decimal                @default(0) @map("pf_employer") @db.Decimal(10, 2)
   tdsDeduction        Decimal                @default(0) @map("tds_deduction") @db.Decimal(10, 2)
   ptDeduction         Decimal                @default(0) @map("pt_deduction") @db.Decimal(10, 2)
   loanEmiDeduction    Decimal                @default(0) @map("loan_emi_deduction") @db.Decimal(10, 2)
@@ -1674,27 +1707,31 @@ model PayrollDetail {
   lwpDeduction        Decimal                @default(0) @map("lwp_deduction") @db.Decimal(10, 2)
   totalDeduction      Decimal                @default(0) @map("total_deduction") @db.Decimal(10, 2)
   netSalary           Decimal                @default(0) @map("net_salary") @db.Decimal(10, 2)
+  // Which loan / advance the recovery figures above came from, so lockBatch
+  // can replay exactly what the payslip showed instead of recomputing against
+  // balances that may have moved since. See F-19.
+  recoveryBreakdown   Json                   @default("{\"loans\":[],\"advances\":[]}") @map("recovery_breakdown")
   paymentStatus       BankTransferStatus     @default(PENDING) @map("payment_status")
   createdAt           DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt           DateTime               @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  payslip             PayslipDocument?
+  payslip PayslipDocument?
 
   @@unique([batchId, employeeId])
   @@map("payroll_details")
 }
 
 model PayrollApprovalWorkflow {
-  id               String                 @id @default(uuid()) @db.Uuid
-  batchId          String                 @map("batch_id") @db.Uuid
-  batch            PayrollProcessingBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
-  tier             String                 @db.VarChar(50)
-  approverRole     String                 @map("approver_role") @db.VarChar(50)
-  status           PayrollApprovalStatus  @default(PENDING)
-  approvedBy       String?                @map("approved_by") @db.Uuid
-  comments         String?
-  actionDate       DateTime?              @map("action_date") @db.Timestamptz(6)
-  createdAt        DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  id           String                 @id @default(uuid()) @db.Uuid
+  batchId      String                 @map("batch_id") @db.Uuid
+  batch        PayrollProcessingBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  tier         String                 @db.VarChar(50)
+  approverRole String                 @map("approver_role") @db.VarChar(50)
+  status       PayrollApprovalStatus  @default(PENDING)
+  approvedBy   String?                @map("approved_by") @db.Uuid
+  comments     String?
+  actionDate   DateTime?              @map("action_date") @db.Timestamptz(6)
+  createdAt    DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@map("payroll_approval_workflows")
 }
@@ -1715,26 +1752,26 @@ model PayslipDocument {
 }
 
 model BankTransferBatch {
-  id               String             @id @default(uuid()) @db.Uuid
-  batchId          String             @map("batch_id") @db.Uuid
-  format           String             @default("CSV") @db.VarChar(20)
-  fileUrl          String?            @map("file_url")
-  totalRecords     Int                @default(0) @map("total_records")
-  totalAmount      Decimal            @default(0) @map("total_amount") @db.Decimal(12, 2)
-  status           BankTransferStatus @default(PENDING)
-  generatedBy      String?            @map("generated_by") @db.Uuid
-  generatedAt      DateTime           @default(now()) @map("generated_at") @db.Timestamptz(6)
+  id           String             @id @default(uuid()) @db.Uuid
+  batchId      String             @map("batch_id") @db.Uuid
+  format       String             @default("CSV") @db.VarChar(20)
+  fileUrl      String?            @map("file_url")
+  totalRecords Int                @default(0) @map("total_records")
+  totalAmount  Decimal            @default(0) @map("total_amount") @db.Decimal(12, 2)
+  status       BankTransferStatus @default(PENDING)
+  generatedBy  String?            @map("generated_by") @db.Uuid
+  generatedAt  DateTime           @default(now()) @map("generated_at") @db.Timestamptz(6)
 
   @@map("bank_transfer_batches")
 }
 
 model PayrollSetting {
-  id               String   @id @default(uuid()) @db.Uuid
-  settingKey       String   @unique @map("setting_key") @db.VarChar(100)
-  settingValue     Json     @map("setting_value")
-  description      String?
-  updatedBy        String?  @map("updated_by") @db.Uuid
-  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id           String   @id @default(uuid()) @db.Uuid
+  settingKey   String   @unique @map("setting_key") @db.VarChar(100)
+  settingValue Json     @map("setting_value")
+  description  String?
+  updatedBy    String?  @map("updated_by") @db.Uuid
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("payroll_settings")
 }
@@ -1940,4 +1977,176 @@ enum ApprovalStatus {
   PENDING
   APPROVED
   REJECTED
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tables created by the finance remediation (F-16, F-17, F-18, F-20).
+//
+// Declared here, not only in the raw-SQL migrations that created them, because
+// `prisma db push` treats this file as the single source of truth: a table
+// present in the database but absent here is one it will DROP. Since
+// `npm start` runs `db push --accept-data-loss`, leaving them out meant the
+// next deploy would silently delete every tax rule, credit note and exit
+// settlement in the system.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A credit note is its own tax document, with its own per-customer series —
+/// never a status flip on the invoice it reverses. See F-18.
+model CreditNote {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  creditNoteNumber String   @unique @map("credit_note_number") @db.VarChar(60)
+  creditNoteSeq    Int?     @map("credit_note_seq")
+  invoiceId        String   @map("invoice_id") @db.Uuid
+  clientId         String   @map("client_id") @db.Uuid
+  issueDate        DateTime @default(dbgenerated("CURRENT_DATE")) @map("issue_date") @db.Date
+  reason           String
+  /// Whether this single note reversed the whole invoice — distinct from the
+  /// invoice being fully credited, which several partial notes can achieve.
+  isFullReversal   Boolean  @default(true) @map("is_full_reversal")
+  taxableValue     Decimal  @default(0) @map("taxable_value") @db.Decimal(10, 2)
+  cgstAmount       Decimal  @default(0) @map("cgst_amount") @db.Decimal(10, 2)
+  sgstAmount       Decimal  @default(0) @map("sgst_amount") @db.Decimal(10, 2)
+  igstAmount       Decimal  @default(0) @map("igst_amount") @db.Decimal(10, 2)
+  totalAmount      Decimal  @map("total_amount") @db.Decimal(10, 2)
+  documentType     String   @default("CREDIT_NOTE") @map("document_type") @db.VarChar(20)
+  supplierGstin    String?  @map("supplier_gstin") @db.VarChar(20)
+  recipientGstin   String?  @map("recipient_gstin") @db.VarChar(20)
+  placeOfSupply    String?  @map("place_of_supply") @db.VarChar(100)
+  status           String   @default("ISSUED") @db.VarChar(20)
+  issuedBy         String?  @map("issued_by") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  invoice          Invoice  @relation(fields: [invoiceId], references: [id])
+
+  @@index([invoiceId])
+  @@index([clientId])
+  @@map("credit_notes")
+}
+
+/// Full & final settlement for an exit — the spec late-exit fee matrix, with
+/// the client-owed and staff-owed sides kept separate. See F-17.
+model ExitSettlement {
+  id                      String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  placementId             String    @unique @map("placement_id") @db.Uuid
+  staffId                 String    @map("staff_id") @db.Uuid
+  clientId                String?   @map("client_id") @db.Uuid
+  exitDate                DateTime  @map("exit_date") @db.Date
+  exitReason              String    @map("exit_reason") @db.VarChar(40)
+  exitScenarioCode        String?   @map("exit_scenario_code") @db.VarChar(20)
+  /// Which row of the fee matrix was applied.
+  feeBand                 String    @map("fee_band") @db.VarChar(40)
+  daysSinceConfirmation   Int?      @map("days_since_confirmation")
+  monthlySalary           Decimal   @default(0) @map("monthly_salary") @db.Decimal(10, 2)
+  cancellationFeeDays     Int       @default(0) @map("cancellation_fee_days")
+  cancellationFeeAmount   Decimal   @default(0) @map("cancellation_fee_amount") @db.Decimal(10, 2)
+  goodwillDays            Int       @default(0) @map("goodwill_days")
+  goodwillAmount          Decimal   @default(0) @map("goodwill_amount") @db.Decimal(10, 2)
+  finalMonthDays          Int       @default(0) @map("final_month_days")
+  finalMonthAmount        Decimal   @default(0) @map("final_month_amount") @db.Decimal(10, 2)
+  depositAmount           Decimal   @default(0) @map("deposit_amount") @db.Decimal(10, 2)
+  depositAction           String    @default("REFUND") @map("deposit_action") @db.VarChar(20)
+  depositRefundAmount     Decimal   @default(0) @map("deposit_refund_amount") @db.Decimal(10, 2)
+  netPayableToStaff       Decimal   @default(0) @map("net_payable_to_staff") @db.Decimal(10, 2)
+  netReceivableFromClient Decimal   @default(0) @map("net_receivable_from_client") @db.Decimal(10, 2)
+  status                  String    @default("DRAFT") @db.VarChar(20)
+  approvedBy              String?   @map("approved_by") @db.Uuid
+  approvedAt              DateTime? @map("approved_at") @db.Timestamptz(6)
+  settledAt               DateTime? @map("settled_at") @db.Timestamptz(6)
+  breakdown               Json      @default("{}")
+  createdBy               String?   @map("created_by") @db.Uuid
+  createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("exit_settlements")
+}
+
+/// Professional tax is a state levy. Rates live here rather than in code
+/// because they move with each state notification. See F-16.
+model ProfessionalTaxSlab {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  state             String    @db.VarChar(100)
+  minMonthlyGross   Decimal   @default(0) @map("min_monthly_gross") @db.Decimal(10, 2)
+  /// Null means "and above".
+  maxMonthlyGross   Decimal?  @map("max_monthly_gross") @db.Decimal(10, 2)
+  monthlyAmount     Decimal   @default(0) @map("monthly_amount") @db.Decimal(10, 2)
+  /// Some states charge more in the last month of the financial year.
+  februaryAmount    Decimal?  @map("february_amount") @db.Decimal(10, 2)
+  appliesToGender   String?   @map("applies_to_gender") @db.VarChar(20)
+  effectiveFrom     DateTime  @default(dbgenerated("CURRENT_DATE")) @map("effective_from") @db.Date
+  effectiveTo       DateTime? @map("effective_to") @db.Date
+  needsConfirmation Boolean   @default(true) @map("needs_confirmation")
+  notes             String?
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@index([state])
+  @@map("professional_tax_slabs")
+}
+
+/// Whether a state levies professional tax at all. A state absent from this
+/// table is *unknown*, deliberately different from one that levies nothing —
+/// Delhi and Haryana levy nothing, and that is a fact worth storing.
+model ProfessionalTaxState {
+  state             String   @id @db.VarChar(100)
+  leviesPt          Boolean  @map("levies_pt")
+  needsConfirmation Boolean  @default(true) @map("needs_confirmation")
+  notes             String?
+  updatedAt         DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("professional_tax_states")
+}
+
+/// Income-tax slabs driving the TDS projection. Data, not code — they change
+/// every Budget. See F-16.
+model IncomeTaxSlab {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  regime            String   @db.VarChar(20)
+  financialYear     String   @map("financial_year") @db.VarChar(10)
+  minAnnual         Decimal  @map("min_annual") @db.Decimal(12, 2)
+  maxAnnual         Decimal? @map("max_annual") @db.Decimal(12, 2)
+  ratePct           Decimal  @map("rate_pct") @db.Decimal(5, 2)
+  needsConfirmation Boolean  @default(true) @map("needs_confirmation")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([regime, financialYear, minAnnual])
+  @@map("income_tax_slabs")
+}
+
+/// Per-employee tax election and declarations, so TDS can project correctly.
+model EmployeeTaxProfile {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId         String   @unique @map("employee_id") @db.Uuid
+  regime             String   @default("NEW") @db.VarChar(20)
+  /// Only meaningful under the old regime.
+  declaredDeductions Decimal  @default(0) @map("declared_deductions") @db.Decimal(12, 2)
+  /// Lets the projection spread only what is still owed across remaining months.
+  tdsPaidThisFy      Decimal  @default(0) @map("tds_paid_this_fy") @db.Decimal(12, 2)
+  pan                String?  @db.VarChar(20)
+  updatedAt          DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  employee           Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@map("employee_tax_profiles")
+}
+
+/// A customer's own sites, each with its own unit code and GSTIN.
+///
+/// Created at runtime by `customer.service.ts` but never declared here, so
+/// `prisma db push` saw it as an orphan and would have dropped the table.
+model FinanceCustomerBranch {
+  id         String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId String          @map("customer_id") @db.Uuid
+  unitCode   String          @map("unit_code") @db.VarChar(50)
+  unitName   String          @map("unit_name") @db.VarChar(255)
+  address    String?
+  state      String?         @db.VarChar(100)
+  city       String?         @db.VarChar(100)
+  pincode    String?         @db.VarChar(20)
+  gstn       String?         @db.VarChar(50)
+  status     String          @default("ACTIVE") @db.VarChar(20)
+  createdAt  DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime        @default(now()) @map("updated_at") @db.Timestamptz(6)
+  customer   FinanceCustomer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@map("finance_customer_branches")
 }

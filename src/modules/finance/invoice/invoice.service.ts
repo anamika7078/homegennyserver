@@ -1,5 +1,6 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { assertTransition, type InvoiceStatus } from '../../../common/finance/invoice-status';
 
 export interface InvoiceRow {
   id: string;
@@ -11,6 +12,8 @@ export interface InvoiceRow {
   staff_salary_component: string;
   management_fee: string;
   gst_amount: string;
+  esic_employer?: string;
+  pf_employer?: string;
   total_amount: string;
   due_date: string;
   paid_at: string | null;
@@ -53,12 +56,12 @@ export class FinanceInvoiceService {
             ci.razorpay_order_id,
             ci.status,
             ci.created_at,
-            c.full_name   AS client_name,
+            c.customer_name AS client_name,
             sa.full_name  AS staff_name,
             sa.staff_code AS staff_code,
             'PLACEMENT'   AS type
           FROM client_invoices ci
-          LEFT JOIN clients c ON c.id::text = ci.client_id::text
+          LEFT JOIN finance_customers c ON c.id = ci.client_id
           LEFT JOIN placements p ON p.id = ci.placement_id
           LEFT JOIN staff_applicants sa ON sa.id = p.staff_id
 
@@ -124,13 +127,23 @@ export class FinanceInvoiceService {
     }
   }
 
-  async getInvoice(id: string): Promise<InvoiceRow & { line_items: object }> {
+  async getInvoice(
+    id: string,
+  ): Promise<InvoiceRow & { line_items: object; reconciles?: boolean; line_items_total?: number }> {
     // 1. Try to get from client_invoices
+    //
+    // Joined to `finance_customers`, not the legacy `clients` table:
+    // Placement.clientId is a finance_customers id (placement.service.ts
+    // getClientMeta), and that is what gets copied onto the invoice — so the
+    // old join could never match and every invoice showed a blank client.
+    // Carrying gstn/pan_card through here is what F2's tax-invoice work needs.
     const rows = await this.dataSource.query<InvoiceRow[]>(
-      `SELECT ci.*, c.full_name AS client_name, c.email AS client_email,
+      `SELECT ci.*, c.customer_name AS client_name, c.gstn AS client_gstn,
+              c.pan_card AS client_pan, c.address AS client_address,
+              c.city AS client_city, c.state AS client_state,
               sa.full_name AS staff_name, sa.staff_code, 'PLACEMENT' AS type
        FROM client_invoices ci
-       LEFT JOIN clients c ON c.id::text = ci.client_id::text
+       LEFT JOIN finance_customers c ON c.id = ci.client_id
        LEFT JOIN placements p ON p.id = ci.placement_id
        LEFT JOIN staff_applicants sa ON sa.id = p.staff_id
        WHERE ci.id = $1`,
@@ -139,18 +152,48 @@ export class FinanceInvoiceService {
 
     if (rows.length) {
       const inv = rows[0];
-      const staffSalary = parseFloat(inv.staff_salary_component);
-      const mgmtFee    = parseFloat(inv.management_fee);
-      const gst        = parseFloat(inv.gst_amount);
-      const total      = parseFloat(inv.total_amount);
 
-      const line_items = [
-        { description: 'Staff Salary Component', amount: staffSalary, gst_applicable: false },
-        { description: 'Management Fee',          amount: mgmtFee,    gst_applicable: true  },
-        { description: 'GST on Management Fee (18%)', amount: gst,   gst_applicable: false  },
-        { description: 'Total Client Charge',     amount: total,      gst_applicable: false  },
-      ];
-      return { ...inv, line_items };
+      // Real line items, written alongside the invoice by
+      // PayrollService.insertInvoiceWithItems(). They sum to total_amount by
+      // construction — the old hardcoded list omitted employer ESIC/PF and so
+      // came up short of the invoice's own total (F-03).
+      const stored = await this.dataSource.query<{
+        description: string; amount: string; is_taxable: boolean;
+      }[]>(
+        `SELECT description, amount, is_taxable
+         FROM invoice_items WHERE invoice_id = $1 ORDER BY created_at`,
+        [id],
+      );
+
+      const line_items = stored.length
+        ? stored.map((li) => ({
+            description: li.description,
+            amount: parseFloat(li.amount),
+            gst_applicable: li.is_taxable,
+          }))
+        // Invoices raised before F1 have no stored items. Reconstruct from the
+        // columns, including the employer contributions now persisted, rather
+        // than showing a set that doesn't add up.
+        : [
+            { description: 'Staff Salary Component', amount: parseFloat(inv.staff_salary_component), gst_applicable: false },
+            { description: 'Employer ESIC',          amount: parseFloat(inv.esic_employer ?? '0'),   gst_applicable: false },
+            { description: 'Employer PF',            amount: parseFloat(inv.pf_employer ?? '0'),     gst_applicable: false },
+            { description: 'Management Fee',         amount: parseFloat(inv.management_fee),         gst_applicable: true  },
+            { description: 'GST on Management Fee',  amount: parseFloat(inv.gst_amount),             gst_applicable: false },
+          ];
+
+      const itemsTotal = Math.round(line_items.reduce((s, li) => s + li.amount, 0) * 100) / 100;
+      const total = parseFloat(inv.total_amount);
+
+      return {
+        ...inv,
+        line_items,
+        // Surfaced rather than hidden: a legacy invoice whose stored columns
+        // can't explain its total should be visible to Finance, not silently
+        // rendered as if it balanced.
+        reconciles: Math.abs(itemsTotal - total) <= 0.01,
+        line_items_total: itemsTotal,
+      };
     }
 
     // 2. Try to get from employee_payrolls
@@ -239,59 +282,60 @@ export class FinanceInvoiceService {
 </body></html>`;
   }
 
-  async approveInvoice(id: string) {
-    // Try client_invoices
-    const rows = await this.dataSource.query(
-      `SELECT * FROM client_invoices WHERE id = $1`, [id],
+  /**
+   * Moves an invoice (or an internal payroll row shown alongside them) to a new
+   * status, refusing anything the state machine disallows.
+   *
+   * Both actions used to be blind `UPDATE ... SET status = '...'`, so an
+   * invoice could be re-approved after payment or revived after a credit note.
+   * See F-12 and `common/finance/invoice-status.ts`.
+   */
+  private async transition(id: string, to: InvoiceStatus, successMessage: string) {
+    const rows = await this.dataSource.query<{ id: string; status: string; invoice_number: string }[]>(
+      `SELECT id, status, invoice_number FROM client_invoices WHERE id = $1`, [id],
     );
     if (rows.length) {
+      const inv = rows[0];
+      assertTransition(inv.status, to, inv.invoice_number);
       await this.dataSource.query(
-        `UPDATE client_invoices SET status = 'APPROVED' WHERE id = $1`, [id],
+        `UPDATE client_invoices SET status = $1 WHERE id = $2`, [to, id],
       );
-      return { id, status: 'APPROVED', message: 'Invoice approved successfully' };
+      return { id, from: inv.status, status: to, message: successMessage };
     }
 
-    // Try employee_payrolls
-    const empRows = await this.dataSource.query(
-      `SELECT * FROM employee_payrolls WHERE id = $1`, [id],
+    const empRows = await this.dataSource.query<{ id: string; status: string }[]>(
+      `SELECT id, status FROM employee_payrolls WHERE id = $1`, [id],
     );
     if (empRows.length) {
+      const row = empRows[0];
+      assertTransition(row.status, to);
       await this.dataSource.query(
-        `UPDATE employee_payrolls SET status = 'APPROVED' WHERE id = $1`, [id],
+        `UPDATE employee_payrolls SET status = $1 WHERE id = $2`, [to, id],
       );
-      return { id, status: 'APPROVED', message: 'Employee payroll approved' };
+      return { id, from: row.status, status: to, message: `Employee payroll ${to.toLowerCase()}` };
     }
 
     throw new NotFoundException(`Invoice or payroll ${id} not found`);
   }
 
+  async approveInvoice(id: string) {
+    return this.transition(id, 'APPROVED', 'Invoice approved successfully');
+  }
+
   async sendInvoice(id: string) {
-    // Try client_invoices
-    const rows = await this.dataSource.query(
-      `SELECT * FROM client_invoices WHERE id = $1`, [id],
-    );
-    if (rows.length) {
-      await this.dataSource.query(
-        `UPDATE client_invoices SET status = 'SENT' WHERE id = $1`, [id],
-      );
-      return { id, status: 'SENT', message: 'Invoice sent to client' };
-    }
+    return this.transition(id, 'SENT', 'Invoice sent to client');
+  }
 
-    // Try employee_payrolls
-    const empRows = await this.dataSource.query(
-      `SELECT * FROM employee_payrolls WHERE id = $1`, [id],
-    );
-    if (empRows.length) {
-      // Was writing 'APPROVED' while claiming/returning 'SENT' — the
-      // Invoices page shows its "Send" button while status === 'APPROVED',
-      // so it kept reappearing after every "send" for this row type.
-      await this.dataSource.query(
-        `UPDATE employee_payrolls SET status = 'SENT' WHERE id = $1`, [id],
-      );
-      return { id, status: 'SENT', message: 'Employee payroll sent' };
+  async cancelInvoice(id: string, reason: string) {
+    if (!reason?.trim()) {
+      throw new BadRequestException('A reason is required to cancel an invoice.');
     }
-
-    throw new NotFoundException(`Invoice or payroll ${id} not found`);
+    const result = await this.transition(id, 'CANCELLED', 'Invoice cancelled');
+    await this.dataSource.query(
+      `UPDATE client_invoices SET payment_ref = COALESCE(payment_ref, $1) WHERE id = $2`,
+      [`cancelled: ${reason.trim().slice(0, 80)}`, id],
+    ).catch(() => undefined);
+    return { ...result, reason };
   }
 
   /** Summary stats for dashboard */

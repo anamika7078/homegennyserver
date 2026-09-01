@@ -77,6 +77,20 @@ export class EmployeesRepository {
         category: true,
         branch: true,
         documents: true,
+        // Present only for employees onboarded out of the RM pipeline. Carries
+        // the staff code, series and stage the HR profile page shows.
+        staffApplicant: {
+          select: {
+            id: true,
+            staffCode: true,
+            series: true,
+            languageTier: true,
+            pipelineStage: true,
+            pvStatus: true,
+            currentScenarioCode: true,
+            assignedRmId: true,
+          },
+        },
       },
     });
   }

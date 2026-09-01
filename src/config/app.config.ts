@@ -57,6 +57,15 @@ export default registerAs('app', () => ({
   razorpay: {
     keyId: process.env.RAZORPAY_KEY_ID,
     keySecret: process.env.RAZORPAY_KEY_SECRET,
+    // Set in the Razorpay dashboard when creating the webhook — this is a
+    // separate value from the API key secret, and the webhook handler rejects
+    // every request when it is unset rather than trusting the payload.
+    webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET,
+    // RazorpayX is a separate product from checkout, with its own virtual
+    // account number. Paying salaries needs it; collecting from clients does
+    // not. Without this, disbursement records a SIMULATED result rather than
+    // claiming money moved. See F-09.
+    xAccountNumber: process.env.RAZORPAYX_ACCOUNT_NUMBER,
   },
 
   // Email

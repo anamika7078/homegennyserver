@@ -113,12 +113,21 @@ export class UserProvisioningService {
   }
 
   /**
-   * Links a login-capable STAFF user to an already-created `employees` row
-   * (and, if present, its synced `staff_applicants` pipeline row matched by
-   * mobile).
+   * Links a login-capable STAFF user to an already-created `employees` row,
+   * and to its originating `staff_applicants` pipeline row when the caller
+   * names one.
+   *
+   * This used to find the pipeline row by `findFirst({ where: { mobile } })`.
+   * Phone numbers are not unique in `staff_applicants` (families share
+   * handsets, and numbers get recycled between candidates), so that lookup
+   * could stamp this employee's login onto a completely different candidate —
+   * and from there onto their attendance and payroll. The link is now explicit:
+   * EmployeeOnboardingService passes the id it just converted, and a direct HR
+   * hire passes nothing and links to nothing.
    */
   async linkStaffAccount(params: {
     employeeId: string;
+    staffApplicantId?: string | null;
     mobile: string;
     fullName: string;
     email?: string;
@@ -138,12 +147,9 @@ export class UserProvisioningService {
         where: { id: params.employeeId },
         data: { userId: user.id },
       });
-      const staffApplicant = await this.prisma.staffApplicant.findFirst({
-        where: { mobile: params.mobile },
-      });
-      if (staffApplicant) {
+      if (params.staffApplicantId) {
         await this.prisma.staffApplicant.update({
-          where: { id: staffApplicant.id },
+          where: { id: params.staffApplicantId },
           data: { userId: user.id },
         });
       }

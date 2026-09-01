@@ -13,6 +13,7 @@ import {
   DefaultValuePipe,
 } from '@nestjs/common';
 import { AttendanceService } from './attendance.service';
+import { PipelineAttendanceProjectionService } from './pipeline-attendance-projection.service';
 import { PayrollService } from '../payroll/payroll.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -26,6 +27,7 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 export class AttendanceController {
   constructor(
     private readonly service: AttendanceService,
+    private readonly projection: PipelineAttendanceProjectionService,
     private readonly payrollService: PayrollService,
   ) {}
 
@@ -59,7 +61,14 @@ export class AttendanceController {
 
   @Post('mark')
   @Roles(UserRole.HR, UserRole.ADMIN)
-  @ApiOperation({ summary: 'Mark employee attendance' })
+  @ApiOperation({
+    summary: 'Mark employee attendance, including on a staff member behalf',
+    description:
+      'Writes the HR attendance ledger, and for an employee onboarded out of the ' +
+      'S1-S5 pipeline also mirrors the day into staff_daily_attendance, which is what ' +
+      'payroll and client invoicing count. Refuses to overwrite a live self-check-in ' +
+      'from the staff mobile app unless overrideSelfCheckIn: true is passed.',
+  })
   async mark(@Body() body: any, @Req() req: any) {
     if (!body.employeeId || !body.date || !body.status) {
       throw new BadRequestException('Employee ID, date, and status are required');
@@ -72,9 +81,11 @@ export class AttendanceController {
 
   @Put(':id')
   @Roles(UserRole.HR, UserRole.ADMIN)
-  @ApiOperation({ summary: 'Edit employee attendance record' })
-  async edit(@Param('id') id: string, @Body() body: any) {
-    return this.service.edit(id, body);
+  @ApiOperation({
+    summary: 'Edit employee attendance record (re-mirrors to the pipeline on a status change)',
+  })
+  async edit(@Param('id') id: string, @Body() body: any, @Req() req: any) {
+    return this.service.editAndMirror(id, body, req.user.id);
   }
 
   @Post('approve')
@@ -85,6 +96,32 @@ export class AttendanceController {
       throw new BadRequestException('A list of attendance record IDs is required');
     }
     return this.service.approve(ids, req.user.id);
+  }
+
+  @Post('sync-from-pipeline')
+  @Roles(UserRole.HR, UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Pull field check-ins into the HR attendance ledger',
+    description:
+      'Deployed staff mark their own attendance from the mobile app, which lands in the ' +
+      'pipeline tables. Employee payroll counts the HR attendance ledger and nothing else, ' +
+      'so those days have to be projected across or the month reads as zero billable days. ' +
+      'Runs nightly on its own; this endpoint forces it for a specific month or employee. ' +
+      'Days an HR user marked by hand are never overwritten and are reported as skippedManual.',
+  })
+  async syncFromPipeline(
+    @Body() body: { month?: number; year?: number; employeeId?: string },
+  ) {
+    const now = new Date();
+    const month = Number(body?.month ?? now.getMonth() + 1);
+    const year = Number(body?.year ?? now.getFullYear());
+    if (month < 1 || month > 12 || !Number.isInteger(month)) {
+      throw new BadRequestException('month must be a whole number between 1 and 12');
+    }
+    if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+      throw new BadRequestException('year must be a whole number between 2000 and 2100');
+    }
+    return this.projection.projectMonth({ month, year, employeeId: body?.employeeId });
   }
 
   @Get(':employeeId/payroll-preview')
@@ -112,6 +149,12 @@ export class AttendanceController {
     if (!m || !y) {
       throw new BadRequestException('month and year are required');
     }
-    return this.payrollService.runEmployeePayroll(employeeId, m, y);
+    // Pull the month's field check-ins across first. Payroll counts only the HR
+    // ledger, so without this a pipeline employee who marked every day from the
+    // mobile app would be paid for zero of them. Cheap and idempotent, and it
+    // leaves HR-marked days untouched.
+    const projection = await this.projection.projectMonth({ month: m, year: y, employeeId });
+    const result = await this.payrollService.runEmployeePayroll(employeeId, m, y);
+    return { ...result, attendanceProjection: projection };
   }
 }
