@@ -39,6 +39,7 @@ export function toStaffDto(row: PrismaStaff) {
     date_of_birth: row.dateOfBirth,
     mobile: row.mobile,
     email: row.email,
+    aadhaar_number: row.aadhaarNumber,
     address: row.address,
     emergency_contact_name: row.emergencyContactName,
     emergency_contact_mobile: row.emergencyContactMobile,
@@ -107,6 +108,7 @@ export function parseCreateStaffBody(body: Record<string, unknown>) {
       : new Date('1990-01-01'),
     mobile: String(body.mobile ?? ''),
     email: body.email ? String(body.email) : undefined,
+    aadhaarNumber: body.aadhaar_number ? String(body.aadhaar_number) : undefined,
     address: body.address ? String(body.address) : '',
     metadata: (body.metadata as object) ?? {},
   };

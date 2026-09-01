@@ -98,6 +98,7 @@ model StaffApplicant {
   dateOfBirth            DateTime               @map("date_of_birth") @db.Date
   mobile                 String                 @db.VarChar(20)
   email                  String?                @db.VarChar(200)
+  aadhaarNumber          String?                @map("aadhaar_number") @db.VarChar(20)
   address                String
   emergencyContactName   String?                @map("emergency_contact_name") @db.VarChar(200)
   emergencyContactMobile String?                @map("emergency_contact_mobile") @db.VarChar(20)

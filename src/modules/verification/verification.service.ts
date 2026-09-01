@@ -421,6 +421,10 @@ export class VerificationService {
         status: row?.status ?? 'NOT_STARTED',
         verified_at: row?.verifiedAt ?? null,
         notes: row?.notes ?? null,
+        // Raw verify-call payload (e.g. Aadhaar's name/dob/address), so a
+        // screen re-opened after a track already cleared can show what was
+        // verified instead of re-prompting for input it already has.
+        result: row?.result ?? null,
       };
     });
 
