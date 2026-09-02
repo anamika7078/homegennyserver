@@ -369,10 +369,16 @@ export class FinanceInvoiceService {
     const inv = rows[0];
     if (!inv) throw new NotFoundException(`Invoice ${id} not found`);
 
-    if (!inv.email) {
+    // Email is the preferred channel, but not the only one — no client in
+    // either database has an address on file, and refusing on that alone would
+    // block every invoice. The portal reaches anyone with an account. Refuse
+    // only when there is genuinely no way to reach them, because a document
+    // marked SENT that nobody received is one nobody chases.
+    if (!inv.email && !inv.user_id) {
       throw new BadRequestException(
-        `${inv.customer_name ?? 'This client'} has no email address on file, so ` +
-          `${inv.invoice_number} cannot be sent. Add one on the Customers page first.`,
+        `${inv.customer_name ?? 'This client'} has no email address and no portal ` +
+          `account, so ${inv.invoice_number} cannot be delivered. Add one on the ` +
+          `Customers page first.`,
       );
     }
 
@@ -392,7 +398,12 @@ export class FinanceInvoiceService {
       `A full breakdown, line by line and person by person, is available in your portal.\n\n` +
       `Thank you,\nHomeGenny`;
 
-    await this.notifications.sendEmail(inv.email, `Invoice ${inv.invoice_number}`, body);
+    const channels: string[] = [];
+
+    if (inv.email) {
+      await this.notifications.sendEmail(inv.email, `Invoice ${inv.invoice_number}`, body);
+      channels.push(inv.email);
+    }
 
     if (inv.user_id) {
       await this.notifications
@@ -401,12 +412,21 @@ export class FinanceInvoiceService {
           `${doc} for ${period} — ${amount}, due ${due}.`,
           inv.user_id,
         )
+        .then(() => { channels.push('their portal'); })
         .catch(() => undefined);
     }
 
-    const result = await this.transition(id, 'SENT', `Invoice sent to ${inv.email}`);
-    this.logger.log(`[INVOICE_SENT] ${inv.invoice_number} → ${inv.email}`);
-    return { ...result, sent_to: inv.email };
+    if (!channels.length) {
+      throw new BadRequestException(
+        `${inv.invoice_number} could not be delivered to ` +
+          `${inv.customer_name ?? 'this client'} — no channel accepted it.`,
+      );
+    }
+
+    const where = channels.join(' and ');
+    const result = await this.transition(id, 'SENT', `Invoice sent to ${where}`);
+    this.logger.log(`[INVOICE_SENT] ${inv.invoice_number} → ${where}`);
+    return { ...result, sent_to: where, channels };
   }
 
   async cancelInvoice(id: string, reason: string) {

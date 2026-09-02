@@ -82,8 +82,17 @@ it back to Absent** before the next step, or every figure below shifts by a day.
 
 ### 2 · Finance runs payroll — once
 
-**Finance → Payroll → Run Staff Payroll**, enter `journey001`, pick the month,
-preview.
+**Finance → Payroll.** The screen opens on **last month**, because payroll is
+run for a month that has finished — a month still in progress has partial
+attendance, and paying from it would short everyone.
+
+Press **Run Payroll**. It processes every confirmed placement that has not been
+paid yet for the period and skips the rest, so pressing it again is safe and a
+staff member placed mid-month can still be run. The toast tells you exactly what
+happened — *"Payroll run for 1 staff member · 11 skipped, no attendance"*.
+
+Sunita Devi's row appears. To see the working before committing to it, use
+**Run Staff Payroll** and enter `journey001` to preview first:
 
 | | |
 |---|---|
@@ -233,6 +242,7 @@ A silent failure is the dangerous kind, so try these deliberately.
 | Try this | It should |
 |---|---|
 | Run payroll twice for one person and period | refuse — *payroll already exists* |
+| Press **Run Payroll** twice | second press does nothing, and says so — nobody is paid twice |
 | Send an invoice for a client with no email | refuse, and name the client |
 | Approve an invoice, then run another staff member for that client | refuse to amend, and point at a credit note |
 | Open `/finance/payroll/attendance` or `/hr/payroll` expecting to run payroll | redirect — payroll runs in one place |

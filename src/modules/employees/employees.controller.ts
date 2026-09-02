@@ -80,7 +80,25 @@ export class EmployeesController {
   // Declared above @Get(':id') on purpose — Nest matches routes in declaration
   // order, so a literal path registered after the parameterised one would be
   // swallowed by it and arrive as an employee lookup for the id
-  // "pending-onboarding".
+  // "pending-onboarding". This bit me once already: /employees/payslips was
+  // declared next to :id/payslips further down, and every request 500'd trying
+  // to parse the word "payslips" as a UUID.
+  @Get('payslips')
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.FINANCE)
+  @ApiOperation({
+    summary: "Every salary slip for a period — HR's month-end view",
+    description:
+      'Reads payroll_records, the single payroll engine, so this list and the ' +
+      "client's invoice are built from the same rows.",
+  })
+  async listPayslipsForPeriod(@Query('month') month?: string, @Query('year') year?: string) {
+    const now = new Date();
+    const m = Number(month) || now.getMonth() + 1;
+    const y = Number(year) || now.getFullYear();
+    if (m < 1 || m > 12) throw new BadRequestException('month must be between 1 and 12');
+    return this.payslips.listForPeriod(m, y);
+  }
+
   @Get('pending-onboarding')
   @Roles(UserRole.HR, UserRole.ADMIN, UserRole.BM)
   @ApiOperation({
@@ -251,25 +269,6 @@ export class EmployeesController {
       throw new BadRequestException('year must be a whole number between 2000 and 2100');
     }
     return this.profile.attendanceMonth(id, m, y);
-  }
-
-  /**
-   * Declared before `:id/payslips` so Nest does not read "payslips" as an id.
-   */
-  @Get('payslips')
-  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.FINANCE)
-  @ApiOperation({
-    summary: "Every salary slip for a period — HR's month-end view",
-    description:
-      'Reads payroll_records, the single payroll engine, so this list and the ' +
-      "client's invoice are built from the same rows.",
-  })
-  async listPayslipsForPeriod(@Query('month') month?: string, @Query('year') year?: string) {
-    const now = new Date();
-    const m = Number(month) || now.getMonth() + 1;
-    const y = Number(year) || now.getFullYear();
-    if (m < 1 || m > 12) throw new BadRequestException('month must be between 1 and 12');
-    return this.payslips.listForPeriod(m, y);
   }
 
   @Get(':id/payslips')

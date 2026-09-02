@@ -28,6 +28,8 @@ const TAG = 'JOURNEY';
 const STAFF_CODE = 'journey001';
 const CLIENT_PREFIX = 'JOURNEY/BILL';
 const STAFF_MOBILE = '9700000001';
+const CLIENT_PHONE = '9700000090';
+const CLIENT_EMAIL = 'journey.client@example.test';
 
 const SALARY = 18000;
 const FEE = 2000;
@@ -70,22 +72,42 @@ async function main() {
 
     await c.query('BEGIN');
 
+    // ── the client's own login ────────────────────────────────────────────
+    // With an email, so the invoice can actually be sent. No client in either
+    // database has one, which is worth knowing: until real addresses are on
+    // file, invoices reach clients through the portal alone.
+    const clientUser = (await c.query(
+      `INSERT INTO users (id, branch_id, role, full_name, phone, email,
+                          password_hash, is_active, updated_at)
+       VALUES (gen_random_uuid(), $1, 'CLIENT', $2, $3, $4, $5, true, now())
+       ON CONFLICT (phone) DO UPDATE
+         SET email = EXCLUDED.email, full_name = EXCLUDED.full_name,
+             is_active = true, updated_at = now()
+       RETURNING id`,
+      [
+        branch.id, `${TAG} Test Household`, CLIENT_PHONE, CLIENT_EMAIL,
+        // Same bcrypt hash the seeded portal users carry (HomeGenny@2024).
+        '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewKyDoUJTGWvV8Vy',
+      ],
+    )).rows[0];
+
     // ── the client ────────────────────────────────────────────────────────
     // Reused rather than recreated on a re-run: bill_seq is reset so invoice
     // numbering starts from 0001 again.
     const client = (await c.query(
       `INSERT INTO finance_customers
          (id, customer_name, bill_no_prefix, bill_seq, state, city, address,
-          pan_card, gstn, unit_code, unit_name, updated_at)
+          pan_card, gstn, unit_code, unit_name, user_id, updated_at)
        VALUES (gen_random_uuid(), $1, $2, 0, 'Delhi', 'New Delhi',
                'B-42, Greater Kailash II, New Delhi 110048',
-               'AAAPL1234C', '07AAAPL1234C1ZV', $3, $1, now())
+               'AAAPL1234C', '07AAAPL1234C1ZV', $3, $1, $4, now())
        ON CONFLICT (unit_code) DO UPDATE
          SET customer_name = EXCLUDED.customer_name,
              bill_no_prefix = EXCLUDED.bill_no_prefix,
+             user_id = EXCLUDED.user_id,
              bill_seq = 0, updated_at = now()
        RETURNING id`,
-      [`${TAG} Test Household`, CLIENT_PREFIX, `${TAG}-UNIT-01`],
+      [`${TAG} Test Household`, CLIENT_PREFIX, `${TAG}-UNIT-01`, clientUser.id],
     )).rows[0];
 
     // ── the staff member, at the end of the pipeline ──────────────────────
@@ -273,6 +295,7 @@ async function main() {
     console.log(`              agreement SIGNED, scope of work, client indemnity`);
     console.log(`\n  Payroll and the invoice are deliberately NOT created — that is what`);
     console.log(`  you are here to test. Steps are in docs/TEST_FIXTURE_WALKTHROUGH.md\n`);
+    console.log(`  Client login  ${CLIENT_PHONE}  ·  ${CLIENT_EMAIL}`);
     console.log(`  Staff login   ${STAFF_MOBILE}`);
     console.log(`  Finance       9800000004 / HomeGenny@2024`);
     console.log(`  HR            9800000008 / HomeGenny@2024\n`);

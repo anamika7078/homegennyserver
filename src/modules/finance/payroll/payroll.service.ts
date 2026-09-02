@@ -429,25 +429,41 @@ export class FinancePayrollService {
     };
   }
 
-  /** Confirm and post payroll batch for ALL CONFIRMED placements in a given month/year */
+  /**
+   * Run payroll for every confirmed placement that has not been paid yet for
+   * the period.
+   *
+   * This used to refuse outright if *anyone* had already been paid that month,
+   * which made a whole month un-runnable the moment one person was processed —
+   * and staff are placed mid-month all the time. It now works on who is left,
+   * and the per-placement duplicate guard still stops anyone being paid twice.
+   */
   async confirmPayrollBatch(month: number, year: number) {
-    // Check for existing batch
-    const existing = await this.dataSource.query<{ cnt: string }[]>(
-      `SELECT COUNT(*) AS cnt FROM payroll_records
-       WHERE period_month = $1 AND period_year = $2`,
-      [month, year],
-    );
-    if (parseInt(existing[0]?.cnt ?? '0', 10) > 0) {
-      throw new BadRequestException(`Payroll batch for ${month}/${year} already confirmed`);
-    }
-
     const placements = await this.dataSource.query<PlacementRow[]>(
       `SELECT p.*, sa.full_name AS staff_name, sa.staff_code
-       FROM placements p
-       JOIN staff_applicants sa ON sa.id = p.staff_id
-       WHERE p.status = 'CONFIRMED'`,
+         FROM placements p
+         JOIN staff_applicants sa ON sa.id = p.staff_id
+        WHERE p.status = 'CONFIRMED'
+          AND NOT EXISTS (
+            SELECT 1 FROM payroll_records pr
+             WHERE pr.placement_id = p.id
+               AND pr.period_month = $1 AND pr.period_year = $2
+          )`,
+      [month, year],
     );
-    if (!placements.length) throw new BadRequestException('No confirmed placements found');
+    if (!placements.length) {
+      const done = await this.dataSource.query<{ cnt: string }[]>(
+        `SELECT COUNT(*) AS cnt FROM payroll_records
+          WHERE period_month = $1 AND period_year = $2`,
+        [month, year],
+      );
+      const already = parseInt(done[0]?.cnt ?? '0', 10);
+      throw new BadRequestException(
+        already > 0
+          ? `Everyone has already been paid for ${month}/${year} — ${already} payroll record(s).`
+          : 'No confirmed placements found.',
+      );
+    }
 
     // One payroll path, one attendance ledger. This used to call
     // runMonthlyPayroll, which counted approved `shift_logs` — the raw app
