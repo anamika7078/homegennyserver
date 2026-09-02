@@ -162,8 +162,13 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
       made.attendanceIds.push(r.rows[0].id);
     }
 
+    // By employee id, not by code: since B6 retired the HR payroll engine, a
+    // code lookup resolves through the pipeline to a placement, and placement
+    // payroll does not compute professional tax or TDS. The calculation is
+    // still live and still worth guarding, so this reads it directly through
+    // the preview endpoint that survives.
     const prev = await req('GET',
-      `/finance/payroll/attendance-preview?code=${encodeURIComponent(code)}&month=${TEST_MONTH}&year=${TEST_YEAR}`,
+      `/attendance/${made.employeeId}/payroll-preview?month=${TEST_MONTH}&year=${TEST_YEAR}`,
       { token: finance });
     const calc = prev.body?.calculation ?? {};
     check('a Delhi employee has no PT deducted', money(calc.ptDeduction) === 0, calc);
