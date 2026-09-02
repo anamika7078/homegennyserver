@@ -79,7 +79,12 @@ const SETTINGS = [
 async function main() {
   const url = process.env.DATABASE_URL;
   if (!url) { console.error('DATABASE_URL is not set — aborting.'); process.exit(1); }
-  const c = new Client({ connectionString: url });
+  // Managed Postgres (Render, Neon, RDS) refuses plaintext external connections.
+  const isLocal = /localhost|127\.0\.0\.1/.test(new URL(url).hostname);
+  const c = new Client({
+    connectionString: url,
+    ssl: isLocal ? false : { rejectUnauthorized: false },
+  });
   await c.connect();
   try {
     await c.query('BEGIN');

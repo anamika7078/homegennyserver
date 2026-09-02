@@ -85,12 +85,21 @@ npx prisma migrate diff `
   --to-schema-datamodel   prisma/schema.prisma --script | Select-String "DROP"
 ```
 
-**Expect:** no output.
+**This diff is a diagnostic. Never pipe it into the database.**
 
-**If any `DROP` appears — stop.** It means the Render database holds something
-`schema.prisma` does not describe. Nothing in step 3 will drop it, but it is a
-sign the two environments have diverged and worth understanding first. Send the
-output before continuing.
+On the 2026-09-02 production run it emitted 152 statements, and beyond the
+tables it would add it also dropped nineteen foreign-key constraints, five
+indexes, and the `DEFAULT` on `client_indemnities.id` — which would have broken
+every insert into that table. `schema.prisma` has drifted from what production
+actually looks like, so "make the database match the schema" is not currently a
+safe instruction. Read the output; apply only step 3.
+
+**Expect:** `DROP TABLE` lines only for the six dead tables F-13 removes
+(`payroll_batches`, `payroll_entries`, `payroll_payslips`, `refunds`,
+`salary_ledgers`, `branch_financial_reports`). Step 3 drops those itself, and
+only after checking each is empty.
+
+**If a `DROP TABLE` names anything else — stop** and send the output.
 
 ---
 
@@ -114,6 +123,51 @@ half-applied.
 
 ---
 
+### What happened on the real run — 2026-09-02
+
+Steps 1–4 have already been carried out against the Render database
+(`homegenny_gbwq`). Recorded here so the next person is not surprised.
+
+**All seven migrations applied. No data was lost** — row counts were captured
+before and after for all 70 tables and every populated table matched exactly
+(`scratch/_render_snapshot_before.json` holds the "before"). Seven tables were
+added, and the six empty dead tables were dropped.
+
+Two things had to be fixed before it would run:
+
+**1. TLS.** The migration scripts connected in plaintext and Render answered
+`FATAL: SSL/TLS required`. All seven now select TLS from the host name, the
+same way `_preflight_check.js` already did.
+
+**2. Production is missing the entire enterprise payroll module.** Not just the
+finance tables — **24 tables in `schema.prisma` do not exist on Render**, and
+only seven of those belong to this release. The other seventeen are the batch
+payroll and HR compensation module:
+
+```
+payroll_details            payroll_processing_batches   payroll_approval_workflows
+payroll_settings           payslip_documents            bank_transfer_batches
+salary_structures          salary_components            salary_revisions
+employee_salary_profiles   employee_loans               salary_advances
+bonus_records              overtime_records             overtime_rules
+reimbursement_requests     right_to_refuse_log
+```
+
+That module's **code is deployed but its tables never were**, so those
+endpoints have been failing in production independently of this release. It is
+a separate piece of work and someone should decide about it deliberately —
+creating seventeen tables for an untested-in-production module is not something
+to slip into a finance deploy.
+
+Two of them, `payroll_details` and `payroll_processing_batches`, are the only
+ones this release wanted to add columns to. Those steps now check whether the
+table exists and skip it with a printed reason. Nothing is lost by skipping:
+the columns are declared in `schema.prisma`, so they arrive with the table
+whenever that module is deployed. `_preflight_check.js` reports them under
+**not applicable** rather than counting them against the verdict.
+
+---
+
 ## Step 4 — Confirm
 
 ```powershell
@@ -130,15 +184,20 @@ Do not proceed until this is green.
 
 ## Step 5 — Deploy the code
 
-The code is already on `main` in both repos, so:
+**As of 2026-09-02 this has not happened yet.** Probing the live API showed the
+old code still serving: `/finance/deposits` answers `401` (route exists) while
+`/finance/tax/status`, `/finance/exit-settlements`, `/finance/credit-notes` and
+`/finance/invoices/consolidated/preview` all answer `404`. So auto-deploy is
+either off or has not picked up the commit.
 
-- **If Render auto-deploys on push to `main`**, a deploy may already be running
-  or finished. In that case steps 1–4 were the urgent part and you have just
-  repaired a service that was erroring on the new endpoints.
-- **If auto-deploy is off**, trigger it now from the Render dashboard
-  (Manual Deploy → Deploy latest commit).
-
+Trigger it from the Render dashboard: **Manual Deploy → Deploy latest commit**.
 Backend and frontend are separate services — deploy both.
+
+**First, confirm the service and the migrated database are the same one.**
+Open the backend service → Environment → `DATABASE_URL` and check the host
+matches the one you migrated. This could not be verified from outside; if the
+service points somewhere else, steps 1–4 landed on the wrong database and the
+new pages will still fail.
 
 ---
 
@@ -180,6 +239,18 @@ commit is sufficient** and safe. There is no need to reverse the migrations.
 
 ---
 
+## Rotate the database password
+
+The external `DATABASE_URL` used for the 2026-09-02 run was pasted into a chat
+session, so treat it as disclosed. Rotate it once the deploy is verified:
+**Render dashboard → the Postgres instance → Settings → Reset Password**, then
+update `DATABASE_URL` on every service that uses it.
+
+The local copy lives in `.env.render.local`, which `.gitignore:13` (`.env.*.local`)
+already excludes — it has never been committed. Delete it when you are done.
+
+---
+
 ## After the deploy — two things that still need a person
 
 Neither blocks the deploy; both matter before the numbers are trusted.
@@ -205,11 +276,17 @@ details on file.
 
 ## The deeper fix, for later
 
-This release had to be applied by hand because the migration history is broken:
-`prisma/migrations/` holds 23 folders, but the database has no
-`_prisma_migrations` table at all — so `migrate deploy` has no idea any of them
-ever ran. `render_pre_migrate.js`, which marks four specific migrations as
-rolled back on every boot, exists to work around exactly that.
+This release had to be applied by hand because the migration history is
+inconsistent between environments. Production **does** have a
+`_prisma_migrations` table with 22 rows, so `migrate deploy` works there — but
+the local development database has none at all, which is why the team fell back
+to `db push` locally and why nothing in this release was ever authored as a
+migration folder. `render_pre_migrate.js`, which marks four specific migrations
+as rolled back on every boot, exists to work around the same drift.
+
+The 24 missing tables above are the visible cost: schema changes that reached
+`schema.prisma` and local databases through `db push` never became migrations,
+so `migrate deploy` had nothing to apply and production silently fell behind.
 
 The fix is to **baseline**: generate one migration representing the current
 schema, mark it applied without running it, and let `migrate deploy` work

@@ -101,17 +101,37 @@ async function main() {
   // ── 2. Columns the new code needs ───────────────────────────────────────
   console.log('\n── Columns the new code needs ────────────────────────────');
   let missingCols = 0;
+  const onAbsentTable = [];
   for (const [table, col] of REQUIRED_COLUMNS) {
     const r = await c.query(
       `SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name=$2`,
       [table, col],
     );
-    if (!r.rowCount) {
-      console.log(`  ${bad('MISSING')}  ${table}.${col}`);
-      missingCols++;
+    if (r.rowCount) continue;
+
+    // A column on a table this environment does not have is not a gap to fix
+    // here — it arrives with the table when that module is deployed. Report it
+    // separately so it never blocks the verdict.
+    const t = await c.query('SELECT to_regclass($1) AS t', [table]);
+    if (!t.rows[0].t) {
+      onAbsentTable.push(`${table}.${col}`);
+      continue;
     }
+    console.log(`  ${bad('MISSING')}  ${table}.${col}`);
+    missingCols++;
   }
   if (!missingCols) console.log(`  ${ok('all present')}`);
+
+  if (onAbsentTable.length) {
+    const tables = [...new Set(onAbsentTable.map((s) => s.split('.')[0]))];
+    console.log(
+      `\n  ${warn('not applicable')}  ${onAbsentTable.length} column(s) belong to ` +
+        `table(s) this database does not have:`,
+    );
+    tables.forEach((t) => console.log(`      ${t}`));
+    console.log('  These are declared in schema.prisma, so they appear with the');
+    console.log('  table if that module is ever deployed here. Not a blocker.');
+  }
 
   // ── 3. Tables that should have been dropped ─────────────────────────────
   console.log('\n── Dead tables that should be gone (F-13) ────────────────');

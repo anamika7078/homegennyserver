@@ -16,11 +16,13 @@ require('dotenv').config();
 
 const STEPS = [
   {
+    table: 'payroll_details',
     label: 'payroll_details.recovery_breakdown',
     sql: `ALTER TABLE payroll_details
           ADD COLUMN IF NOT EXISTS recovery_breakdown JSONB NOT NULL DEFAULT '{"loans":[],"advances":[]}'::jsonb`,
   },
   {
+    table: 'payroll_processing_batches',
     label: 'payroll_processing_batches.recoveries_applied_at',
     sql: `ALTER TABLE payroll_processing_batches
           ADD COLUMN IF NOT EXISTS recoveries_applied_at TIMESTAMPTZ`,
@@ -34,12 +36,27 @@ async function main() {
     process.exit(1);
   }
 
-  const c = new Client({ connectionString: url });
+  // Managed Postgres (Render, Neon, RDS) refuses plaintext external connections.
+  const isLocal = /localhost|127\.0\.0\.1/.test(new URL(url).hostname);
+  const c = new Client({
+    connectionString: url,
+    ssl: isLocal ? false : { rejectUnauthorized: false },
+  });
   await c.connect();
 
   try {
     await c.query('BEGIN');
     for (const step of STEPS) {
+      // The enterprise batch-payroll tables are absent on some environments.
+      // These columns are declared in schema.prisma, so they arrive with the
+      // table whenever that module is deployed — skipping loses nothing.
+      if (step.table) {
+        const { rows } = await c.query('SELECT to_regclass($1) AS t', [step.table]);
+        if (!rows[0].t) {
+          console.log(`  skip  ${step.label} — table ${step.table} not in this database`);
+          continue;
+        }
+      }
       await c.query(step.sql);
       console.log(`  ok    ${step.label}`);
     }
