@@ -1,42 +1,44 @@
-# Testing Finance and HR with the journey fixture
+# Testing the flow
 
-One staff member, carried all the way from intake to a client invoice, so you
-can walk the whole thing by hand.
+The whole system, in one sentence:
+
+> **A staff member is placed with a client. Their attendance is marked — by HR,
+> or by themselves from the app. From that attendance come two things: the
+> client's invoice, and the staff member's salary slip.**
+
+There are two Finance screens and one HR screen. Nothing else.
+
+| Screen | What it is for |
+|---|---|
+| **Finance → Payroll** | work out what a staff member earned |
+| **Finance → Invoices** | issue and send each client's one monthly bill |
+| **HR → Salary Slips** | see what everyone was paid |
+
+---
+
+## Build the test data
 
 ```
 node scratch/_seed_full_journey_fixture.js
 ```
 
 Local only — it refuses to run against a remote database. Re-running rebuilds
-the fixture; nothing accumulates.
+it; nothing accumulates. It builds **last month** by default, because
+attendance for a month still running is partial. To pick one:
+`node scratch/_seed_full_journey_fixture.js 8 2026`.
 
-By default it builds **last month**, because attendance for a month still
-running is partial and payroll for it is not something you would really issue
-yet. To pick a period: `node scratch/_seed_full_journey_fixture.js 8 2026`.
-
----
-
-## What it makes
+### What it makes
 
 | | |
 |---|---|
-| **Client** | JOURNEY Test Household · New Delhi · GSTIN `07AAAPL1234C1ZV` · bill prefix `JOURNEY/BILL` |
-| **Staff** | Sunita Devi · `journey001` · MAID series · at **S5_DEPLOY** |
-| **Employee** | `JOURNEY001` · Field Operations / Housemaid · linked to the pipeline row |
+| **Client** | JOURNEY Test Household · New Delhi · bill prefix `JOURNEY/BILL` |
+| **Staff** | Sunita Devi · `journey001` · placed with that client, at **S5_DEPLOY** |
+| **Employee** | `JOURNEY001` — her HR record, linked to the pipeline row |
 | **Placement** | CONFIRMED · salary **₹18,000** · management fee **₹2,000** |
-| **Attendance** | a full month — 25 present, 5 weekly offs (Sundays), 1 absent |
+| **Attendance** | a full month — 25 present, 5 Sundays off, 1 absent |
 
-Each pipeline stage left the artefact it is supposed to leave, so the RM screens
-have something real to show rather than a staff row with a stage flag set:
-
-- **S2** four verification tracks — Aadhaar, police, health, reference — all CLEAR
-- **S2.5** assessment result PASS
-- **S3** training video, review APPROVED
-- **S4** agreement SIGNED (OTP verified), a scope of work, a client indemnity
-- **S5** the confirmed placement
-
-**Payroll and the invoice are deliberately not created.** Those are what you are
-here to test.
+Payroll and the invoice are **deliberately not created**. Those are what you
+are here to produce.
 
 ### Logins
 
@@ -46,123 +48,85 @@ here to test.
 | HR | 9800000008 | `HomeGenny@2024` |
 | RM | 9800000002 | `HomeGenny@2024` |
 
----
-
-## Before you start
-
-Two terminals:
+### Start it
 
 ```
 cd homegennyserver && npm run start:dev     # port 3001
 cd homegenny       && npm run dev           # port 3000
 ```
 
-Do not use `npm start` for the backend — it runs `prisma db push
---accept-data-loss` first. `start:dev` does not.
+Not `npm start` for the backend — that one runs
+`prisma db push --accept-data-loss` first.
 
-If a page 500s, check the backend terminal before anything else. And if you see
-several "EADDRINUSE" lines there, an older backend still holds port 3001 and
-you are talking to stale code — kill it and start one.
-
----
-
-## 1 · RM — the pipeline reached the end
-
-**Login as RM → Pipeline.**
-
-Find **Sunita Devi (`journey001`)** in the **S5 Deploy** column.
-
-Open her. What to look for:
-
-- all four verification tracks show **Clear**
-- assessment shows **Pass**
-- the video certification shows **Approved**
-- the agreement shows **Signed**
-- the placement shows **JOURNEY Test Household**, ₹18,000 salary, ₹2,000 fee
-
-**The point:** everything downstream depends on this being real. If the
-placement has no salary or fee, payroll refuses — deliberately, because an
-invoice built on a blank number is worse than no invoice.
+If a page 500s, read the backend terminal before anything else. Several
+`EADDRINUSE` lines there mean an older backend still holds port 3001 and you
+are talking to stale code.
 
 ---
 
-## 2 · HR — she exists as an employee, linked to the pipeline
+## The four steps
 
-**Login as HR → Employees.**
+### 1 · Attendance is already there
 
-`JOURNEY001` is there. Open it and check **her pipeline link is present** — she
-came from the pipeline, she is not a free-standing hire.
+**HR → Attendance**, set the month to the fixture's period. Sunita Devi shows
+25 present, 5 leave, 1 absent.
 
-Then try **HR → Onboarding**: she should **not** be in the pending list, because
-she has already been onboarded.
+This is the only ledger that matters. Whether HR marks a day here or the staff
+member marks it from their phone, it lands in the same place — and that is what
+both the invoice and the salary slip are counted from.
 
-**Also worth trying:** HR → Employees → *Onboard Employee*. It now leads to the
-onboarding list rather than a blank form. There is no way left to create an
-employee who belongs to no client.
-
----
-
-## 3 · HR — attendance for the month
-
-**HR → Attendance**, set the month to the fixture's period.
-
-You should see the full month for her: 25 present, 5 leave, 1 absent.
-
-Change one day — mark the 17th (the absent one) as **Present**. It should save,
-and the day should stop being counted as absent.
-
-**Change it back to Absent before moving on**, or the payroll figures below
-will be one day off.
+**Try it:** change the 17th (the absent one) to Present, and it saves. **Change
+it back to Absent** before the next step, or every figure below shifts by a day.
 
 ---
 
-## 4 · Finance — preview the payroll
+### 2 · Finance runs payroll — once
 
-**Login as Finance → Invoices → Run Staff Payroll.**
-
-Enter `journey001`, pick the fixture's month and year, and preview.
-
-Expected, for 25 present days in a 31-day month:
+**Finance → Payroll → Run Staff Payroll**, enter `journey001`, pick the month,
+preview.
 
 | | |
 |---|---|
 | Billable days | **25** |
-| Gross salary | **₹14,516.13** — 18,000 × 25/31 |
+| Gross salary — 18,000 × 25/31 | **₹14,516.13** |
 | Employee ESIC | ₹108.87 |
 | Employee PF | ₹1,741.94 |
-| Net salary | **₹12,665.32** |
-| Management fee | **₹1,612.90** — 2,000 pro-rated the same way |
+| **Net salary — what she receives** | **₹12,665.32** |
+| Management fee | ₹1,612.90 |
+| GST | **not charged** — see below |
+| **Total client charge** | **₹18,342.74** |
 
-Things worth checking specifically:
+Worth checking specifically:
 
-- **Professional tax must be ₹0.** She is in Delhi, and Delhi does not levy it.
-  If you see ₹200 here, something has regressed to the flat rule.
-- **ESIC applies at all**, because gross is under the ₹21,000 statutory limit.
-  Raise her salary above that and it should disappear.
-- **Every tax figure carries an "unconfirmed" flag** until a CA confirms the
-  slabs on the Tax Rules page. That is intended: an unverified number should not
-  present itself as fact.
+- **Professional tax is ₹0.** She is in Delhi, which does not levy it. ₹200 here
+  would mean a regression.
+- **GST says "not charged"**, and the total is ₹18,342.74. That is correct while
+  `finance.supplier_gstin` is unset — an unregistered supplier cannot charge
+  GST, so the document is a Bill of Supply. Fill that setting in and the next
+  invoice becomes a Tax Invoice with 18% on the fee only (₹290.32), never on
+  salary.
+- The preview and the invoice must agree. They are the same numbers now; if you
+  ever see the preview promise a figure the invoice does not charge, that is a
+  bug worth reporting.
+
+Now generate. The message reads **"Payroll recorded — added to the client's
+invoice JOURNEY/BILL/0001"**, not "invoice generated". She is a line on the
+client's bill, not the subject of her own.
 
 ---
 
-## 5 · Finance — run it, and watch where the invoice goes
+### 3 · The invoice, in the client's name
 
-Generate from the same screen.
-
-The success message should say **"Payroll recorded — added to the client's
-invoice JOURNEY/BILL/0001"**, not "invoice generated". The distinction is the
-whole point: the invoice belongs to the client, and she is a line on it.
-
-Now open **Invoices**. The new invoice shows:
+**Finance → Invoices.**
 
 | | |
 |---|---|
-| Number | **JOURNEY/BILL/0001** — from the client's prefix, not a placement id |
+| Number | **JOURNEY/BILL/0001** — the client's prefix |
 | Client | JOURNEY Test Household |
 | Staff billed | **1 staff** |
 | Total | **₹18,342.74** |
 
-Open it. Four line items:
+Open it. Four lines:
 
 ```
 Sunita Devi — Staff Salary      14,516.13
@@ -173,25 +137,49 @@ Sunita Devi — Management Fee     1,612.90
                                 18,342.74
 ```
 
-**Check the arithmetic yourself.** The line items must sum to the total — the
-code refuses to issue an invoice where they do not, and this is the place to
-confirm that holds.
+**Add them up yourself.** The code refuses to issue an invoice whose lines do
+not sum to its total; this is where you confirm that holds.
 
-**On GST:** the document says **Bill of Supply**, not Tax Invoice, and GST is
-₹0. That is correct while `finance.supplier_gstin` is unset — an unregistered
-supplier cannot charge GST. Fill that setting in and the next invoice becomes a
-Tax Invoice with 18% on the management fee only (₹290.32), never on salary.
+Then **Approve**, then **Send**. Sending now actually emails the client and
+drops a notification in their portal — it no longer just flips the status.
+
+**If the client has no email on file it refuses**, naming the client, rather
+than marking it SENT. That is deliberate: an invoice wrongly marked sent is one
+nobody chases. Add an email on **Finance → Customers** and try again.
 
 ---
 
-## 6 · The test that matters most — a second staff member
+### 4 · The salary slip reaches HR by itself
 
-This is the bug the whole release was about, so it is worth proving.
+**HR → Salary Slips**, same month. Sunita Devi is already there — nobody
+generated anything here.
+
+| Column | Shows |
+|---|---|
+| Days | 25 |
+| Gross | ₹14,516.13 |
+| Deductions | ₹1,850.81 |
+| **Net** | **₹12,665.32** |
+| Billed | **on invoice** |
+
+Her net here and her lines on the client's invoice come from the same payroll
+row, which is why they cannot disagree. The **Billed** column tells you whether
+her pay reached the client's bill — "not billed" means payroll ran but the
+invoice could not be touched, usually because it had already been sent.
+
+Download the PDF and check the net matches.
+
+---
+
+## The test that matters most
+
+A client with two staff must receive **one** invoice, not two. This is the bug
+the release was about, so prove it.
 
 Add a second person to the same client:
 
 ```sql
--- run against local
+-- local only
 INSERT INTO staff_applicants (id, staff_code, full_name, mobile, date_of_birth,
                               address, series, pipeline_stage, branch_id,
                               created_at, updated_at)
@@ -221,61 +209,43 @@ SELECT gen_random_uuid(), s.id, p.id, p.branch_id,
  WHERE s.staff_code = 'journey002';
 ```
 
-Adjust `make_date(2026, 8, …)` if you seeded a different period.
+Change `make_date(2026, 8, …)` if you seeded a different period.
 
-Now run payroll for `journey002` from the Finance screen.
+Run payroll for `journey002` from **Finance → Payroll**.
 
-**Expected — and this is the assertion:**
+**Expected — this is the assertion:**
 
-- **No second invoice appears.** Still one, still `JOURNEY/BILL/0001`.
-- Its **Staff billed** column now reads **2 staff**.
-- Opening it shows **eight** line items, four per person.
-- The total has grown by Ramesh's salary, contributions and fee.
+- **No second invoice.** Still one, still `JOURNEY/BILL/0001`.
+- **Staff billed** now reads **2 staff**.
+- **Eight** line items, four per person.
+- Total **₹41,290.80**.
+- **HR → Salary Slips** shows two rows, both marked *on invoice*.
 
-Before this release each of them would have received their own invoice,
-numbered from their placement id. If you see two invoices here, something has
-regressed.
-
-Then try it once more for the same person and period: it should refuse with
-*"Payroll already exists for placement …"*. Nobody gets paid twice.
+Before this release each of them received their own invoice, numbered from
+their placement id. Two invoices here means something regressed.
 
 ---
 
-## 7 · Payslips
+## What should refuse
 
-**HR → Employees → JOURNEY001 → Payslips**, or Finance's payslip view.
-
-Her payslip for the period should list the same figures as the invoice's line
-items for her — same gross, same deductions. They come from the same
-`payroll_records` row, which is why they cannot disagree.
-
-Download the PDF and check the net salary matches.
-
----
-
-## 8 · What should refuse
-
-Worth trying deliberately, because a silent failure is the dangerous kind:
+A silent failure is the dangerous kind, so try these deliberately.
 
 | Try this | It should |
 |---|---|
-| Run payroll twice for the same person and period | refuse — *"Payroll already exists for placement …"* |
-| Approve the invoice, then run another staff member's payroll for that client | refuse to amend, and point you at a credit note |
-| `POST /employees` without a `staffApplicantId` | refuse — every employee comes from the pipeline |
-| Look for **Salary Structures** or **Employee Salaries & Bank** | they are gone — that module is for a business with internal salaried departments |
-| Look for **Commercial** in the sidebar | hidden — its rate cards never reached the placement |
+| Run payroll twice for one person and period | refuse — *payroll already exists* |
+| Send an invoice for a client with no email | refuse, and name the client |
+| Approve an invoice, then run another staff member for that client | refuse to amend, and point at a credit note |
+| Open `/finance/payroll/attendance` or `/hr/payroll` expecting to run payroll | redirect — payroll runs in one place |
+| Look for *Salary Structures*, *Employee Salaries & Bank*, or *Commercial* | be gone — they belong to a different kind of business |
 
 ---
 
 ## Cleaning up
 
 Re-running the seed resets everything downstream. Two things it deliberately
-does not remove:
+leaves alone: `pipeline_events`, which is append-only at the database level with
+a trigger refusing UPDATE and DELETE, and the staff and client rows themselves,
+which that table's RESTRICT foreign key pins in place once a history exists.
+Both are updated rather than recreated, which is what makes re-running safe.
 
-- **`pipeline_events`** — append-only at the database level, with a trigger
-  refusing UPDATE and DELETE. That is an audit guarantee, not an obstacle.
-- **the staff and client rows themselves** — the FK from `pipeline_events` is
-  RESTRICT, so they cannot be deleted once a history exists. They are updated in
-  place instead.
-
-If you added `journey002` by hand, remove it the same way you added it.
+If you added `journey002` by hand, remove it the same way.

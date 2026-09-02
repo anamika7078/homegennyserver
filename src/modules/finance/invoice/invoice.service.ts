@@ -1,6 +1,7 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { assertTransition, type InvoiceStatus } from '../../../common/finance/invoice-status';
+import { NotificationsService } from '../../notifications/notifications.service';
 
 export interface InvoiceRow {
   id: string;
@@ -33,7 +34,12 @@ export interface InvoiceRow {
 
 @Injectable()
 export class FinanceInvoiceService {
-  constructor(private readonly dataSource: DataSource) {}
+  private readonly logger = new Logger(FinanceInvoiceService.name);
+
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   async listInvoices(params: { status?: string; page?: number; limit?: number } = {}) {
     try {
@@ -335,8 +341,72 @@ export class FinanceInvoiceService {
     return this.transition(id, 'APPROVED', 'Invoice approved successfully');
   }
 
+  /**
+   * Actually send the invoice to the client, then mark it SENT.
+   *
+   * This used to only move the status. Nothing left the building — Finance
+   * saw "Invoice sent to client" and the client never received anything.
+   *
+   * The status only moves if delivery succeeded. If there is no email on file,
+   * it says so rather than claiming a send: an invoice wrongly marked SENT is
+   * one nobody chases.
+   */
   async sendInvoice(id: string) {
-    return this.transition(id, 'SENT', 'Invoice sent to client');
+    const rows = await this.dataSource.query<{
+      invoice_number: string; total_amount: string; period_month: number; period_year: number;
+      due_date: string; document_type: string | null;
+      customer_name: string | null; email: string | null; user_id: string | null;
+    }[]>(
+      `SELECT ci.invoice_number, ci.total_amount, ci.period_month, ci.period_year,
+              ci.due_date, ci.document_type,
+              fc.customer_name, u.email, u.id AS user_id
+         FROM client_invoices ci
+         LEFT JOIN finance_customers fc ON fc.id = ci.client_id
+         LEFT JOIN users u ON u.id = fc.user_id
+        WHERE ci.id = $1`,
+      [id],
+    );
+    const inv = rows[0];
+    if (!inv) throw new NotFoundException(`Invoice ${id} not found`);
+
+    if (!inv.email) {
+      throw new BadRequestException(
+        `${inv.customer_name ?? 'This client'} has no email address on file, so ` +
+          `${inv.invoice_number} cannot be sent. Add one on the Customers page first.`,
+      );
+    }
+
+    const period = `${String(inv.period_month).padStart(2, '0')}/${inv.period_year}`;
+    const amount = new Intl.NumberFormat('en-IN', {
+      style: 'currency', currency: 'INR', maximumFractionDigits: 2,
+    }).format(Number(inv.total_amount));
+    const due = new Date(inv.due_date).toLocaleDateString('en-IN');
+    const doc = inv.document_type === 'BILL_OF_SUPPLY' ? 'Bill of Supply' : 'Tax Invoice';
+
+    const body =
+      `Dear ${inv.customer_name ?? 'Customer'},\n\n` +
+      `Your ${doc} ${inv.invoice_number} for ${period} is ready.\n\n` +
+      `Amount payable: ${amount}\n` +
+      `Due date: ${due}\n\n` +
+      `This covers every staff member placed with you for the period. ` +
+      `A full breakdown, line by line and person by person, is available in your portal.\n\n` +
+      `Thank you,\nHomeGenny`;
+
+    await this.notifications.sendEmail(inv.email, `Invoice ${inv.invoice_number}`, body);
+
+    if (inv.user_id) {
+      await this.notifications
+        .createInAppNotification(
+          `Invoice ${inv.invoice_number}`,
+          `${doc} for ${period} — ${amount}, due ${due}.`,
+          inv.user_id,
+        )
+        .catch(() => undefined);
+    }
+
+    const result = await this.transition(id, 'SENT', `Invoice sent to ${inv.email}`);
+    this.logger.log(`[INVOICE_SENT] ${inv.invoice_number} → ${inv.email}`);
+    return { ...result, sent_to: inv.email };
   }
 
   async cancelInvoice(id: string, reason: string) {

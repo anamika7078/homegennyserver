@@ -169,6 +169,61 @@ export class EmployeePayslipService {
   }
 
   /**
+   * Every payslip for a period, across everyone — HR's month-end view.
+   *
+   * Payroll is a Finance action, but the salary slip it produces is HR's
+   * business, and until now HR could only reach one person's slips at a time.
+   * Reads `payroll_records`, the single payroll engine, so this list and the
+   * client's invoice are built from the same rows.
+   */
+  async listForPeriod(month: number, year: number) {
+    const rows = await this.prisma.payrollRecord.findMany({
+      where: { periodMonth: month, periodYear: year },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!rows.length) return { items: [], total: 0, month, year };
+
+    const staffIds = [...new Set(rows.map((r) => r.staffId))];
+    const [applicants, employees] = await Promise.all([
+      this.prisma.staffApplicant.findMany({
+        where: { id: { in: staffIds } },
+        select: { id: true, staffCode: true, fullName: true },
+      }),
+      this.prisma.employee.findMany({
+        where: { staffApplicantId: { in: staffIds } },
+        select: { id: true, employeeId: true, staffApplicantId: true, department: true },
+      }),
+    ]);
+    const byStaff = new Map(applicants.map((a) => [a.id, a]));
+    const empByStaff = new Map(employees.map((e) => [e.staffApplicantId!, e]));
+
+    const items = rows.map((r) => {
+      const who = byStaff.get(r.staffId);
+      const emp = empByStaff.get(r.staffId);
+      return {
+        ref: `FIELD_PAYROLL:${r.id}`,
+        employeeId: emp?.id ?? null,
+        employeeCode: emp?.employeeId ?? who?.staffCode ?? null,
+        staffCode: who?.staffCode ?? null,
+        staffName: who?.fullName ?? null,
+        department: emp?.department ?? null,
+        periodMonth: r.periodMonth,
+        periodYear: r.periodYear,
+        presentDays: r.shiftDays,
+        grossSalary: Number(r.grossSalary ?? 0),
+        totalDeductions: Number(r.esicEmployee ?? 0) + Number(r.pfEmployee ?? 0),
+        netSalary: Number(r.netSalary ?? 0),
+        status: r.disbursedAt ? 'PAID' : 'PENDING',
+        // Null when payroll ran but the client's invoice could not be touched
+        // — an already-sent invoice, for instance.
+        invoiced: Boolean((r as { client_invoice_id?: string | null }).client_invoice_id),
+      };
+    });
+
+    return { items, total: items.length, month, year };
+  }
+
+  /**
    * Renders a payslip PDF from live data rather than serving a stored file.
    *
    * Some rows do carry a `storedPdfUrl` from an older batch run, but not all

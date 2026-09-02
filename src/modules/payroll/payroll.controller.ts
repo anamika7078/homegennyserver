@@ -1,4 +1,4 @@
-import { Controller, Post, Param, Body, UseGuards } from '@nestjs/common';
+import { Controller, Post, Param, Body, UseGuards, BadRequestException } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -27,11 +27,23 @@ export class PayrollController {
     return this.service.queuePayrollBatch(body.month, body.year, body.series);
   }
 
+  /**
+   * Kept so anything still calling it gets an explanation rather than a 404.
+   *
+   * It used to run a second payroll path that counted approved `shift_logs`
+   * while every other route counted `staff_daily_attendance` — the ledger both
+   * the mobile check-in and HR's screen mirror into. Two answers for one
+   * person and month, decided by whichever route happened to run.
+   */
   @Post('run/:placementId')
   @Roles(UserRole.FINANCE, UserRole.ADMIN)
-  @ApiOperation({ summary: 'Run monthly payroll for a placement' })
-  async runPayroll(@Param('placementId') placementId: string, @Body() body: { month: number; year: number }) {
-    return this.service.runMonthlyPayroll(placementId, body.month, body.year);
+  @ApiOperation({ summary: 'Retired — payroll runs from attendance, see /finance/payroll/attendance-generate' })
+  async runPayroll(@Param('placementId') placementId: string) {
+    throw new BadRequestException(
+      `This route is retired. Payroll runs from the attendance ledger — ` +
+        `POST /finance/payroll/attendance-generate with the staff code. ` +
+        `(placement ${placementId})`,
+    );
   }
 
   @Post('invoice/:invoiceId/payment-order')

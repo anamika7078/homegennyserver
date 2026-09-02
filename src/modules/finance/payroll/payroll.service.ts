@@ -449,9 +449,15 @@ export class FinancePayrollService {
     );
     if (!placements.length) throw new BadRequestException('No confirmed placements found');
 
+    // One payroll path, one attendance ledger. This used to call
+    // runMonthlyPayroll, which counted approved `shift_logs` — the raw app
+    // check-ins — while every other route counted `staff_daily_attendance`,
+    // the ledger both the app and HR's screen mirror into. The same person and
+    // month could come out with two different salaries depending on which
+    // route ran. See ONE_STAFF_MODEL_PLAN.md §B6.
     const results = await Promise.all(placements.map(async (p) => {
       try {
-        return await this.corePayroll.runMonthlyPayroll(p.id, month, year);
+        return await this.corePayroll.runAttendancePayroll(p.id, month, year);
       } catch (e) {
         this.logger.warn(`[BATCH] Skipped placement ${p.id}: ${(e as Error).message}`);
         return null;
