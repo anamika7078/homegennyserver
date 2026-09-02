@@ -146,7 +146,7 @@ async function main() {
     console.log(bad(`  ${missing} table(s) and ${missingCols} column(s) are missing.`));
     console.log('  The new code WILL error against this database.');
     console.log('\n  Fix, in this order:');
-    console.log('    1. npm run migrate:f1     (additive — creates what is missing)');
+    console.log('    1. npm run migrate:finance     (additive — creates what is missing)');
     console.log('    2. node scratch/_preflight_check.js   (run this again; expect all green)');
     console.log('    3. deploy the code');
   } else {

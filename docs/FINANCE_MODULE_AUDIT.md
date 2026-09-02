@@ -1033,7 +1033,24 @@ Two notes for whoever runs these next:
 
 ### Migration
 
-`npm run migrate:f1` runs both scripts — additive, transactional, and safe to re-run:
+`npm run migrate:finance` runs **all seven** migration scripts, in order — every one additive,
+transactional, and safe to re-run. It was called `migrate:f1` while F1 was the only phase; the
+name was corrected once it grew to cover every finding, because "f1" implied the other phases
+still needed running separately. `migrate:f1` still works as an alias.
+
+The seven, and what each covers:
+
+| Script | Findings |
+|---|---|
+| `_f1_finance_migration.js` | F-03 invoice columns + `invoice_items`, F-05 deposit event columns and backfill |
+| `_f19_recovery_migration.js` | F-19 `recovery_breakdown`, `recoveries_applied_at` |
+| `_f06_f07_migration.js` | F-06 / F-07 employer contribution columns |
+| `_f09_f12_migration.js` | F-09 `staff_bank_accounts`, F-12 payroll approval + invoice status CHECK |
+| `_f13_f14_f15_migration.js` | F-13 drops and fills, F-14 GST fields, F-15 consolidated invoicing |
+| `_f16_f17_migration.js` | F-16 tax rule tables, F-17 `exit_settlements` |
+| `_f18_f20_migration.js` | F-18 `credit_notes`, F-20 PF base rule |
+
+Detail on the first two, which carry backfills:
 
 - `scratch/_f1_finance_migration.js` — the two invoice columns, the `invoice_items` table and
   index, the deposit event columns, and a backfill of deposit events from

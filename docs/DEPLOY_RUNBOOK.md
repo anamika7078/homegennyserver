@@ -97,7 +97,7 @@ output before continuing.
 ## Step 3 — Create the tables
 
 ```powershell
-npm run migrate:f1
+npm run migrate:finance
 ```
 
 Runs all seven migration scripts in order. Each one:
