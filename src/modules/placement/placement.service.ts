@@ -150,6 +150,23 @@ export class PlacementService {
       );
     }
 
+    // A staff member can only be actively placed with one client at a time —
+    // without this, re-opening the "New Placement" flow for someone already on
+    // TRIAL/CONFIRMED silently mints a second active placement for them (seen
+    // in prod: duplicate CONFIRMED rows for the same staff+client). They must
+    // be exited from the current one (status → EXITED/TERMINATED) before a new
+    // placement can be created.
+    const activePlacement = await this.prisma.placement.findFirst({
+      where: { staffId, status: { in: [PlacementStatus.TRIAL, PlacementStatus.CONFIRMED] } },
+      select: { id: true, clientId: true, status: true },
+    });
+    if (activePlacement) {
+      throw new BadRequestException(
+        `Staff already has an active placement (${activePlacement.status}, id: ${activePlacement.id}). ` +
+        'Exit that placement before creating a new one.',
+      );
+    }
+
     const branchId = String(data.branch_id ?? '00000000-0000-0000-0000-000000000001');
 
     // Deploy-time choice: start a TRIAL (default) or go straight to CONFIRMED —
