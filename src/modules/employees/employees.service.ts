@@ -87,8 +87,10 @@ export class EmployeesService {
       status: dto.status || 'Active',
       branch: { connect: { id: validBranchId } },
       category: { connect: { id: validCategoryId } },
-      // Set only by EmployeeOnboardingService, when this employee is being
-      // converted out of the S1-S5 pipeline. Direct HR hires leave it null.
+      // Always set: every employee is a pipeline candidate converted at
+      // S5_DEPLOY. Both callers (EmployeeOnboardingService and the direct
+      // POST /employees) now require it — a null here would be an employee
+      // belonging to no client, which this business does not have.
       ...(dto.staffApplicantId
         ? { staffApplicant: { connect: { id: dto.staffApplicantId } } }
         : {}),

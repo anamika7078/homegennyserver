@@ -161,10 +161,35 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
 
     // ── F-07 · HR payroll stores the employer side ──────────────────────────
     console.log('F-07  Employer contributions are computed and stored');
-    const gen = await req('POST', '/finance/payroll/attendance-generate', {
-      token: finance, body: { code: hr.code, month: TEST_MONTH, year: TEST_YEAR },
-    });
-    check('HR payroll generated', gen.status === 200 || gen.status === 201, { status: gen.status, body: gen.body });
+
+    // The HR payroll *writer* is retired (§B6), but its rows are still read by
+    // every statutory filing — which is the promise B6 made, and the thing this
+    // suite exists to check. So the row is seeded directly, exactly as a
+    // historical one would sit in the table, and the assertions below prove the
+    // ESIC challan and PF ECR still pick it up.
+    const preview = await req(
+      'GET',
+      `/attendance/${hr.id}/payroll-preview?month=${TEST_MONTH}&year=${TEST_YEAR}`,
+      { token: finance },
+    );
+    check('HR payroll still previews', preview.status === 200, { status: preview.status, body: preview.body });
+    const pc = preview.body?.calculation ?? {};
+
+    await db.query(
+      `INSERT INTO employee_payrolls
+         (id, employee_id, period_month, period_year, present_days,
+          gross_salary, deductions, esic_employee, esic_employer,
+          pf_employee, pf_employer, net_salary, updated_at)
+       VALUES (gen_random_uuid(), $1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, NOW())`,
+      [
+        hr.id, TEST_MONTH, TEST_YEAR, preview.body?.billable_days ?? 0,
+        pc.grossSalary ?? 0,
+        JSON.stringify({ esic: pc.esicEmployee ?? 0, pf: pc.pfEmployee ?? 0 }),
+        pc.esicEmployee ?? 0, pc.esicEmployer ?? 0,
+        pc.pfEmployee ?? 0, pc.pfEmployer ?? 0,
+        pc.netSalary ?? 0,
+      ],
+    );
 
     const hrRow = (await db.query(
       `SELECT gross_salary, esic_employee, esic_employer, pf_employee, pf_employer

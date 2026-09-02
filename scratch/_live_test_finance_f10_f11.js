@@ -171,10 +171,21 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
     console.log(`\nemployee on ₹${SALARY}, ${PRESENT_DAYS}/${daysInMonth} days, + OT/bonus/reimbursement + a ₹${LOAN_EMI} EMI\n`);
 
     // ── F-11 · every component counted ──────────────────────────────────────
-    console.log('F-11  HR payroll counts what only the enterprise batch used to');
+    //
+    // Read by employee id, not by code. Since B6 retired the HR payroll engine,
+    // a code lookup resolves through the pipeline to a placement, and placement
+    // payroll does not compute these components. The calculation itself is
+    // still live and still worth guarding, so this asserts it directly through
+    // the preview endpoint that survives.
+    //
+    // Worth knowing: overtime, bonus, reimbursement and loan EMI can now be
+    // previewed but not recorded — see ONE_STAFF_MODEL_PLAN.md §B6. They sit on
+    // four of the seventeen enterprise tables that were never deployed to
+    // production, so nothing live depends on them today.
+    console.log('F-11  the payroll calculation still counts every component');
     const prev = await req(
       'GET',
-      `/finance/payroll/attendance-preview?code=${encodeURIComponent(made.code)}&month=${TEST_MONTH}&year=${TEST_YEAR}`,
+      `/attendance/${made.employeeId}/payroll-preview?month=${TEST_MONTH}&year=${TEST_YEAR}`,
       { token: finance },
     );
     check('preview loads', prev.status === 200, { status: prev.status, body: prev.body });
@@ -205,30 +216,32 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
     check('previewing did not touch the loan', money(balMid.rows[0].remaining_amount) === 10000, balMid.rows[0]);
     check('preview says recovery was not applied', prev.body?.recovery_applied === false, prev.body?.recovery_applied);
 
-    // ── generate and check what got stored ──────────────────────────────────
+    // ── the HR payroll engine is retired ────────────────────────────────────
+    //
+    // This used to generate a row in `employee_payrolls` and assert the stored
+    // components. B6 closed that writer: one population of staff, one engine,
+    // and `payroll_records` is the one the client invoice is built from. What
+    // is asserted now is that the refusal is explicit and explains itself —
+    // the failure mode that matters is a silent one.
     const gen = await req('POST', '/finance/payroll/attendance-generate', {
       token: finance, body: { code: made.code, month: TEST_MONTH, year: TEST_YEAR },
     });
-    check('payroll generated', gen.status === 200 || gen.status === 201, { status: gen.status, body: gen.body });
-    made.payrollId = gen.body?.payroll_id ?? null;
+    check('generating HR payroll is refused', gen.status === 400, { status: gen.status, body: gen.body });
+    check(
+      'and the refusal says why, naming the pipeline as the fix',
+      /pipeline/i.test(JSON.stringify(gen.body ?? '')),
+      gen.body,
+    );
 
     const stored = await db.query(
-      `SELECT gross_salary, net_salary, deductions FROM employee_payrolls
+      `SELECT id FROM employee_payrolls
        WHERE employee_id = $1::uuid AND period_month = $2 AND period_year = $3`,
       [made.employeeId, TEST_MONTH, TEST_YEAR],
     );
-    check('payroll row written', stored.rows.length === 1, stored.rows.length);
-    if (stored.rows.length) {
-      const row = stored.rows[0];
-      const ded = typeof row.deductions === 'string' ? JSON.parse(row.deductions) : row.deductions;
-      check('stored gross includes the components', Math.abs(money(row.gross_salary) - expectedGross) < 0.02, row.gross_salary);
-      check('deductions record a professional-tax line', ded.professionalTax !== undefined, ded);
-      check('deductions record the loan EMI', money(ded.loanEmi) === LOAN_EMI, ded);
-      check('deductions record ESIC and PF', ded.esic !== undefined && ded.pf !== undefined, ded);
-    }
+    check('nothing was written to the retired table', stored.rows.length === 0, stored.rows.length);
 
     const balEnd = await db.query(`SELECT remaining_amount FROM employee_loans WHERE id = $1`, [made.loanId]);
-    check('generating payroll did not recover the loan (F-19)', money(balEnd.rows[0].remaining_amount) === 10000, balEnd.rows[0]);
+    check('the loan balance is untouched', money(balEnd.rows[0].remaining_amount) === 10000, balEnd.rows[0]);
   } catch (err) {
     fail++;
     console.log(`\n  ERROR  ${err.message}`);

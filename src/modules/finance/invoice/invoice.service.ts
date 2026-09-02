@@ -22,8 +22,12 @@ export interface InvoiceRow {
   status: string;
   created_at: string;
   client_name?: string;
+  is_consolidated?: boolean;
+  /** Set only on legacy per-placement invoices, which billed one person. */
   staff_name?: string;
   staff_code?: string;
+  /** How many people this invoice bills — the client-first replacement for staff_name. */
+  staff_count?: number;
   type?: 'PLACEMENT' | 'EMPLOYEE';
 }
 
@@ -56,9 +60,16 @@ export class FinanceInvoiceService {
             ci.razorpay_order_id,
             ci.status,
             ci.created_at,
+            ci.is_consolidated,
             c.customer_name AS client_name,
+            -- Only a legacy per-placement invoice has a single staff member.
+            -- A consolidated invoice covers a whole client, so it reports how
+            -- many people it bills instead. See ONE_STAFF_MODEL_PLAN.md §F3.
             sa.full_name  AS staff_name,
             sa.staff_code AS staff_code,
+            (SELECT COUNT(DISTINCT ii.staff_id)::int
+               FROM invoice_items ii
+              WHERE ii.invoice_id = ci.id AND ii.staff_id IS NOT NULL) AS staff_count,
             'PLACEMENT'   AS type
           FROM client_invoices ci
           LEFT JOIN finance_customers c ON c.id = ci.client_id
@@ -84,9 +95,11 @@ export class FinanceInvoiceService {
             NULL::varchar        AS razorpay_order_id,
             ep.status,
             ep.created_at,
+            false                AS is_consolidated,
             'Internal HR'        AS client_name,
             emp.full_name        AS staff_name,
             emp.employee_id      AS staff_code,
+            1                    AS staff_count,
             'EMPLOYEE'           AS type
           FROM employee_payrolls ep
           LEFT JOIN employees emp ON emp.id = ep.employee_id

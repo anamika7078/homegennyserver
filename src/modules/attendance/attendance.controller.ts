@@ -152,9 +152,13 @@ export class AttendanceController {
     // Pull the month's field check-ins across first. Payroll counts only the HR
     // ledger, so without this a pipeline employee who marked every day from the
     // mobile app would be paid for zero of them. Cheap and idempotent, and it
-    // leaves HR-marked days untouched.
-    const projection = await this.projection.projectMonth({ month: m, year: y, employeeId });
-    const result = await this.payrollService.runEmployeePayroll(employeeId, m, y);
-    return { ...result, attendanceProjection: projection };
+    // leaves HR-marked days untouched. Still worth doing before the refusal
+    // below, because the caller's next step is to run payroll on the placement
+    // and that reads the same ledger.
+    await this.projection.projectMonth({ month: m, year: y, employeeId });
+
+    // Throws: the HR payroll engine is retired and this employee is paid
+    // through their placement instead. See ONE_STAFF_MODEL_PLAN.md §B6.
+    return this.payrollService.runEmployeePayroll(employeeId, m, y);
   }
 }

@@ -107,9 +107,17 @@ export class EmployeeOnboardingService {
    * instead, which covers rows that reached S5 through a seed or an admin
    * backfill rather than through the FSM.
    */
-  async onboardFromPipeline(dto: OnboardFromPipelineDto, actorId: string) {
+  /**
+   * The one rule about who may become an employee, kept in one place because
+   * two endpoints enforce it: this service, and the direct `POST /employees`
+   * that HR uses for corrections.
+   *
+   * Every employee is a person the pipeline placed with a client — there is no
+   * separate population of internal hires. See ONE_STAFF_MODEL_PLAN.md §B4.
+   */
+  async assertOnboardable(staffApplicantId: string) {
     const applicant = await this.prisma.staffApplicant.findFirst({
-      where: { id: dto.staffApplicantId, deletedAt: null },
+      where: { id: staffApplicantId, deletedAt: null },
       include: {
         employeeRecord: { select: { id: true, employeeId: true } },
         agreements: { select: { status: true } },
@@ -117,7 +125,7 @@ export class EmployeeOnboardingService {
     });
 
     if (!applicant) {
-      throw new NotFoundException(`Staff applicant ${dto.staffApplicantId} not found`);
+      throw new NotFoundException(`Staff applicant ${staffApplicantId} not found`);
     }
     if (applicant.employeeRecord) {
       throw new ConflictException(
@@ -129,6 +137,11 @@ export class EmployeeOnboardingService {
         `Only candidates at S5_DEPLOY can be onboarded — ${applicant.staffCode} is at ${applicant.pipelineStage}`,
       );
     }
+    return applicant;
+  }
+
+  async onboardFromPipeline(dto: OnboardFromPipelineDto, actorId: string) {
+    const applicant = await this.assertOnboardable(dto.staffApplicantId);
     if (applicant.terminalOutcome) {
       throw new BadRequestException(
         `${applicant.staffCode} has exited the pipeline (${applicant.terminalOutcome}) and cannot be onboarded`,

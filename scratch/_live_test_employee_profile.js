@@ -123,6 +123,19 @@ async function req(method, path, { token, body, raw } = {}) {
   async function cleanup() {
     if (incidentId) await db.query('DELETE FROM incidents WHERE id = $1', [incidentId]);
     await db.query('DELETE FROM employee_payrolls WHERE employee_id = $1', [employeeId]);
+    // Payroll now lands in payroll_records against the placement (§B6), and a
+    // leftover row makes the next run refuse as a duplicate. Unlink it from
+    // any invoice first so the FK does not hold it.
+    await db.query(
+      `UPDATE payroll_records SET client_invoice_id = NULL
+        WHERE placement_id IN (SELECT id FROM placements WHERE staff_id = $1)`,
+      [target.id],
+    );
+    await db.query(
+      `DELETE FROM payroll_records
+        WHERE placement_id IN (SELECT id FROM placements WHERE staff_id = $1)`,
+      [target.id],
+    );
     await db.query('DELETE FROM attendance WHERE employee_id = $1', [employeeId]);
     await db.query(
       "DELETE FROM staff_daily_attendance WHERE staff_id = $1 AND attendance_date >= '2032-01-01'",
@@ -246,9 +259,18 @@ async function req(method, path, { token, body, raw } = {}) {
 
     // ── 4. unified payslips ────────────────────────────────────────────────
     console.log('\n[4] GET /employees/:id/payslips');
-    const gen = await req('POST', `/attendance/${employeeId}/generate-payroll`, {
-      token,
-      body: { month: MONTH, year: YEAR },
+    // Payroll runs on the placement, not on the employee: HR payroll is
+    // retired (§B6) and running it is a FINANCE action, so this needs its own
+    // token and the staff code rather than the employee id.
+    const finLogin = await req('POST', '/auth/login', {
+      body: { phone: '9800000004', password: HR_PASSWORD },
+    });
+    const finToken = finLogin.body?.access_token || finLogin.body?.data?.access_token;
+    check('logged in as Finance to run payroll', !!finToken, finLogin.raw);
+
+    const gen = await req('POST', '/finance/payroll/attendance-generate', {
+      token: finToken,
+      body: { code: target.staffCode, month: MONTH, year: YEAR },
     });
     check('payroll generated for the period', [200, 201].includes(gen.status), gen.rawBody);
     const slips = await req('GET', `/employees/${employeeId}/payslips`, { token });

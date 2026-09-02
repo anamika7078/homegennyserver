@@ -15,6 +15,7 @@ import {
   PF_WAGE_CEILING,
 } from '../../common/finance/statutory-calc.util';
 import { StatutoryTaxService } from '../finance/tax/statutory-tax.service';
+import { ConsolidatedInvoiceService } from '../finance/invoice/consolidated-invoice.service';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const Razorpay = require('razorpay');
@@ -121,6 +122,7 @@ export class PayrollService {
     private readonly config: ConfigService,
     private readonly dataSource: DataSource,
     private readonly tax: StatutoryTaxService,
+    private readonly consolidatedInvoices: ConsolidatedInvoiceService,
   ) {
     // Razorpay is initialised lazily in getRazorpay() so that the module
     // boots cleanly in dev even when credentials are placeholders.
@@ -280,99 +282,37 @@ export class PayrollService {
     };
   }
 
-  /**
-   * Writes the client invoice and its line items together.
-   *
-   * Both payroll paths used to inline their own near-identical INSERT, which
-   * is how they drifted apart before (one had a duplicate guard, the other
-   * didn't). More importantly, neither stored employer ESIC/PF nor wrote any
-   * `invoice_items` at all — so the four line items the invoice rendered
-   * summed to less than the total it charged, with the employer
-   * contributions unexplained. See F-03 in docs/FINANCE_MODULE_AUDIT.md.
+  /*
+   * `insertInvoiceWithItems` used to live here: it minted one invoice per
+   * placement, numbered `INV-<period>-<first 6 of placement id>`. That is the
+   * bug this release removes — an invoice belongs to a client, so a client
+   * with three staff was getting three unrelated invoices. Both payroll paths
+   * now record payroll only and hand billing to ConsolidatedInvoiceService.
+   * See ONE_STAFF_MODEL_PLAN.md §B3.
    */
-  private async insertInvoiceWithItems(
-    manager: { query: <T>(sql: string, params?: unknown[]) => Promise<T> },
-    args: {
-      placementId: string;
-      clientId: string;
-      month: number;
-      year: number;
-      calc: PayrollCalculation;
-    },
-  ): Promise<Record<string, unknown>> {
-    const { placementId, clientId, month, year, calc } = args;
-
-    const invoiceNo = `INV-${year}${String(month).padStart(2, '0')}-${placementId.slice(0, 6).toUpperCase()}`;
-    const dueDate = new Date(year, month, 5); // 5th of the following month
-
-    const items: { description: string; amount: number; taxable: boolean }[] = [
-      { description: 'Staff Salary Component', amount: calc.grossSalary, taxable: false },
-      { description: `Employer ESIC (${calc.ratesUsed.esicEmployerPct}%)`, amount: calc.esicEmployer, taxable: false },
-      { description: `Employer PF (${calc.ratesUsed.pfEmployerPct}%)`, amount: calc.pfEmployer, taxable: false },
-      { description: 'Management Fee', amount: calc.managementFee, taxable: true },
-      { description: `GST on Management Fee (${calc.ratesUsed.gstPct}%)`, amount: calc.gstOnFee, taxable: false },
-    ];
-
-    // The invoice must be able to explain its own total. If these ever
-    // disagree the invoice is not sendable, so fail the transaction rather
-    // than persist a document a client would rightly query.
-    const itemsTotal = round2(items.reduce((sum, i) => sum + i.amount, 0));
-    if (Math.abs(itemsTotal - calc.clientTotalCharge) > 0.01) {
-      throw new BadRequestException(
-        `Invoice line items (${itemsTotal}) do not reconcile to the total charge ` +
-        `(${calc.clientTotalCharge}) for placement ${placementId} ${month}/${year}.`,
-      );
-    }
-
-    const [invoice] = await manager.query<Record<string, unknown>[]>(
-      // Starts at DRAFT, not PENDING: a freshly computed invoice has been
-      // approved by nobody, and the state machine's first move is DRAFT →
-      // APPROVED. See F-12.
-      `INSERT INTO client_invoices
-         (id, placement_id, client_id, invoice_number, period_month, period_year,
-          staff_salary_component, management_fee, gst_amount,
-          esic_employer, pf_employer, total_amount, due_date, status)
-       VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'DRAFT') RETURNING *`,
-      [
-        placementId, clientId, invoiceNo, month, year,
-        calc.grossSalary, calc.managementFee, calc.gstOnFee,
-        calc.esicEmployer, calc.pfEmployer, calc.clientTotalCharge, dueDate,
-      ],
-    );
-
-    for (const item of items) {
-      await manager.query(
-        `INSERT INTO invoice_items (id, invoice_id, description, amount, is_taxable)
-         VALUES (gen_random_uuid(), $1, $2, $3, $4)`,
-        [invoice.id, item.description, item.amount, item.taxable],
-      );
-    }
-
-    return invoice;
-  }
 
   async runMonthlyPayroll(
     placementId: string,
     month: number,
     year: number,
   ): Promise<Record<string, unknown>> {
-    // Was missing entirely — runAttendancePayroll (the newer, UI-driven path)
-    // already has this check; this legacy path didn't, so calling it twice
-    // for the same placement/month created two payroll_records + two
-    // client_invoices rows with no error. Same guard, same shape.
+    // Was missing entirely — calling this twice for the same placement/month
+    // used to create two payroll_records with no error. Keyed off payroll
+    // rather than off the invoice, because a consolidated invoice covers a
+    // whole client and carries no placement_id.
     const existing = await this.dataSource.query<{ id: string }[]>(
-      `SELECT id FROM client_invoices
+      `SELECT id FROM payroll_records
        WHERE placement_id = $1 AND period_month = $2 AND period_year = $3
        LIMIT 1`,
       [placementId, month, year],
     );
     if (existing.length) {
       throw new BadRequestException(
-        `Invoice already exists for placement ${placementId} in ${month}/${year}`,
+        `Payroll already exists for placement ${placementId} in ${month}/${year}`,
       );
     }
 
-    return this.dataSource.transaction(async (manager) => {
+    const result = await this.dataSource.transaction(async (manager) => {
       const placements = await manager.query<PlacementRow[]>(
         `SELECT staff_id, client_id, staff_salary, management_fee, metadata
          FROM placements WHERE id = $1`,
@@ -420,17 +360,44 @@ export class PayrollService {
         ],
       );
 
-      const invoice = await this.insertInvoiceWithItems(manager, {
-        placementId,
-        clientId: p.client_id,
-        month,
-        year,
-        calc,
-      });
-
       this.logger.log(`[PAYROLL] Completed placement ${placementId} ${month}/${year}`);
-      return { payroll, invoice, calculation: calc };
+      return { payroll, clientId: p.client_id, calculation: calc };
     });
+
+    // The invoice belongs to the client, not to this placement, so it is
+    // issued (or extended) outside the payroll transaction — see §B3. A
+    // failure here leaves the payroll standing and the client simply
+    // un-invoiced, which month-end billing will pick up.
+    const invoice = await this.billClientFor(
+      result.clientId as string, month, year, placementId,
+    );
+    return { ...result, invoice };
+  }
+
+  /**
+   * Fold this placement's freshly-run payroll into its client's invoice for the
+   * period, creating that invoice if it does not exist yet.
+   *
+   * Returns null rather than throwing when the invoice cannot be touched — an
+   * already-sent invoice, for instance. The payroll is real either way, and
+   * refusing to record it because billing is closed would be the wrong trade.
+   */
+  private async billClientFor(
+    clientId: string,
+    month: number,
+    year: number,
+    placementId: string,
+  ): Promise<Record<string, unknown> | null> {
+    try {
+      const { invoice } = await this.consolidatedInvoices.generateOrAmend(clientId, month, year);
+      return invoice as Record<string, unknown>;
+    } catch (e) {
+      this.logger.warn(
+        `[PAYROLL] Payroll for placement ${placementId} ${month}/${year} is recorded, ` +
+          `but the client invoice was not updated: ${(e as Error).message}`,
+      );
+      return null;
+    }
   }
 
   async countAttendanceForStaff(
@@ -495,20 +462,32 @@ export class PayrollService {
     };
   }
 
-  async runAttendancePayroll(
+  /**
+   * The payroll half of runAttendancePayroll, without the invoice.
+   *
+   * An invoice belongs to a *client*, not to a placement: a client with a
+   * driver, a cook and a maid gets one invoice listing three people. So the
+   * monthly run computes each placement's payroll here, and
+   * ConsolidatedInvoiceService then issues one invoice per client from the
+   * payroll records this produced. See ONE_STAFF_MODEL_PLAN.md §B1.
+   *
+   * Idempotent on (placement, period): re-running skips rather than paying
+   * twice.
+   */
+  async generateAttendancePayrollOnly(
     placementId: string,
     month: number,
     year: number,
   ): Promise<Record<string, unknown>> {
-    const existing = await this.dataSource.query<{ id: string }[]>(
-      `SELECT id FROM client_invoices
+    const already = await this.dataSource.query<{ id: string }[]>(
+      `SELECT id FROM payroll_records
        WHERE placement_id = $1 AND period_month = $2 AND period_year = $3
        LIMIT 1`,
       [placementId, month, year],
     );
-    if (existing.length) {
+    if (already.length) {
       throw new BadRequestException(
-        `Invoice already exists for placement ${placementId} in ${month}/${year}`,
+        `Payroll already exists for placement ${placementId} in ${month}/${year}`,
       );
     }
 
@@ -525,7 +504,66 @@ export class PayrollService {
     const p = placements[0];
     const calc = preview.calculation as PayrollCalculation;
 
-    return this.dataSource.transaction(async (manager) => {
+    const [payroll] = await this.dataSource.query<Record<string, unknown>[]>(
+      `INSERT INTO payroll_records
+         (id, placement_id, staff_id, period_month, period_year, shift_days,
+          gross_salary, deductions, net_salary,
+          esic_employer, esic_employee, pf_employer, pf_employee)
+       VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [
+        placementId,
+        p.staff_id,
+        month,
+        year,
+        preview.billable_days,
+        calc.grossSalary,
+        JSON.stringify({ esic: calc.esicEmployee, pf: calc.pfEmployee }),
+        calc.netSalary,
+        calc.esicEmployer,
+        calc.esicEmployee,
+        calc.pfEmployer,
+        calc.pfEmployee,
+      ],
+    );
+
+    this.logger.log(`[ATTENDANCE_PAYROLL_ONLY] placement ${placementId} ${month}/${year}`);
+    return { payroll, preview, calculation: calc };
+  }
+
+  async runAttendancePayroll(
+    placementId: string,
+    month: number,
+    year: number,
+  ): Promise<Record<string, unknown>> {
+    // Keyed off payroll, not off the invoice: a consolidated invoice covers a
+    // whole client and carries no placement_id, so "has this placement already
+    // been run?" can only be answered by payroll_records.
+    const existing = await this.dataSource.query<{ id: string }[]>(
+      `SELECT id FROM payroll_records
+       WHERE placement_id = $1 AND period_month = $2 AND period_year = $3
+       LIMIT 1`,
+      [placementId, month, year],
+    );
+    if (existing.length) {
+      throw new BadRequestException(
+        `Payroll already exists for placement ${placementId} in ${month}/${year}`,
+      );
+    }
+
+    const preview = await this.previewAttendancePayroll(placementId, month, year);
+    if (preview.billable_days <= 0) {
+      throw new BadRequestException('No billable attendance days for this period');
+    }
+
+    const placements = await this.dataSource.query<PlacementRow[]>(
+      `SELECT staff_id, client_id, staff_salary, management_fee
+       FROM placements WHERE id = $1`,
+      [placementId],
+    );
+    const p = placements[0];
+    const calc = preview.calculation as PayrollCalculation;
+
+    const result = await this.dataSource.transaction(async (manager) => {
       const [payroll] = await manager.query<Record<string, unknown>[]>(
         `INSERT INTO payroll_records
            (id, placement_id, staff_id, period_month, period_year, shift_days,
@@ -548,17 +586,14 @@ export class PayrollService {
         ],
       );
 
-      const invoice = await this.insertInvoiceWithItems(manager, {
-        placementId,
-        clientId: p.client_id,
-        month,
-        year,
-        calc,
-      });
-
       this.logger.log(`[ATTENDANCE_PAYROLL] placement ${placementId} ${month}/${year}`);
-      return { payroll, invoice, preview, calculation: calc };
+      return { payroll, clientId: p.client_id, preview, calculation: calc };
     });
+
+    const invoice = await this.billClientFor(
+      result.clientId as string, month, year, placementId,
+    );
+    return { ...result, invoice };
   }
 
   /**
@@ -831,66 +866,44 @@ export class PayrollService {
     };
   }
 
-  async runEmployeePayroll(employeeId: string, month: number, year: number) {
-    const existing = await this.dataSource.query<{ id: string }[]>(
-      `SELECT id FROM employee_payrolls
-       WHERE employee_id = $1::uuid AND period_month = $2 AND period_year = $3
-       LIMIT 1`,
-      [employeeId, month, year],
+  /**
+   * Retired. `employee_payrolls` is no longer written to.
+   *
+   * There was one population of staff and three engines that could pay them —
+   * `payroll_records`, `employee_payrolls` and `payroll_details` — with nothing
+   * stopping the same person being paid by two of them. `payroll_records` is
+   * the engine that survives, because the client invoice is built from it; a
+   * second writable engine means the payslip and the invoice can disagree.
+   *
+   * Existing rows are still read everywhere they were — payslips, ESIC and PF
+   * reports, analytics, the invoice list — so nothing historical is lost. Both
+   * databases held zero rows when this was closed.
+   *
+   * Every employee is a pipeline candidate with a placement (§B4), so their
+   * payroll runs through `runAttendancePayroll` like everyone else's. See
+   * ONE_STAFF_MODEL_PLAN.md §B6.
+   */
+  async runEmployeePayroll(employeeId: string, month: number, year: number): Promise<never> {
+    const who = await this.dataSource.query<{ employee_id: string; staff_applicant_id: string | null }[]>(
+      `SELECT employee_id, staff_applicant_id FROM employees WHERE id = $1::uuid`,
+      [employeeId],
     );
-    if (existing.length) {
-      throw new BadRequestException(
-        `Payroll already exists for employee ${employeeId} in ${month}/${year}`,
-      );
-    }
+    const code = who[0]?.employee_id ?? employeeId;
 
-    const preview = await this.previewEmployeePayroll(employeeId, month, year);
-    if (preview.billable_days <= 0) {
-      throw new BadRequestException('No billable attendance days for this period');
-    }
-
-    const calc = preview.calculation;
-
-    return this.dataSource.transaction(async (manager) => {
-      const [payroll] = await manager.query<Record<string, unknown>[]>(
-        // Statutory contributions go into columns as well as the deductions
-        // blob: a government filing aggregates across engines and cannot be
-        // asked to parse JSON, and the employer side had no home at all
-        // before this. See F-06 / F-07.
-        `INSERT INTO employee_payrolls
-           (id, employee_id, period_month, period_year, present_days,
-            gross_salary, deductions, esic_employee, esic_employer,
-            pf_employee, pf_employer, net_salary, updated_at)
-         VALUES (gen_random_uuid(), $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW()) RETURNING *`,
-        [
-          employeeId,
-          month,
-          year,
-          preview.billable_days,
-          calc.grossSalary,
-          // Every component, not just ESIC + PF — the payslip renders straight
-          // from this, so anything omitted here is invisible to the employee.
-          JSON.stringify({
-            esic: calc.esicEmployee,
-            pf: calc.pfEmployee,
-            professionalTax: calc.ptDeduction,
-            tds: calc.tdsDeduction,
-            loanEmi: calc.loanEmiDeduction,
-            advance: calc.advanceDeduction,
-          }),
-          calc.esicEmployee,
-          calc.esicEmployer,
-          calc.pfEmployee,
-          calc.pfEmployer,
-          calc.netSalary,
-        ],
-      );
-
-      this.logger.log(`[EMPLOYEE_PAYROLL] employee ${employeeId} ${month}/${year}`);
-      return { payroll, preview };
-    });
+    throw new BadRequestException(
+      who[0]?.staff_applicant_id
+        ? `HR payroll is retired — ${code} is paid through their placement. ` +
+          `Run payroll for their staff code instead, and it will appear on their ` +
+          `client's invoice for ${month}/${year}.`
+        : `HR payroll is retired, and ${code} is not linked to a pipeline candidate, ` +
+          `so there is no placement to pay against. Onboard them from the pipeline first.`,
+    );
   }
 
+  /**
+   * Existing rows are still listed — payslips, ESIC and PF filings, analytics
+   * and the invoice list all read them. Only the writer is gone.
+   */
   async getEmployeePayrolls(): Promise<Record<string, unknown>[]> {
     return this.dataSource.query(
       `SELECT ep.id,

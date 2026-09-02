@@ -5,6 +5,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PayrollService } from '../payroll/payroll.service';
+import { ConsolidatedInvoiceService } from '../finance/invoice/consolidated-invoice.service';
 
 @Injectable()
 export class EnterpriseCronService {
@@ -16,20 +17,22 @@ export class EnterpriseCronService {
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly payroll: PayrollService,
+    private readonly consolidatedInvoices: ConsolidatedInvoiceService,
   ) {}
 
   /**
-   * Attendance is staff-owned and billable the moment they check in (see
-   * StaffMobileController#checkIn) — but an invoice/payroll run is a monthly
-   * billing document, so it can't happen per check-in the same way the
-   * preview does (that's already always live). This replaces RM having to
-   * remember to call POST /rm/attendance/:staffId/generate-invoice for every
-   * CONFIRMED placement each month — same calculation
-   * (PayrollService.runAttendancePayroll, keyed by placement → staff →
-   * client, exactly as it already worked), just triggered automatically
-   * instead of manually. Manual generation (RM's endpoint, and Finance's
-   * POST /finance/payroll/attendance-generate) still exists — this cron
-   * doesn't replace either, it just means nobody has to remember to click it.
+   * Month-end billing, in the two passes the business model actually has.
+   *
+   * Pass 1 computes payroll per placement, because each staff member is paid
+   * individually from their own attendance. Pass 2 issues **one invoice per
+   * client** from those payroll records, because a client with a driver, a
+   * cook and a maid is owed a single invoice listing three people — not three
+   * unrelated invoices, which is what this cron used to produce (it looped
+   * placements and let each one mint its own invoice numbered from the
+   * placement id). See ONE_STAFF_MODEL_PLAN.md §B1.
+   *
+   * Both passes are best-effort per row: one bad placement or customer must
+   * not block the rest of the month's billing.
    */
   @Cron(CronExpression.EVERY_1ST_DAY_OF_MONTH_AT_MIDNIGHT)
   async autoGenerateAttendanceInvoices() {
@@ -38,28 +41,59 @@ export class EnterpriseCronService {
     const month = prevMonthDate.getMonth() + 1;
     const year = prevMonthDate.getFullYear();
 
+    // ── Pass 1: payroll, per placement ──────────────────────────────────
     const placements = await this.prisma.placement.findMany({
       where: { status: 'CONFIRMED' },
       select: { id: true },
     });
 
-    let generated = 0;
-    let skipped = 0;
+    let paid = 0;
+    let paySkipped = 0;
     for (const p of placements) {
       try {
-        await this.payroll.runAttendancePayroll(p.id, month, year);
-        generated++;
+        await this.payroll.generateAttendancePayrollOnly(p.id, month, year);
+        paid++;
       } catch (e) {
-        // Already generated, no billable days, salary/fee not set, etc. —
-        // best-effort batch, one bad placement must not block the rest.
-        skipped++;
-        this.logger.warn(`[AUTO-INVOICE] Skipped placement ${p.id} for ${month}/${year}: ${(e as Error).message}`);
+        // Already run, no billable days, salary/fee not set, etc.
+        paySkipped++;
+        this.logger.warn(
+          `[AUTO-BILLING] Payroll skipped for placement ${p.id} ${month}/${year}: ${(e as Error).message}`,
+        );
       }
     }
 
-    this.logger.log(`[AUTO-INVOICE] ${month}/${year}: generated=${generated} skipped=${skipped}`);
-    if (generated) {
-      this.events.emit('cron.attendance_invoices_generated', { month, year, generated, skipped });
+    // ── Pass 2: one invoice per client ──────────────────────────────────
+    const customers = await this.consolidatedInvoices.pendingForPeriod(month, year);
+
+    let invoiced = 0;
+    let invSkipped = 0;
+    for (const c of customers as { customer_id: string; customer_name: string }[]) {
+      try {
+        await this.consolidatedInvoices.generate(c.customer_id, month, year);
+        invoiced++;
+      } catch (e) {
+        // Already invoiced, nothing un-invoiced left, or the line items did
+        // not reconcile — the service refuses rather than issue a document a
+        // client would rightly query.
+        invSkipped++;
+        this.logger.warn(
+          `[AUTO-BILLING] Invoice skipped for ${c.customer_name} ${month}/${year}: ${(e as Error).message}`,
+        );
+      }
+    }
+
+    this.logger.log(
+      `[AUTO-BILLING] ${month}/${year}: payroll=${paid}/${placements.length} ` +
+        `invoices=${invoiced}/${(customers as unknown[]).length} ` +
+        `(skipped payroll=${paySkipped} invoices=${invSkipped})`,
+    );
+    if (invoiced) {
+      this.events.emit('cron.attendance_invoices_generated', {
+        month,
+        year,
+        generated: invoiced,
+        skipped: invSkipped,
+      });
     }
   }
 

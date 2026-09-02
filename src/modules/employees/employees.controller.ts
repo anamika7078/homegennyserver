@@ -141,6 +141,20 @@ export class EmployeesController {
     if (!body.fullName || !body.mobile || !body.dateOfBirth || !body.gender || !body.address || !body.city || !body.state || !body.pincode || !body.joiningDate || !body.branchId || !body.categoryId || !body.department || !body.designation || !body.employmentType || body.salary === undefined) {
       throw new BadRequestException('Missing required fields for employee creation');
     }
+
+    // Every employee is a person the pipeline placed with a client; there is no
+    // separate population of internal hires. This endpoint used to allow an
+    // employee with no pipeline link at all, which is how production ended up
+    // with two orphaned rows whose designations ("Caretaker", "Office Boy")
+    // are placed-staff roles. See ONE_STAFF_MODEL_PLAN.md §B4.
+    if (!body.staffApplicantId) {
+      throw new BadRequestException(
+        'staffApplicantId is required — an employee must come from a pipeline candidate ' +
+          'at S5_DEPLOY. Use POST /employees/onboard-from-pipeline, or pass the candidate id here.',
+      );
+    }
+    await this.onboarding.assertOnboardable(body.staffApplicantId);
+
     await this.userProvisioning.assertPhoneAvailable(body.mobile, body.email);
     const employee = await this.service.create(body);
     await this.userProvisioning.linkStaffAccount({

@@ -192,17 +192,43 @@ export class FinancePayrollService {
       };
     }
 
+    // An HR employee code resolves to the same person — every employee is a
+    // pipeline candidate onboarded at S5_DEPLOY (§B4), so their payroll runs
+    // on their placement like everyone else's. This join is what retires the
+    // second payroll engine: there is no separate EMPLOYEE path any more.
+    // See ONE_STAFF_MODEL_PLAN.md §B6.
     const empRows = await this.dataSource.query<{
       id: string;
       employee_id: string;
       full_name: string;
       department: string | null;
       salary: string;
+      staff_applicant_id: string | null;
+      staff_code: string | null;
+      placement_id: string | null;
+      monthly_salary: string | null;
+      client_name: string | null;
+      placement_status: string | null;
     }[]>(
-      `SELECT id, employee_id, full_name, department, salary
-       FROM employees
-       WHERE UPPER(employee_id) = UPPER($1) AND UPPER(status) = 'ACTIVE'
-       LIMIT 1`,
+      `SELECT e.id, e.employee_id, e.full_name, e.department, e.salary,
+              e.staff_applicant_id,
+              sa.staff_code,
+              p.id AS placement_id,
+              p.staff_salary AS monthly_salary,
+              c.customer_name AS client_name,
+              p.status AS placement_status
+         FROM employees e
+         LEFT JOIN staff_applicants sa ON sa.id = e.staff_applicant_id
+         LEFT JOIN LATERAL (
+           SELECT id, staff_salary, status, client_id
+             FROM placements
+            WHERE staff_id = sa.id AND status = 'CONFIRMED'
+            ORDER BY created_at DESC
+            LIMIT 1
+         ) p ON true
+         LEFT JOIN finance_customers c ON c.id = p.client_id
+        WHERE UPPER(e.employee_id) = UPPER($1) AND UPPER(e.status) = 'ACTIVE'
+        LIMIT 1`,
       [trimmed],
     );
 
@@ -211,13 +237,22 @@ export class FinancePayrollService {
     }
 
     const e = empRows[0];
+    if (!e.staff_applicant_id) {
+      throw new BadRequestException(
+        `Employee ${e.employee_id} is not linked to a pipeline candidate, so there is ` +
+          `no placement to bill against. Onboard them from the pipeline instead.`,
+      );
+    }
+
     return {
-      type: 'EMPLOYEE' as const,
-      employee_id: e.id,
-      employee_code: e.employee_id,
+      type: 'PLACEMENT' as const,
+      staff_id: e.staff_applicant_id,
+      staff_code: e.staff_code ?? e.employee_id,
       staff_name: e.full_name,
-      department: e.department,
-      monthly_salary: parseFloat(e.salary),
+      placement_id: e.placement_id,
+      monthly_salary: e.monthly_salary ? parseFloat(e.monthly_salary) : parseFloat(e.salary),
+      client_name: e.client_name,
+      placement_status: e.placement_status,
     };
   }
 
@@ -234,10 +269,19 @@ export class FinancePayrollService {
         throw new BadRequestException('Staff has no confirmed placement — cannot generate client invoice');
       }
       const preview = await this.corePayroll.previewAttendancePayroll(lookup.placement_id, month, year);
-      const existing = await this.dataSource.query<{ id: string; invoice_number: string }[]>(
-        `SELECT id, invoice_number FROM client_invoices
-         WHERE placement_id = $1 AND period_month = $2 AND period_year = $3
-         LIMIT 1`,
+      // "Has this already been run?" is answered by payroll, not by the
+      // invoice: a consolidated invoice covers a whole client and leaves
+      // placement_id NULL, so the old lookup on client_invoices.placement_id
+      // always came back empty. The invoice reported here is the *client's*
+      // invoice this payroll was billed on. See ONE_STAFF_MODEL_PLAN.md §B6.
+      const existing = await this.dataSource.query<
+        { id: string; invoice_id: string | null; invoice_number: string | null }[]
+      >(
+        `SELECT pr.id, ci.id AS invoice_id, ci.invoice_number
+           FROM payroll_records pr
+           LEFT JOIN client_invoices ci ON ci.id = pr.client_invoice_id
+          WHERE pr.placement_id = $1 AND pr.period_month = $2 AND pr.period_year = $3
+          LIMIT 1`,
         [lookup.placement_id, month, year],
       );
       return {
@@ -246,56 +290,47 @@ export class FinancePayrollService {
         staff_code: lookup.staff_code,
         staff_name: lookup.staff_name,
         client_name: lookup.client_name,
-        invoice_id: existing[0]?.id ?? null,
+        payroll_id: existing[0]?.id ?? null,
+        invoice_id: existing[0]?.invoice_id ?? null,
         invoice_number: existing[0]?.invoice_number ?? null,
       };
     }
 
-    const preview = await this.corePayroll.previewEmployeePayroll(lookup.employee_id, month, year);
-    const existing = await this.dataSource.query<{ id: string }[]>(
-      `SELECT id FROM employee_payrolls
-       WHERE employee_id = $1::uuid AND period_month = $2 AND period_year = $3
-       LIMIT 1`,
-      [lookup.employee_id, month, year],
+    // There is no second branch any more: lookupByCode resolves an employee
+    // code through their pipeline candidate to the same placement, so every
+    // code arrives here as a PLACEMENT. See ONE_STAFF_MODEL_PLAN.md §B6.
+    throw new BadRequestException(
+      `${code} has no confirmed placement, so there is nothing to bill for ${month}/${year}.`,
     );
-    return {
-      ...preview,
-      type: 'EMPLOYEE',
-      staff_code: lookup.employee_code,
-      staff_name: lookup.staff_name,
-      department: lookup.department,
-      payroll_id: existing[0]?.id ?? null,
-    };
   }
 
-  /** Generate attendance-based payroll record (+ client invoice for EOR staff) */
+  /**
+   * Run one staff member's payroll and fold it into their client's invoice.
+   *
+   * The invoice returned is the *client's* invoice for the period, which this
+   * person has been added to — not an invoice for them alone. It can be null
+   * when that invoice has already been sent and so cannot be amended; the
+   * payroll is recorded either way. See ONE_STAFF_MODEL_PLAN.md §B3.
+   */
   async generateAttendanceByCode(code: string, month: number, year: number) {
     const lookup = await this.resolveCode(code);
 
-    if (lookup.type === 'PLACEMENT') {
-      if (!lookup.placement_id) {
-        throw new BadRequestException('Staff has no confirmed placement');
-      }
-      const result = await this.corePayroll.runAttendancePayroll(lookup.placement_id, month, year);
-      const invoice = result.invoice as Record<string, unknown>;
-      return {
-        type: 'PLACEMENT',
-        invoice_id: invoice.id,
-        invoice_number: invoice.invoice_number,
-        payroll_id: (result.payroll as Record<string, unknown>).id,
-        preview: result.preview,
-        calculation: result.calculation,
-        staff_code: lookup.staff_code,
-        staff_name: lookup.staff_name,
-      };
+    if (!lookup.placement_id) {
+      throw new BadRequestException(
+        `${code} has no confirmed placement, so there is nothing to bill for ${month}/${year}.`,
+      );
     }
 
-    const result = await this.corePayroll.runEmployeePayroll(lookup.employee_id, month, year);
+    const result = await this.corePayroll.runAttendancePayroll(lookup.placement_id, month, year);
+    const invoice = result.invoice as Record<string, unknown> | null;
     return {
-      type: 'EMPLOYEE',
+      type: 'PLACEMENT',
+      invoice_id: invoice?.id ?? null,
+      invoice_number: invoice?.invoice_number ?? null,
       payroll_id: (result.payroll as Record<string, unknown>).id,
       preview: result.preview,
-      staff_code: lookup.employee_code,
+      calculation: result.calculation,
+      staff_code: lookup.staff_code,
       staff_name: lookup.staff_name,
     };
   }

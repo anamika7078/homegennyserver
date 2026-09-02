@@ -15,6 +15,8 @@ require('dotenv').config();
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
 const HR_PHONE = '9800000008';
 const HR_PASSWORD = 'HomeGenny@2024';
+// Running payroll is a FINANCE action, so section [3] needs its own token.
+const FINANCE_PHONE = '9800000004';
 
 // A month far enough out that no real data lives there.
 const YEAR = 2031;
@@ -120,6 +122,18 @@ async function req(method, path, { token, body } = {}) {
 
   async function cleanup() {
     await db.query('DELETE FROM employee_payrolls WHERE employee_id = $1', [employeeId]);
+    // Payroll now lands in payroll_records against the placement (§B6). Left
+    // behind, it makes the next suite's run refuse as a duplicate.
+    await db.query(
+      `UPDATE payroll_records SET client_invoice_id = NULL
+        WHERE placement_id IN (SELECT id FROM placements WHERE staff_id = $1)`,
+      [target.id],
+    );
+    await db.query(
+      `DELETE FROM payroll_records
+        WHERE placement_id IN (SELECT id FROM placements WHERE staff_id = $1)`,
+      [target.id],
+    );
     await db.query('DELETE FROM attendance WHERE employee_id = $1', [employeeId]);
     await db.query(
       "DELETE FROM staff_daily_attendance WHERE staff_id = $1 AND attendance_date >= '2031-01-01'",
@@ -151,17 +165,23 @@ async function req(method, path, { token, body } = {}) {
     );
     check('HR ledger has no rows for this employee yet', before.rows[0].n === 0, before.rows[0]);
 
-    const payrollBlocked = await req(
+    // Calling the retired HR payroll endpoint still runs the projection before
+    // it refuses, which is what this step is here to trigger. The refusal
+    // itself is asserted below.
+    const retired = await req(
       'POST',
       `/attendance/${employeeId}/generate-payroll?month=${MONTH}&year=${YEAR}`,
       { token, body: { month: MONTH, year: YEAR } },
     );
-    // This is the regression the projection exists to fix: it must NOT be a
-    // "no billable days" rejection any more.
     check(
-      'generate-payroll no longer fails with "No billable attendance days"',
-      !/no billable attendance days/i.test(JSON.stringify(payrollBlocked.raw ?? '')),
-      payrollBlocked.raw,
+      'the retired HR payroll endpoint refuses, and says why',
+      /retired/i.test(JSON.stringify(retired.raw ?? '')),
+      retired.raw,
+    );
+    check(
+      'it does not fail with "No billable attendance days"',
+      !/no billable attendance days/i.test(JSON.stringify(retired.raw ?? '')),
+      retired.raw,
     );
 
     // ── 2. the days landed in the HR ledger ────────────────────────────────
@@ -193,21 +213,63 @@ async function req(method, path, { token, body } = {}) {
     );
 
     // ── 3. payroll actually paid for those days ────────────────────────────
+    //
+    // Payroll now runs on the placement (§B6): `employee_payrolls` is retired,
+    // and `payroll_records` reads `staff_daily_attendance` — the field ledger —
+    // directly. So the "no billable days" regression this projection was built
+    // to fix is now structurally impossible for placement payroll. The
+    // projection still earns its keep by making those days visible in HR's own
+    // attendance views, which is what section [2] asserts.
     console.log('\n[3] Payroll counted them');
-    const payrollRow = await db.query(
-      'SELECT present_days, gross_salary, net_salary FROM employee_payrolls WHERE employee_id = $1',
+
+    const placement = await db.query(
+      `SELECT p.id
+         FROM placements p
+         JOIN employees e ON e.staff_applicant_id = p.staff_id
+        WHERE e.id = $1 AND p.status = 'CONFIRMED'
+        ORDER BY p.created_at DESC LIMIT 1`,
       [employeeId],
     );
-    check(
-      `payroll recorded ${FIELD_DAYS.length} present days`,
-      Number(payrollRow.rows[0]?.present_days) === FIELD_DAYS.length,
-      payrollRow.rows[0],
-    );
-    check(
-      'gross salary is greater than zero',
-      Number(payrollRow.rows[0]?.gross_salary) > 0,
-      payrollRow.rows[0],
-    );
+    check('the employee is placed with a client', placement.rowCount === 1, placement.rows);
+
+    if (placement.rowCount === 1) {
+      const placementId = placement.rows[0].id;
+      await db.query(
+        `DELETE FROM payroll_records WHERE placement_id = $1 AND period_month = $2 AND period_year = $3`,
+        [placementId, MONTH, YEAR],
+      );
+
+      const finLogin = await req('POST', '/auth/login', {
+        body: { phone: FINANCE_PHONE, password: HR_PASSWORD },
+      });
+      const finToken = finLogin.body?.access_token || finLogin.body?.data?.access_token;
+      check('logged in as Finance to run payroll', !!finToken, finLogin.raw);
+
+      // The attendance path, not /payroll/run — that one counts approved
+      // shift_logs, whereas the field check-ins this test creates live in
+      // staff_daily_attendance. This is also the route the employee code now
+      // resolves through, since HR payroll is retired (§B6).
+      const ran = await req('POST', '/finance/payroll/attendance-generate', {
+        token: finToken,
+        body: { code: target.staffCode, month: MONTH, year: YEAR },
+      });
+
+      const payrollRow = await db.query(
+        `SELECT shift_days, gross_salary, net_salary FROM payroll_records
+          WHERE placement_id = $1 AND period_month = $2 AND period_year = $3`,
+        [placementId, MONTH, YEAR],
+      );
+      check(
+        `payroll recorded ${FIELD_DAYS.length} billable days`,
+        Number(payrollRow.rows[0]?.shift_days) === FIELD_DAYS.length,
+        payrollRow.rows[0] ?? ran.raw,
+      );
+      check(
+        'gross salary is greater than zero',
+        Number(payrollRow.rows[0]?.gross_salary) > 0,
+        payrollRow.rows[0] ?? ran.raw,
+      );
+    }
 
     // ── 4. an HR correction outranks the field record ──────────────────────
     console.log('\n[4] HR corrections are never overwritten by a re-run');

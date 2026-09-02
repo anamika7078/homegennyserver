@@ -61,8 +61,18 @@ export class ConsolidatedInvoiceService {
    * writing anything. Finance can see the document before committing a number
    * to the series.
    */
-  async preview(customerId: string, month: number, year: number) {
-    const customer = await this.dataSource.query<{
+  /**
+   * `runner` lets an amend-in-place recompute read its own uncommitted unlink
+   * (see generateOrAmend). Defaults to the pooled connection, which is what
+   * every read-only caller wants.
+   */
+  async preview(
+    customerId: string,
+    month: number,
+    year: number,
+    runner: { query<T = any>(sql: string, params?: unknown[]): Promise<T> } = this.dataSource,
+  ) {
+    const customer = await runner.query<{
       id: string; customer_name: string; gstn: string | null; state: string | null;
       bill_no_prefix: string; bill_seq: number; address: string | null; city: string | null;
     }[]>(
@@ -75,7 +85,7 @@ export class ConsolidatedInvoiceService {
 
     // Every payroll this customer's placements produced in the period that is
     // not already on an invoice.
-    const lines = await this.dataSource.query<PayrollLine[]>(
+    const lines = await runner.query<PayrollLine[]>(
       `SELECT pr.id AS payroll_id, pr.placement_id, pr.staff_id,
               sa.full_name AS staff_name, sa.staff_code,
               pr.gross_salary, pr.esic_employer, pr.pf_employer, pr.shift_days,
@@ -295,6 +305,115 @@ export class ConsolidatedInvoiceService {
       );
 
       return { invoice, preview };
+    });
+  }
+
+  /**
+   * Issue this client's invoice for the period, or fold newly-run payroll into
+   * the one already open.
+   *
+   * Payroll is produced one staff member at a time, but a client is owed one
+   * invoice. So when the second person's payroll lands, the right answer is not
+   * a second invoice — it is the same invoice, now listing two people. That is
+   * only safe while the document is still a DRAFT: once it has been approved or
+   * sent, the client has seen it, and the correction is a credit note rather
+   * than a silent edit.
+   *
+   * Returns `{ invoice, preview, amended }`.
+   */
+  async generateOrAmend(customerId: string, month: number, year: number, actorId?: string) {
+    const open = await this.dataSource.query<
+      { id: string; invoice_number: string; status: string }[]
+    >(
+      `SELECT id, invoice_number, status FROM client_invoices
+        WHERE client_id = $1 AND period_month = $2 AND period_year = $3
+          AND status <> 'CANCELLED'
+        LIMIT 1`,
+      [customerId, month, year],
+    );
+
+    if (!open.length) {
+      const result = await this.generate(customerId, month, year, actorId);
+      return { ...result, amended: false };
+    }
+
+    const existing = open[0];
+    if (existing.status !== 'DRAFT') {
+      throw new BadRequestException(
+        `Invoice ${existing.invoice_number} for ${month}/${year} is already ${existing.status} — ` +
+          `it cannot be amended. Issue a credit note instead.`,
+      );
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      // Release this invoice's payroll so the recompute below sees the full
+      // set — the rows already on it, plus whatever has been run since.
+      await manager.query(
+        `UPDATE payroll_records SET client_invoice_id = NULL WHERE client_invoice_id = $1`,
+        [existing.id],
+      );
+      await manager.query(`DELETE FROM invoice_items WHERE invoice_id = $1`, [existing.id]);
+
+      const preview = await this.preview(customerId, month, year, manager);
+      if (preview.staff_count === 0) {
+        throw new BadRequestException(
+          `No payroll left to bill for this customer in ${month}/${year}.`,
+        );
+      }
+      if (!preview.reconciles) {
+        throw new BadRequestException(
+          'Line items do not reconcile to the invoice total — refusing to amend.',
+        );
+      }
+
+      const t = preview.totals;
+      // The invoice keeps its id and its number: a client who has been told
+      // "your invoice is BILL/0007" must not find it renumbered.
+      const updated = await manager.query(
+        `UPDATE client_invoices
+            SET staff_salary_component = $2, management_fee = $3, gst_amount = $4,
+                esic_employer = $5, pf_employer = $6, total_amount = $7,
+                document_type = $8, taxable_value = $9,
+                cgst_amount = $10, sgst_amount = $11, igst_amount = $12
+          WHERE id = $1
+        RETURNING *`,
+        [
+          existing.id,
+          t.staff_salary, t.management_fee, t.gst_total, t.employer_esic, t.employer_pf,
+          t.total, preview.document_type, t.taxable_value, t.cgst, t.sgst, t.igst,
+        ],
+      );
+      // TypeORM hands back `[rows, affectedCount]` for UPDATE ... RETURNING.
+      const updatedRows = (Array.isArray(updated[0]) ? updated[0] : updated) as
+        Record<string, unknown>[];
+      const invoice = updatedRows[0];
+
+      for (const item of preview.line_items) {
+        await manager.query(
+          `INSERT INTO invoice_items
+             (id, invoice_id, description, amount, is_taxable, staff_id, staff_name,
+              placement_id, sac_code, sort_order)
+           VALUES (gen_random_uuid(), $1,$2,$3,$4,
+                   NULLIF($5,'')::uuid, NULLIF($6,''), NULLIF($7,'')::uuid, $8, $9)`,
+          [
+            existing.id, item.description, item.amount, item.is_taxable,
+            item.staff_id, item.staff_name, item.placement_id,
+            item.is_taxable ? preview.sac_code : null, item.sort_order,
+          ],
+        );
+      }
+
+      await manager.query(
+        `UPDATE payroll_records SET client_invoice_id = $1 WHERE id = ANY($2::uuid[])`,
+        [existing.id, preview.payroll_ids],
+      );
+
+      this.logger.log(
+        `[CONSOLIDATED_INVOICE] amended ${existing.invoice_number} — now ` +
+          `${preview.staff_count} staff, total ${t.total}, by ${actorId ?? 'unknown'}`,
+      );
+
+      return { invoice, preview, amended: true };
     });
   }
 
