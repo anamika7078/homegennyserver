@@ -446,7 +446,11 @@ export class PayrollService {
     const proratedPfBase = agreedPfBase != null
       ? this.calculateProratedGross(agreedPfBase, summary.billable_days, summary.days_in_month)
       : undefined;
-    const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee, ratesFromPlacementMetadata(p.metadata), proratedPfBase);
+    const calc = await this.applySupplierGstPolicy(
+      this.calculatePayrollWithAbsoluteFee(
+        proratedGross, proratedFee, ratesFromPlacementMetadata(p.metadata), proratedPfBase,
+      ),
+    );
 
     return {
       placement_id: placementId,
@@ -459,6 +463,36 @@ export class PayrollService {
       prorated_gross: proratedGross,
       prorated_management_fee: proratedFee,
       calculation: calc,
+    };
+  }
+
+  /**
+   * Make the preview charge what the invoice will actually charge.
+   *
+   * The calculation always applies 18% to the management fee, but
+   * ConsolidatedInvoiceService issues a **Bill of Supply** with no GST at all
+   * while `finance.supplier_gstin` is unset — an unregistered supplier cannot
+   * charge it. The two disagreed: a preview promising ₹18,633.06 against an
+   * invoice of ₹18,342.74, the difference being exactly the GST. Finance reads
+   * the preview before deciding to bill, so it has to tell the truth.
+   */
+  private async applySupplierGstPolicy<T extends PayrollCalculation>(calc: T): Promise<T> {
+    const rows = await this.dataSource.query<{ value: unknown }[]>(
+      `SELECT value FROM system_settings WHERE key = 'finance.supplier_gstin' LIMIT 1`,
+    );
+    const raw = rows[0]?.value;
+    const gstin = String(typeof raw === 'string' ? raw : (raw as { value?: unknown })?.value ?? raw ?? '')
+      .replace(/^"|"$/g, '')
+      .trim();
+    if (gstin) return calc;
+
+    return {
+      ...calc,
+      gstOnFee: 0,
+      clientTotalCharge: round2(calc.clientTotalCharge - calc.gstOnFee),
+      documentType: 'BILL_OF_SUPPLY',
+      gstNote:
+        'No GST charged — finance.supplier_gstin is not set, so this is issued as a Bill of Supply.',
     };
   }
 
