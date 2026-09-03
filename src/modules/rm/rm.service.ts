@@ -842,9 +842,15 @@ export class RmService {
       }
       placement = chosen;
     } else if (active.length > 1) {
+      // Count clients, not placements — see the same fix in
+      // StaffAttendanceMirrorService.
+      const clients = new Set(active.map((p) => p.clientId)).size;
       throw new BadRequestException(
-        `${staff.fullName} is placed with ${active.length} clients. Send placement_id to say ` +
-          `which one this day was worked at.`,
+        clients > 1
+          ? `${staff.fullName} is placed with ${clients} clients. Send placement_id to say ` +
+            `which one this day was worked at.`
+          : `${staff.fullName} has ${active.length} active placements with the same client. ` +
+            `Send placement_id to say which one this day was worked at.`,
       );
     }
 

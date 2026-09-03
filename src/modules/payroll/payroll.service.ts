@@ -122,7 +122,6 @@ export class PayrollService {
     private readonly config: ConfigService,
     private readonly dataSource: DataSource,
     private readonly tax: StatutoryTaxService,
-    private readonly consolidatedInvoices: ConsolidatedInvoiceService,
   ) {
     // Razorpay is initialised lazily in getRazorpay() so that the module
     // boots cleanly in dev even when credentials are placeholders.
@@ -364,46 +363,12 @@ export class PayrollService {
       return { payroll, clientId: p.client_id, calculation: calc };
     });
 
-    // The invoice belongs to the client, not to this placement, so it is
-    // issued (or extended) outside the payroll transaction — see §B3. A
-    // failure here leaves the payroll standing and the client simply
-    // un-invoiced, which month-end billing will pick up.
-    const billed = await this.billClientFor(
-      result.clientId as string, month, year, placementId,
-    );
-    return { ...result, invoice: billed.invoice, not_invoiced_because: billed.not_invoiced_because };
-  }
-
-  /**
-   * Fold this placement's freshly-run payroll into its client's invoice for the
-   * period, creating that invoice if it does not exist yet.
-   *
-   * Returns null rather than throwing when the invoice cannot be touched — an
-   * already-sent invoice, for instance. The payroll is real either way, and
-   * refusing to record it because billing is closed would be the wrong trade.
-   *
-   * The reason comes back with it. Swallowing it left the caller a bare
-   * success and no invoice, which is exactly what "payroll ran but no invoice
-   * appeared" looks like from the outside — the failure has to reach whoever
-   * pressed the button, not only the log.
-   */
-  private async billClientFor(
-    clientId: string,
-    month: number,
-    year: number,
-    placementId: string,
-  ): Promise<{ invoice: Record<string, unknown> | null; not_invoiced_because?: string }> {
-    try {
-      const { invoice } = await this.consolidatedInvoices.generateOrAmend(clientId, month, year);
-      return { invoice: invoice as Record<string, unknown> };
-    } catch (e) {
-      const reason = (e as Error).message;
-      this.logger.warn(
-        `[PAYROLL] Payroll for placement ${placementId} ${month}/${year} is recorded, ` +
-          `but the client invoice was not updated: ${reason}`,
-      );
-      return { invoice: null, not_invoiced_because: reason };
-    }
+    // Payroll stops here. It computes what the staff member earned and leaves
+    // the payroll row un-invoiced; the invoice is a separate, deliberate act,
+    // raised by Finance from the client's unit code once they have looked at
+    // who worked there. Running payroll used to issue the invoice itself,
+    // which meant a document went out as a side effect of a different button.
+    return result;
   }
 
   async countAttendanceForStaff(
@@ -844,10 +809,9 @@ export class PayrollService {
       return { payroll, clientId: p.client_id, preview, calculation: calc };
     });
 
-    const billed = await this.billClientFor(
-      result.clientId as string, month, year, placementId,
-    );
-    return { ...result, invoice: billed.invoice, not_invoiced_because: billed.not_invoiced_because };
+    // No invoice here either — see runPayroll above. Finance raises it from
+    // the unit code, and it lands as a DRAFT they can look at before it goes.
+    return result;
   }
 
   /**

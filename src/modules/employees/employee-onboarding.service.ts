@@ -17,7 +17,14 @@ export interface OnboardFromPipelineDto {
   designation: string;
   categoryId: string;
   employmentType: string;
-  salary: number | string;
+  /**
+   * Optional, and normally left out. What a placed staff member is paid is
+   * settled by the RM on the placement — per client, and per hour for a
+   * temporary one — so asking HR for a second figure here only creates a
+   * number that disagrees with the one actually billed. Left out, it is read
+   * off the candidate's active placement instead.
+   */
+  salary?: number | string;
   joiningDate: string;
   gender: string;
   // Optional overrides for fields the pipeline may have left blank.
@@ -140,6 +147,60 @@ export class EmployeeOnboardingService {
     return applicant;
   }
 
+  /**
+   * What to record on `employees.salary` for someone coming off the pipeline.
+   *
+   * The placement is the truth. A permanent placement carries the monthly
+   * figure the client is billed on; a temporary one is paid per hour at a rate
+   * that differs per client, so no single monthly number exists for them and
+   * zero is the honest answer — their pay is computed from attendance, and
+   * `employees.salary` is never consulted for it.
+   *
+   * HR may still pass a figure (an office employee has no placement), and an
+   * explicit one always wins.
+   */
+  private async resolveSalary(
+    staffApplicantId: string,
+    provided: number | string | undefined,
+    warnings: string[],
+  ): Promise<number> {
+    const givenExplicitly =
+      provided !== undefined && provided !== null && String(provided).trim() !== '';
+    if (givenExplicitly) {
+      const n = Number(provided);
+      if (!Number.isFinite(n) || n < 0) {
+        throw new BadRequestException('salary must be a non-negative number');
+      }
+      return n;
+    }
+
+    const placements = await this.prisma.placement.findMany({
+      where: {
+        staffId: staffApplicantId,
+        status: { in: ['CONFIRMED', 'TRIAL'] },
+      },
+      select: { placementType: true, staffSalary: true, hourlyRate: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!placements.length) {
+      warnings.push(
+        'No active placement, so no salary was recorded — set one on the employee if they are paid a monthly wage.',
+      );
+      return 0;
+    }
+
+    const monthly = placements.find(
+      (p) => p.placementType === 'PERMANENT' && p.staffSalary != null,
+    );
+    if (monthly) return Number(monthly.staffSalary);
+
+    warnings.push(
+      'Paid by the hour at their placement, so no monthly salary was recorded — their pay is computed from attendance.',
+    );
+    return 0;
+  }
+
   async onboardFromPipeline(dto: OnboardFromPipelineDto, actorId: string) {
     const applicant = await this.assertOnboardable(dto.staffApplicantId);
     if (applicant.terminalOutcome) {
@@ -162,19 +223,12 @@ export class EmployeeOnboardingService {
       'gender',
     ];
     const missing = required.filter((k) => !dto[k]);
-    const salaryMissing =
-      dto.salary === undefined || dto.salary === null || String(dto.salary).trim() === '';
-    if (missing.length || salaryMissing) {
-      throw new BadRequestException(
-        `Missing required HR fields: ${[...missing, ...(salaryMissing ? ['salary'] : [])].join(', ')}`,
-      );
-    }
-    const salary = Number(dto.salary);
-    if (!Number.isFinite(salary) || salary < 0) {
-      throw new BadRequestException('salary must be a non-negative number');
+    if (missing.length) {
+      throw new BadRequestException(`Missing required HR fields: ${missing.join(', ')}`);
     }
 
     const warnings: string[] = [];
+    const salary = await this.resolveSalary(applicant.id, dto.salary, warnings);
     if (!applicant.agreements.some((a) => a.status === 'SIGNED')) {
       warnings.push('No SIGNED agreement on record for this candidate');
     }

@@ -80,7 +80,8 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
     console.log('logged in as FINANCE\n');
 
     const cand = await db.query(`
-      SELECT p.id AS placement_id, p.staff_id, sa.staff_code, sa.full_name, sa.branch_id, fc.customer_name
+      SELECT p.id AS placement_id, p.staff_id, p.client_id,
+             sa.staff_code, sa.full_name, sa.branch_id, fc.customer_name
       FROM placements p
       JOIN staff_applicants sa ON sa.id = p.staff_id
       JOIN finance_customers fc ON fc.id = p.client_id
@@ -109,9 +110,19 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
     const gen = await req('POST', '/finance/payroll/attendance-generate', {
       token: finance, body: { code: target.staff_code, month: TEST_MONTH, year: TEST_YEAR },
     });
-    check('payroll + invoice generated', gen.status === 200 || gen.status === 201, gen.status);
-    made.invoiceId = gen.body?.invoice_id ?? null;
+    check('payroll generated', gen.status === 200 || gen.status === 201, gen.status);
     made.payrollId = gen.body?.payroll_id ?? null;
+
+    // Payroll no longer raises the invoice — Finance does, from the client's
+    // unit code — so the document this section walks through the state machine
+    // has to be asked for.
+    const raised = await req('POST', '/finance/invoices/consolidated/generate', {
+      token: finance,
+      body: { customer_id: target.client_id, month: TEST_MONTH, year: TEST_YEAR },
+    });
+    check('the invoice is raised for the client',
+      raised.status === 200 || raised.status === 201, { status: raised.status, body: raised.body });
+    made.invoiceId = (raised.body?.invoice ?? raised.body)?.id ?? null;
 
     // ── F-12 · invoice state machine ────────────────────────────────────────
     console.log('\nF-12  Invoice status follows a state machine');
@@ -168,6 +179,21 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
     const prApproved = await db.query(`SELECT status, approved_at, locked_at FROM payroll_records WHERE id = $1`, [made.payrollId]);
     check('approval stamps approved_at', !!prApproved.rows[0]?.approved_at, prApproved.rows[0]);
     check('approval locks the record', !!prApproved.rows[0]?.locked_at, prApproved.rows[0]);
+
+    // The screen reads the list, not the table. The list did not select
+    // `status` at all, so every record came back looking PENDING however many
+    // times it was approved — the badge stayed on "Needs approval" and the
+    // Approve button never went away. Checking the database alone is what let
+    // that live, so check what the screen is actually handed.
+    const listAfter = await req(
+      'GET', `/finance/payroll?month=${TEST_MONTH}&year=${TEST_YEAR}`, { token: finance },
+    );
+    const listedRow = (Array.isArray(listAfter.body) ? listAfter.body : [])
+      .find((r) => r.id === made.payrollId);
+    check('the payroll list returns the approved record', !!listedRow, listAfter.status);
+    check('and it reads APPROVED, not PENDING', listedRow?.status === 'APPROVED', listedRow?.status);
+    check('the list carries the disbursement state too',
+      listedRow?.disbursement_status === 'NOT_STARTED', listedRow?.disbursement_status);
 
     const reApprovePayroll = await req('POST', `/finance/payroll/${made.payrollId}/approve`, { token: finance });
     check('payroll cannot be approved twice', reApprovePayroll.status === 400, reApprovePayroll.status);

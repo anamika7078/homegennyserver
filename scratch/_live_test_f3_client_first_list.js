@@ -95,6 +95,7 @@ async function main() {
     const { AppModule } = require('../dist/app.module');
     const { PayrollService } = require('../dist/modules/payroll/payroll.service');
     const { FinanceInvoiceService } = require('../dist/modules/finance/invoice/invoice.service');
+    const { ConsolidatedInvoiceService } = require('../dist/modules/finance/invoice/consolidated-invoice.service');
 
     const app = await NestFactory.createApplicationContext(AppModule, { logger: false });
     try {
@@ -105,6 +106,12 @@ async function main() {
       for (const pid of made.placementIds) {
         await payroll.runAttendancePayroll(pid, MONTH, YEAR);
       }
+
+      // Payroll raises no invoice; Finance does, once, for the whole client.
+      // That is the point of this check — three people, three payroll runs,
+      // still one document.
+      const consolidated = app.get(ConsolidatedInvoiceService);
+      await consolidated.generateOrAmend(made.customerId, MONTH, YEAR);
 
       const rows = await db.query(
         `SELECT id, invoice_number, is_consolidated FROM client_invoices

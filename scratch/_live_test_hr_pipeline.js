@@ -117,7 +117,10 @@ async function req(method, path, { token, body } = {}) {
       designation: 'Housemaid',
       categoryId: cat.rows[0].id,
       employmentType: 'Full Time',
-      salary: 18000,
+      // No salary. What a placed staff member is paid was settled by the RM on
+      // the placement — per client, and per hour for a temporary one — so
+      // asking HR for a second figure only creates one that disagrees with
+      // what is actually billed. The server reads it off the placement.
       joiningDate: '2026-08-01',
       gender: 'Female',
       city: 'New Delhi',
@@ -126,6 +129,29 @@ async function req(method, path, { token, body } = {}) {
     },
   });
   check('returns 200/201', [200, 201].includes(onboard.status), onboard);
+  check('onboarding no longer demands a salary', onboard.status !== 400, onboard.body?.message);
+
+  // It has to match the placement, not a number someone typed twice.
+  const salaryRow = await db.query(
+    `SELECT e.salary::float AS employee_salary,
+            p.placement_type, p.staff_salary::float AS placement_salary
+       FROM employees e
+       LEFT JOIN placements p ON p.staff_id = e.staff_applicant_id
+                             AND p.status IN ('CONFIRMED','TRIAL')
+      WHERE e.staff_applicant_id = $1
+      ORDER BY p.created_at DESC NULLS LAST
+      LIMIT 1`,
+    [target.id],
+  );
+  const sal = salaryRow.rows[0];
+  if (sal?.placement_type === 'PERMANENT' && sal.placement_salary != null) {
+    check('salary was read off the permanent placement',
+      sal.employee_salary === sal.placement_salary, sal);
+  } else {
+    // Hourly, or not placed: no monthly figure exists, and zero is the honest
+    // answer — their pay is computed from attendance.
+    check('no monthly salary invented where none exists', sal?.employee_salary === 0, sal);
+  }
   const employeeId = onboard.body?.employee?.id;
   check('employee created with a generated code', Boolean(onboard.body?.employee?.employeeId), {
     code: onboard.body?.employee?.employeeId,
@@ -203,9 +229,21 @@ async function req(method, path, { token, body } = {}) {
   // ── 5. HR marks attendance on the staff member behalf ────────────────────
   console.log('\n[5] POST /attendance/mark (HR marking for a pipeline employee)');
   const DATE = '2026-08-11';
+  // A staff member can work several houses in a day, so a bare "Present" no
+  // longer says where — and the day decides whose invoice carries it. Name the
+  // house whenever there is a choice; the API refuses rather than guessing.
+  const placements = await db.query(
+    `SELECT id FROM placements WHERE staff_id = $1 AND status IN ('CONFIRMED','TRIAL')
+      ORDER BY created_at DESC`,
+    [target.id],
+  );
+  const markPlacementId = placements.rows.length > 1 ? placements.rows[0].id : undefined;
   const marked = await req('POST', '/attendance/mark', {
     token,
-    body: { employeeId, date: DATE, status: 'Present', notes: 'HR desk entry' },
+    body: {
+      employeeId, date: DATE, status: 'Present', notes: 'HR desk entry',
+      ...(markPlacementId ? { placementId: markPlacementId } : {}),
+    },
   });
   check('returns 200/201', [200, 201].includes(marked.status), marked);
   check(
@@ -264,9 +302,19 @@ async function req(method, path, { token, body } = {}) {
   );
   const blocked = await req('POST', '/attendance/mark', {
     token,
-    body: { employeeId, date: GUARD_DATE, status: 'Absent' },
+    body: {
+      employeeId, date: GUARD_DATE, status: 'Absent',
+      ...(markPlacementId ? { placementId: markPlacementId } : {}),
+    },
   });
   check('returns 400 while the self-check-in stands', blocked.status === 400, blocked);
+  // And for that reason — a 400 about something else would pass the check
+  // above while proving nothing about the guard.
+  check(
+    'and says the self-check-in is why',
+    /check-?in/i.test(JSON.stringify(blocked.body ?? '')),
+    blocked.body,
+  );
   const noRow = await db.query(
     'SELECT COUNT(*)::int AS n FROM attendance WHERE employee_id = $1 AND date = $2',
     [employeeId, GUARD_DATE],
@@ -285,6 +333,7 @@ async function req(method, path, { token, body } = {}) {
       status: 'Absent',
       overrideSelfCheckIn: true,
       notes: 'Client confirmed no-show',
+      ...(markPlacementId ? { placementId: markPlacementId } : {}),
     },
   });
   check('succeeds with overrideSelfCheckIn: true', [200, 201].includes(overridden.status), overridden);

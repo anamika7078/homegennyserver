@@ -33,6 +33,15 @@ export interface PayrollRecordRow {
   pf_employer: string | null;
   pf_employee: string | null;
   deductions: Record<string, unknown>;
+  /**
+   * Where this record stands: PENDING until Finance approves it, then APPROVED,
+   * and only then payable. The list left this out, so the screen read every
+   * record as PENDING no matter how many times it was approved — the badge
+   * stayed on "Needs approval" and the Approve button never went away.
+   */
+  status: string | null;
+  disbursement_status: string | null;
+  approved_at: string | null;
   disbursed_at: string | null;
   disbursement_ref: string | null;
   client_invoice_id: string | null;
@@ -90,6 +99,9 @@ export class FinancePayrollService {
           pr.pf_employer,
           pr.pf_employee,
           pr.deductions,
+          pr.status,
+          pr.disbursement_status,
+          pr.approved_at,
           pr.disbursed_at,
           pr.disbursement_ref,
           pr.client_invoice_id,
@@ -120,6 +132,11 @@ export class FinancePayrollService {
           NULL::numeric         AS pf_employer,
           NULL::numeric         AS pf_employee,
           ep.deductions,
+          ep.status,
+          -- An internal employee payroll has no separate disbursement state or
+          -- approval step; it is paid straight from HR.
+          NULL::text            AS disbursement_status,
+          NULL::timestamptz     AS approved_at,
           ep.disbursed_at,
           NULL::text            AS disbursement_ref,
           NULL::uuid            AS client_invoice_id,
@@ -384,14 +401,10 @@ export class FinancePayrollService {
     for (const p of placements) {
       try {
         const result = await this.corePayroll.runAttendancePayroll(p.id, month, year);
-        const invoice = result.invoice as Record<string, unknown> | null;
         runs.push({
           placement_id: p.id,
           client_name: p.client_name,
           placement_type: p.placement_type,
-          invoice_id: invoice?.id ?? null,
-          invoice_number: invoice?.invoice_number ?? null,
-          not_invoiced_because: result.not_invoiced_because ?? null,
           payroll_id: (result.payroll as Record<string, unknown>).id,
           preview: result.preview,
           calculation: result.calculation,
@@ -415,11 +428,9 @@ export class FinancePayrollService {
     const first = runs[0];
     return {
       type: 'PLACEMENT',
-      invoice_id: first.invoice_id,
-      invoice_number: first.invoice_number,
-      // Why there is no invoice, when there is none. A bare null read as
-      // "payroll ran and nothing happened" with no way to find out why.
-      not_invoiced_because: first.not_invoiced_because,
+      // No invoice comes back from payroll. Payroll works out what is owed;
+      // Finance raises the client's invoice from their unit code afterwards,
+      // and it lands as a DRAFT to be looked at before it goes anywhere.
       payroll_id: first.payroll_id,
       preview: first.preview,
       calculation: first.calculation,

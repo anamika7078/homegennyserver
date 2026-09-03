@@ -101,13 +101,19 @@ export class FinanceInvoiceController {
     description:
       'Replaces the per-placement invoice: every staff member becomes a line-item group. ' +
       'Takes the next number from the customer’s own series inside the transaction, and links ' +
-      'each payroll row to the invoice so the same work cannot be billed twice.',
+      'each payroll row to the invoice so the same work cannot be billed twice. ' +
+      'Called again for the same period it amends the open DRAFT — someone who joined ' +
+      'mid-month is folded into the existing invoice, keeping its number — and refuses ' +
+      'once the invoice has been approved or sent.',
   })
   consolidatedGenerate(
     @Body() body: { customer_id: string; month: number; year: number },
     @Req() req: { user?: { id?: string } },
   ) {
-    return this.consolidated.generate(body.customer_id, body.month, body.year, req.user?.id);
+    // generateOrAmend, not generate: this is the button on the unit-code
+    // screen, and pressing it after a colleague joined mid-month has to extend
+    // the draft rather than fail with "an invoice already exists".
+    return this.consolidated.generateOrAmend(body.customer_id, body.month, body.year, req.user?.id);
   }
 
   @Get('summary')

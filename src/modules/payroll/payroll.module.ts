@@ -12,7 +12,7 @@ import { InvoiceModule } from '../finance/invoice/invoice.module';
   // depend on AppModule's import order to resolve StatutoryTaxService.
   // InvoiceModule supplies ConsolidatedInvoiceService: payroll is per staff,
   // but the invoice it feeds belongs to the client.
-  imports: [PrismaModule, TaxModule, InvoiceModule],
+  imports: [PrismaModule, TaxModule],
   providers: [PayrollService, EnterprisePayrollService],
   controllers: [PayrollController, EnterprisePayrollController],
   exports: [PayrollService, EnterprisePayrollService],

@@ -181,7 +181,7 @@ const round2 = (n) => Math.round(n * 100) / 100;
 
     // ── pick a placement to bill ────────────────────────────────────────────
     const cand = await db.query(`
-      SELECT p.id AS placement_id, p.staff_id, sa.staff_code, sa.full_name,
+      SELECT p.id AS placement_id, p.staff_id, p.client_id, sa.staff_code, sa.full_name,
              sa.branch_id, fc.customer_name
       FROM placements p
       JOIN staff_applicants sa ON sa.id = p.staff_id
@@ -239,14 +239,23 @@ const round2 = (n) => Math.round(n * 100) / 100;
       got: preview.body?.prorated_gross, expected: expectedGross,
     });
 
-    // ── generate the payroll + invoice ──────────────────────────────────────
+    // ── run the payroll, then raise the invoice ─────────────────────────────
     const gen = await req('POST', '/finance/payroll/attendance-generate', {
       token: financeToken,
       body: { code: target.staff_code, month: TEST_MONTH, year: TEST_YEAR },
     });
-    check('payroll + invoice generated', gen.status === 200 || gen.status === 201, { status: gen.status, body: gen.body });
-    made.invoiceId = gen.body?.invoice_id ?? null;
+    check('payroll generated', gen.status === 200 || gen.status === 201, { status: gen.status, body: gen.body });
     if (gen.body?.payroll_id) made.payrollIds.push(gen.body.payroll_id);
+
+    // Payroll records what is owed and stops there; Finance raises the client's
+    // invoice separately, from their unit code.
+    const raised = await req('POST', '/finance/invoices/consolidated/generate', {
+      token: financeToken,
+      body: { customer_id: target.client_id, month: TEST_MONTH, year: TEST_YEAR },
+    });
+    check('the client invoice is raised',
+      raised.status === 200 || raised.status === 201, { status: raised.status, body: raised.body });
+    made.invoiceId = (raised.body?.invoice ?? raised.body)?.id ?? null;
 
     if (!made.invoiceId) {
       console.log('  no invoice id returned — stopping before the invoice assertions');

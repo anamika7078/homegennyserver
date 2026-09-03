@@ -251,11 +251,41 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
       itemSum, total: row.total_amount,
     });
 
-    // Same period, same customer, twice → refused.
+    // Same period, same customer, twice. It must not mint a second invoice —
+    // but refusing outright was wrong too, because someone who joins mid-month
+    // has to reach the client's open draft. So it amends: same invoice, same
+    // number, no new entry in the customer's series.
     const again = await req('POST', '/finance/invoices/consolidated/generate', {
       token: finance, body: { customer_id: made.customerId, month: TEST_MONTH, year: TEST_YEAR },
     });
-    check('a second consolidated invoice is refused', again.status === 400, again.status);
+    check('pressing create twice does not fail',
+      again.status === 200 || again.status === 201, again.status);
+
+    const afterSecond = await db.query(
+      `SELECT id, invoice_number, status FROM client_invoices
+        WHERE client_id = $1 AND period_month = $2 AND period_year = $3 AND status <> 'CANCELLED'`,
+      [made.customerId, TEST_MONTH, TEST_YEAR],
+    );
+    check('there is still exactly one invoice for the period',
+      afterSecond.rows.length === 1, afterSecond.rows);
+    check('and it kept its number',
+      afterSecond.rows[0]?.invoice_number === row.invoice_number,
+      { was: row.invoice_number, now: afterSecond.rows[0]?.invoice_number });
+
+    const seqUnmoved = await db.query(`SELECT bill_seq FROM finance_customers WHERE id = $1`, [made.customerId]);
+    check('amending does not consume another invoice number',
+      seqUnmoved.rows[0].bill_seq === seqAfter.rows[0].bill_seq,
+      { after_first: seqAfter.rows[0].bill_seq, after_second: seqUnmoved.rows[0].bill_seq });
+
+    // Once it has been approved the document is settled — amending it silently
+    // would change a number someone has already signed off.
+    await db.query(`UPDATE client_invoices SET status = 'APPROVED' WHERE id = $1`, [made.invoiceId]);
+    const afterApproval = await req('POST', '/finance/invoices/consolidated/generate', {
+      token: finance, body: { customer_id: made.customerId, month: TEST_MONTH, year: TEST_YEAR },
+    });
+    check('an approved invoice is not amended behind your back',
+      afterApproval.status === 400, afterApproval.status);
+    await db.query(`UPDATE client_invoices SET status = 'DRAFT' WHERE id = $1`, [made.invoiceId]);
 
     const pendingAfter = await req('GET', `/finance/invoices/consolidated/pending?month=${TEST_MONTH}&year=${TEST_YEAR}`, { token: finance });
     check('the customer drops off the worklist once invoiced',

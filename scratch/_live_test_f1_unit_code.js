@@ -193,13 +193,27 @@ async function main() {
       check(`payroll runs for ${code}`, gen.status === 200 || gen.status === 201, gen.status);
     }
 
-    // Running payroll issues the client's invoice itself — the lookup is where
-    // you see it, not a second place you have to remember to press.
+    // Payroll works out what is owed and stops. No document goes out as a side
+    // effect of that button — billing is raised deliberately, from the unit
+    // code, and lands as a draft.
     look = await req('GET', '/finance/invoices/by-unit-code' + q, { token });
     check('lookup now says payroll has run',
       (look.body?.placements ?? []).every((r) => r.payroll_run === true));
-    check('payroll issued the invoice on its own', !!look.body?.existing_invoice?.invoice_number,
+    check('payroll raised no invoice on its own', look.body?.existing_invoice === null,
       look.body?.existing_invoice);
+    check('both staff are waiting to be billed', look.body?.un_invoiced?.staff_count === 2,
+      look.body?.un_invoiced);
+
+    const issued = await req('POST', '/finance/invoices/consolidated/generate', {
+      token, body: { customer_id: made.customerId, month: TEST_MONTH, year: TEST_YEAR },
+    });
+    check('the unit-code screen raises the invoice',
+      issued.status === 200 || issued.status === 201, issued.status);
+    check('it arrives as a DRAFT',
+      (issued.body?.invoice ?? issued.body)?.status === 'DRAFT',
+      (issued.body?.invoice ?? issued.body)?.status);
+
+    look = await req('GET', '/finance/invoices/by-unit-code' + q, { token });
     check('one invoice, not one per staff member',
       (look.body?.placements ?? []).every((r) => r.invoiced === true));
     check('nothing is left waiting to be billed', look.body?.un_invoiced?.staff_count === 0,
@@ -270,6 +284,16 @@ async function main() {
       lateGen.status === 200 || lateGen.status === 201, lateGen.status);
 
     look = await req('GET', '/finance/invoices/by-unit-code' + q, { token });
+    check('the later joiner shows as waiting on the open draft',
+      look.body?.un_invoiced?.staff_count === 1, look.body?.un_invoiced);
+
+    const amend = await req('POST', '/finance/invoices/consolidated/generate', {
+      token, body: { customer_id: made.customerId, month: TEST_MONTH, year: TEST_YEAR },
+    });
+    check('pressing create again amends rather than duplicating',
+      amend.status === 200 || amend.status === 201, amend.status);
+
+    look = await req('GET', '/finance/invoices/by-unit-code' + q, { token });
     check('the later joiner is folded into the same invoice, not a new one',
       look.body?.existing_invoice?.invoice_number === firstNumber,
       { was: firstNumber, now: look.body?.existing_invoice?.invoice_number });
@@ -320,6 +344,12 @@ async function main() {
     });
     check('payroll runs for a one-day placement',
       oneDayRun.status === 200 || oneDayRun.status === 201, oneDayRun.status);
+
+    const oneDayIssue = await req('POST', '/finance/invoices/consolidated/generate', {
+      token, body: { customer_id: made.oneDayCustomerId, month: TEST_MONTH, year: TEST_YEAR },
+    });
+    check('a one-day client bills from the unit code like any other',
+      oneDayIssue.status === 200 || oneDayIssue.status === 201, oneDayIssue.status);
 
     const oneDayLook = await req(
       'GET', `/finance/invoices/by-unit-code?unit_code=F1-ONEDAY-01&month=${TEST_MONTH}&year=${TEST_YEAR}`,

@@ -144,9 +144,32 @@ export class StaffAttendanceMirrorService {
     } else if (active.length === 1) {
       placement = active[0];
     } else if (active.length > 1) {
+      // Correcting a day that is already recorded needs no second answer: the
+      // row knows which house it belongs to. Only ask when the day genuinely
+      // is ambiguous — she worked two houses that date, and nothing says which
+      // one is being corrected.
+      const already = await this.prisma.staffDailyAttendance.findMany({
+        where: { staffId, attendanceDate, placementId: { in: active.map((p) => p.id) } },
+        select: { placementId: true },
+      });
+      if (already.length === 1) {
+        placement = active.find((p) => p.id === already[0].placementId);
+      }
+    }
+
+    if (!placement && active.length > 1) {
+      // Say what is actually true. Counting placements and calling them
+      // clients read as "placed with 5 clients" for someone holding five
+      // stale placements at one house, which sends whoever reads it looking
+      // for four clients that do not exist.
+      const clients = new Set(active.map((p) => p.clientId)).size;
       throw new BadRequestException(
-        `${employee.fullName} is placed with ${active.length} clients. Say which one this ` +
-          `day was worked at — attendance decides which client's invoice carries it.`,
+        clients > 1
+          ? `${employee.fullName} is placed with ${clients} clients. Say which one this ` +
+            `day was worked at — attendance decides which client's invoice carries it.`
+          : `${employee.fullName} has ${active.length} active placements with the same ` +
+            `client. Say which one this day was worked at — attendance decides which ` +
+            `invoice carries it.`,
       );
     }
 
