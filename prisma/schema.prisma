@@ -390,8 +390,18 @@ model Placement {
   /// When the trial was confirmed. The late-exit fee band depends on how long
   /// after this the exit happened, and nothing recorded it before. See F-17.
   confirmedAt      DateTime?       @map("confirmed_at") @db.Timestamptz(6)
+  // PERMANENT takes the client's whole shift and is billed monthly; TEMPORARY
+  // is booked by the hour, at a rate that differs from client to client. A maid
+  // can hold several of each at once. See docs/HOURLY_MULTI_CLIENT_PLAN.md.
+  placementType    String          @default("PERMANENT") @map("placement_type") @db.VarChar(20)
+  /// 8 or 12 — lifted out of metadata.wage_config, where the 12-hour uplift already read it.
+  shiftHours       Decimal         @default(8) @map("shift_hours") @db.Decimal(4, 1)
   staffSalary      Decimal?        @map("staff_salary") @db.Decimal(10, 2)
   managementFee    Decimal?        @map("management_fee") @db.Decimal(10, 2)
+  /// TEMPORARY only — what the staff member earns per hour at this client.
+  hourlyRate       Decimal?        @map("hourly_rate") @db.Decimal(10, 2)
+  /// TEMPORARY only — what HomeGenny charges per hour on top.
+  hourlyFee        Decimal?        @map("hourly_fee") @db.Decimal(10, 2)
   // Written by exit() (placement.service.ts) — used to silently no-op via a
   // raw-SQL catch fallback because these columns never existed until now.
   exitDate         DateTime?       @map("exit_date") @db.Date

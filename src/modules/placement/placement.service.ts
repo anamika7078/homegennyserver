@@ -150,20 +150,29 @@ export class PlacementService {
       );
     }
 
-    // A staff member can only be actively placed with one client at a time —
-    // without this, re-opening the "New Placement" flow for someone already on
-    // TRIAL/CONFIRMED silently mints a second active placement for them (seen
-    // in prod: duplicate CONFIRMED rows for the same staff+client). They must
-    // be exited from the current one (status → EXITED/TERMINATED) before a new
-    // placement can be created.
-    const activePlacement = await this.prisma.placement.findFirst({
-      where: { staffId, status: { in: [PlacementStatus.TRIAL, PlacementStatus.CONFIRMED] } },
-      select: { id: true, clientId: true, status: true },
+    // The bug this was written for was a *duplicate*: re-opening the "New
+    // Placement" flow for someone already placed silently minted a second
+    // active row for the same staff and client (seen in prod). It was written
+    // as "one active placement, full stop", which also blocks the thing the
+    // business actually does — a maid works several houses in a day, and a
+    // client may book her permanently while another books her by the hour.
+    //
+    // So the guard narrows to what it was guarding: the same client twice.
+    // See docs/HOURLY_MULTI_CLIENT_PLAN.md §B1.
+    const clientId = String(data.client_id ?? '');
+    const duplicate = await this.prisma.placement.findFirst({
+      where: {
+        staffId,
+        clientId,
+        status: { in: [PlacementStatus.TRIAL, PlacementStatus.CONFIRMED] },
+      },
+      select: { id: true, status: true },
     });
-    if (activePlacement) {
+    if (duplicate) {
       throw new BadRequestException(
-        `Staff already has an active placement (${activePlacement.status}, id: ${activePlacement.id}). ` +
-        'Exit that placement before creating a new one.',
+        `This staff member is already placed with this client (${duplicate.status}, ` +
+          `id: ${duplicate.id}). Exit that placement before creating another for the ` +
+          `same client.`,
       );
     }
 
@@ -175,8 +184,30 @@ export class PlacementService {
     // below) — enforced here too since there's no separate confirm step to catch it.
     const wageTerms = this.resolveWageTerms(data);
 
+    // PERMANENT takes the client's whole shift and is billed monthly.
+    // TEMPORARY is booked by the hour — the same maid can hold one of each,
+    // with a different rate at each house. See §S2.
+    const placementType = String(data.placement_type ?? 'PERMANENT').toUpperCase();
+    if (!['PERMANENT', 'TEMPORARY'].includes(placementType)) {
+      throw new BadRequestException(
+        `placement_type must be PERMANENT or TEMPORARY, not "${placementType}".`,
+      );
+    }
+    const isHourly = placementType === 'TEMPORARY';
+    const hourlyRate = data.hourly_rate != null ? Number(data.hourly_rate) : null;
+    const hourlyFee = data.hourly_fee != null ? Number(data.hourly_fee) : null;
+    const shiftHours = data.shift_hours != null ? Number(data.shift_hours) : 8;
+
+    if (isHourly && !(hourlyRate != null && hourlyRate > 0)) {
+      throw new BadRequestException(
+        'hourly_rate is required for a TEMPORARY placement — an hour with no price cannot be billed.',
+      );
+    }
+
     const directConfirm = String(data.status ?? '').toUpperCase() === 'CONFIRMED';
-    if (directConfirm && (wageTerms.staffSalary == null || wageTerms.managementFee == null)) {
+    // An hourly placement prices itself by the hour, so the monthly pair is not
+    // what makes it billable.
+    if (directConfirm && !isHourly && (wageTerms.staffSalary == null || wageTerms.managementFee == null)) {
       throw new BadRequestException(
         'staff_salary and management_fee (directly, or computed via wage_config) are required to create a placement directly as CONFIRMED.',
       );
@@ -192,8 +223,12 @@ export class PlacementService {
         branchId,
         rmId: data.rm_id ? String(data.rm_id) : undefined,
         status,
+        placementType,
+        shiftHours,
         staffSalary: wageTerms.staffSalary,
         managementFee: wageTerms.managementFee,
+        hourlyRate: isHourly ? hourlyRate : null,
+        hourlyFee: isHourly ? hourlyFee : null,
         metadata: wageTerms.metadataPatch as Prisma.InputJsonValue,
         trialStartDate: data.trial_start_date ? new Date(String(data.trial_start_date)) : new Date(),
         trialEndDate: data.trial_end_date
@@ -293,7 +328,18 @@ export class PlacementService {
     // here — not create() — matches how RM actually works: salary/fee are
     // real commercial terms that should be locked in before confirming a
     // trial, not necessarily known on day one of the trial.
-    if (existing.staffSalary == null || existing.managementFee == null) {
+    // What makes a placement billable depends on how it is priced: a monthly
+    // pair for a permanent one, an hourly rate for a temporary one. Demanding
+    // the monthly figures from an hourly placement would leave it permanently
+    // stuck at TRIAL.
+    if (existing.placementType === 'TEMPORARY') {
+      if (existing.hourlyRate == null) {
+        throw new BadRequestException(
+          'Cannot confirm — this is an hourly placement and has no hourly_rate. ' +
+            'Set the rate before confirming.',
+        );
+      }
+    } else if (existing.staffSalary == null || existing.managementFee == null) {
       throw new BadRequestException(
         'Cannot confirm — staff_salary and management_fee must be set first. ' +
         'Update the placement with these values before confirming.',

@@ -1,0 +1,478 @@
+{
+  "takenAt": "2026-09-03T05:47:24.421Z",
+  "staff_applicant": {
+    "id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+    "staff_code": "hunesh002",
+    "full_name": "Hunesh Sharma",
+    "mobile": "9094951000",
+    "user_id": "1a69e3a5-a5b7-4ed0-9f02-7937a3476108"
+  },
+  "children": {
+    "deposits": [
+      {
+        "id": "29751e52-c02a-44aa-8a0c-b5712697cb33",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "amount": "15000.00",
+        "status": "COLLECTED",
+        "payment_ref": null,
+        "collected_at": "2026-09-02T11:09:30.293Z",
+        "metadata": {},
+        "created_at": "2026-09-02T11:09:30.294Z",
+        "event": null,
+        "event_at": null,
+        "event_notes": null,
+        "event_scenario_code": null,
+        "refund_amount": null,
+        "recorded_by": null
+      }
+    ],
+    "verification_tracks": [
+      {
+        "id": "1ba7b8ba-325e-4ec9-8b91-68bef975f315",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "external_ref": null,
+        "result": {
+          "dob": "19-10-2003",
+          "raw": {
+            "name": "Hunesh Sharma",
+            "photo": "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",
+            "gender": "M",
+            "status": "VALID",
+            "@entity": "in.co.sandbox.kyc.aadhaar.okyc",
+            "address": {
+              "vtc": "Bhiwani",
+              "house": "House Number-532\\1",
+              "state": "Haryana",
+              "street": "Hanuman Dhani chowk",
+              "@entity": "in.co.sandbox.kyc.aadhaar.okyc.address",
+              "country": "India",
+              "pincode": 127021,
+              "district": "Bhiwani",
+              "landmark": "",
+              "post_office": "Bhiwani",
+              "subdistrict": "Bhiwani"
+            },
+            "care_of": "S/O: Sanjeev Sharma",
+            "message": "Aadhaar Card Exists",
+            "email_hash": "f489f3480b3dd701058f9e3b27c6e0fcb818781d2c766757f8321eec4e82330e",
+            "share_code": "2345",
+            "mobile_hash": "33ed64455276095f322ef3e63c7854f19a2ddf9c57cf9eb7039bd56418a2ff4b",
+            "full_address": "House Number-532\\1, Hanuman Dhani chowk, Bhiwani, Bhiwani, Bhiwani, Bhiwani, Bhiwani, Haryana, India, 127021",
+            "reference_id": 85351686,
+            "date_of_birth": "19-10-2003",
+            "year_of_birth": 2003
+          },
+          "name": "Hunesh Sharma",
+          "gender": "M",
+          "address": "House Number-532\\1, Hanuman Dhani chowk, Bhiwani, Bhiwani, Bhiwani, Bhiwani, Bhiwani, Haryana, India, 127021",
+          "verified": true,
+          "aadhaar_number_last4": "5693"
+        },
+        "verified_by": null,
+        "verified_at": "2026-09-02T11:10:04.620Z",
+        "expires_at": null,
+        "notes": null,
+        "created_at": "2026-09-02T11:10:04.621Z",
+        "updated_at": "2026-09-02T11:10:04.621Z",
+        "track_type": "AADHAAR_EKYC",
+        "status": "CLEAR"
+      },
+      {
+        "id": "57d703f1-0a84-4161-b551-60f74eb9f650",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "external_ref": null,
+        "result": {
+          "status": "CLEAR",
+          "closed_at": "2026-09-02T11:10:23.009Z",
+          "submitted_at": "2026-09-02T11:10:17.626Z",
+          "reference_number": "PV-2D6A1174-1788347417626"
+        },
+        "verified_by": "2f351b2f-c45c-433f-8c4b-a3dd203035b1",
+        "verified_at": "2026-09-02T11:10:23.009Z",
+        "expires_at": null,
+        "notes": "Police verification closed as CLEAR",
+        "created_at": "2026-09-02T11:10:17.627Z",
+        "updated_at": "2026-09-02T11:10:23.011Z",
+        "track_type": "POLICE_VERIFICATION",
+        "status": "CLEAR"
+      },
+      {
+        "id": "40db5edc-04e8-4964-86d0-9a34966f29fd",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "external_ref": null,
+        "result": {
+          "date": "2026-09-02T11:10:15.041Z",
+          "notes": "",
+          "status": "CLEAR"
+        },
+        "verified_by": null,
+        "verified_at": "2026-09-02T11:10:15.041Z",
+        "expires_at": null,
+        "notes": null,
+        "created_at": "2026-09-02T11:10:15.042Z",
+        "updated_at": "2026-09-02T11:10:15.042Z",
+        "track_type": "HEALTH_SCREENING",
+        "status": "CLEAR"
+      }
+    ],
+    "video_certifications": [
+      {
+        "id": "a4a4b1a5-dfe8-4680-87b4-4fe8a521cac8",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "prompt_key": "prompt_1",
+        "video_url": "video-certs/skilled_care/2d6a1174-e6be-4464-8e78-f32995b259be/1788347577244_907139902",
+        "sha256_hash": "34625a59ca017ae414573bcb4a21464514f695d9806955fa676098939005795c",
+        "attempt_number": 1,
+        "review_status": "APPROVED",
+        "reviewed_by": "a9322dfb-a6c8-49df-819b-b574ad3eefa8",
+        "review_notes": "",
+        "never_delete": true,
+        "metadata": {},
+        "created_at": "2026-09-02T11:12:58.922Z"
+      },
+      {
+        "id": "71168e82-7b15-46d5-ba14-36a87f85edae",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "prompt_key": "prompt_2",
+        "video_url": "video-certs/skilled_care/2d6a1174-e6be-4464-8e78-f32995b259be/1788347598107_896314385",
+        "sha256_hash": "34625a59ca017ae414573bcb4a21464514f695d9806955fa676098939005795c",
+        "attempt_number": 1,
+        "review_status": "APPROVED",
+        "reviewed_by": "a9322dfb-a6c8-49df-819b-b574ad3eefa8",
+        "review_notes": "",
+        "never_delete": true,
+        "metadata": {},
+        "created_at": "2026-09-02T11:13:19.778Z"
+      },
+      {
+        "id": "659f43ab-f6a8-406d-9b52-5b38aea390d4",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "prompt_key": "prompt_3",
+        "video_url": "video-certs/skilled_care/2d6a1174-e6be-4464-8e78-f32995b259be/1788347618748_977859508",
+        "sha256_hash": "34625a59ca017ae414573bcb4a21464514f695d9806955fa676098939005795c",
+        "attempt_number": 1,
+        "review_status": "APPROVED",
+        "reviewed_by": "a9322dfb-a6c8-49df-819b-b574ad3eefa8",
+        "review_notes": "",
+        "never_delete": true,
+        "metadata": {},
+        "created_at": "2026-09-02T11:13:40.322Z"
+      },
+      {
+        "id": "47d8100e-357d-44e8-b7a7-9706ced21467",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "prompt_key": "prompt_4",
+        "video_url": "video-certs/skilled_care/2d6a1174-e6be-4464-8e78-f32995b259be/1788347637269_653052800",
+        "sha256_hash": "34625a59ca017ae414573bcb4a21464514f695d9806955fa676098939005795c",
+        "attempt_number": 1,
+        "review_status": "APPROVED",
+        "reviewed_by": "a9322dfb-a6c8-49df-819b-b574ad3eefa8",
+        "review_notes": "",
+        "never_delete": true,
+        "metadata": {},
+        "created_at": "2026-09-02T11:13:58.911Z"
+      },
+      {
+        "id": "9c8265a5-37f2-4d5b-b1c1-563c66a030d4",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "prompt_key": "prompt_5",
+        "video_url": "video-certs/skilled_care/2d6a1174-e6be-4464-8e78-f32995b259be/1788347657153_178658221",
+        "sha256_hash": "34625a59ca017ae414573bcb4a21464514f695d9806955fa676098939005795c",
+        "attempt_number": 1,
+        "review_status": "APPROVED",
+        "reviewed_by": "a9322dfb-a6c8-49df-819b-b574ad3eefa8",
+        "review_notes": "",
+        "never_delete": true,
+        "metadata": {},
+        "created_at": "2026-09-02T11:14:18.829Z"
+      },
+      {
+        "id": "fd6dc323-1780-4abc-8949-6b7a5f533b87",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "prompt_key": "prompt_6",
+        "video_url": "video-certs/skilled_care/2d6a1174-e6be-4464-8e78-f32995b259be/1788347676662_75334743",
+        "sha256_hash": "34625a59ca017ae414573bcb4a21464514f695d9806955fa676098939005795c",
+        "attempt_number": 1,
+        "review_status": "APPROVED",
+        "reviewed_by": "a9322dfb-a6c8-49df-819b-b574ad3eefa8",
+        "review_notes": "",
+        "never_delete": true,
+        "metadata": {},
+        "created_at": "2026-09-02T11:14:38.242Z"
+      },
+      {
+        "id": "9d14c6b9-e0b1-4381-818e-58bca25bd965",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "prompt_key": "prompt_7",
+        "video_url": "video-certs/skilled_care/2d6a1174-e6be-4464-8e78-f32995b259be/1788347789777_650661529",
+        "sha256_hash": "34625a59ca017ae414573bcb4a21464514f695d9806955fa676098939005795c",
+        "attempt_number": 1,
+        "review_status": "APPROVED",
+        "reviewed_by": "a9322dfb-a6c8-49df-819b-b574ad3eefa8",
+        "review_notes": "",
+        "never_delete": true,
+        "metadata": {},
+        "created_at": "2026-09-02T11:16:31.590Z"
+      },
+      {
+        "id": "8ed9b4b8-6df0-40ee-8bcf-43275984bde9",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "prompt_key": "prompt_8",
+        "video_url": "video-certs/skilled_care/2d6a1174-e6be-4464-8e78-f32995b259be/1788347834280_863976909",
+        "sha256_hash": "34625a59ca017ae414573bcb4a21464514f695d9806955fa676098939005795c",
+        "attempt_number": 1,
+        "review_status": "APPROVED",
+        "reviewed_by": "a9322dfb-a6c8-49df-819b-b574ad3eefa8",
+        "review_notes": "",
+        "never_delete": true,
+        "metadata": {},
+        "created_at": "2026-09-02T11:17:15.782Z"
+      },
+      {
+        "id": "e8e6ded8-2ec3-447d-b8a7-10f348aa5d7d",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "prompt_key": "prompt_9",
+        "video_url": "video-certs/skilled_care/2d6a1174-e6be-4464-8e78-f32995b259be/1788347862622_935887184",
+        "sha256_hash": "fb550eec3b79cadb172d42d9b2e82fbe192cd1f17e3a15ab8bb12293b7ec7e69",
+        "attempt_number": 1,
+        "review_status": "APPROVED",
+        "reviewed_by": "a9322dfb-a6c8-49df-819b-b574ad3eefa8",
+        "review_notes": "",
+        "never_delete": true,
+        "metadata": {},
+        "created_at": "2026-09-02T11:17:44.762Z"
+      },
+      {
+        "id": "1419a652-3f68-4891-aac3-b16d64ef8ee1",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "prompt_key": "prompt_10",
+        "video_url": "video-certs/skilled_care/2d6a1174-e6be-4464-8e78-f32995b259be/1788347886256_601426212",
+        "sha256_hash": "34625a59ca017ae414573bcb4a21464514f695d9806955fa676098939005795c",
+        "attempt_number": 1,
+        "review_status": "APPROVED",
+        "reviewed_by": "a9322dfb-a6c8-49df-819b-b574ad3eefa8",
+        "review_notes": "",
+        "never_delete": true,
+        "metadata": {},
+        "created_at": "2026-09-02T11:18:08.055Z"
+      }
+    ],
+    "scenario_logs": [
+      {
+        "id": "7701bddc-d5ac-41f1-b7e8-ef75a3f9e48e",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "scenario_code": "SC-01",
+        "definition_id": null,
+        "triggered_by": "2f351b2f-c45c-433f-8c4b-a3dd203035b1",
+        "flags": {
+          "pv_failed": false,
+          "pv_pending": false,
+          "medical_failed": false,
+          "aadhaar_verified": true,
+          "placed_confirmed": true,
+          "agreement_rejected": false,
+          "video_cert_complete": true
+        },
+        "actions_taken": [],
+        "escalated_to_bm": false,
+        "created_at": "2026-09-02T11:20:44.994Z",
+        "pipeline_stage": "S5_DEPLOY"
+      }
+    ],
+    "scope_of_work": [
+      {
+        "id": "52a8bebe-2c78-43fc-a255-958e975b1abd",
+        "placement_id": "adbdaf84-bb38-4ad9-b3ba-eaeaa7a78f3b",
+        "client_id": "4bdf668d-7e0d-4c19-beec-268bcb937d79",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "content": "abcd",
+        "version": 1,
+        "status": "SENT",
+        "is_non_standard": false,
+        "bm_approved_by": null,
+        "bm_approved_at": null,
+        "created_by": "2f351b2f-c45c-433f-8c4b-a3dd203035b1",
+        "amended_by": null,
+        "sent_at": "2026-09-02T11:40:01.597Z",
+        "acknowledged_by": null,
+        "acknowledged_at": null,
+        "supersedes_id": null,
+        "metadata": {},
+        "created_at": "2026-09-02T11:39:57.134Z",
+        "updated_at": "2026-09-02T11:40:01.598Z"
+      },
+      {
+        "id": "ac63e5bc-2e38-4f5e-bdd4-d18f559ea573",
+        "placement_id": "73cc52ec-4acd-4f07-819b-9d48d2896d6a",
+        "client_id": "4bdf668d-7e0d-4c19-beec-268bcb937d79",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "content": "abcd",
+        "version": 1,
+        "status": "SENT",
+        "is_non_standard": false,
+        "bm_approved_by": null,
+        "bm_approved_at": null,
+        "created_by": "2f351b2f-c45c-433f-8c4b-a3dd203035b1",
+        "amended_by": null,
+        "sent_at": "2026-09-02T11:47:48.593Z",
+        "acknowledged_by": null,
+        "acknowledged_at": null,
+        "supersedes_id": null,
+        "metadata": {},
+        "created_at": "2026-09-02T11:47:46.023Z",
+        "updated_at": "2026-09-02T11:47:48.593Z"
+      }
+    ],
+    "agreements": [
+      {
+        "id": "669a93db-3a27-4b6c-8251-80519f3d2b4e",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "client_id": null,
+        "placement_id": null,
+        "type": "A1",
+        "status": "SIGNED",
+        "signatures": [
+          {
+            "otp": "123456",
+            "role": "RM",
+            "userId": "2f351b2f-c45c-433f-8c4b-a3dd203035b1",
+            "ipAddress": "::1",
+            "timestamp": "2026-09-02T11:20:41.473Z",
+            "otp_verified": true
+          }
+        ],
+        "pdf_url": "data:application/pdf;base64,SG9tZUdlbm55IEFncmVlbWVudCDigJQgQTEKQ2xpZW50OiBudWxsClN0YWZmOiAyZDZhMTE3NC1lNmJlLTQ0NjQtOGU3OC1mMzI5OTViMjU5YmUKU3RhdHVzOiBTSUdORUQKR2VuZXJhdGVkOiAyMDI2LTA5LTAyVDExOjIwOjQ5LjY4NVo=",
+        "otp_verified": true,
+        "rejected_at": null,
+        "metadata": {},
+        "created_at": "2026-09-02T11:20:33.562Z",
+        "updated_at": "2026-09-02T11:20:49.686Z"
+      }
+    ],
+    "placements": [
+      {
+        "id": "adbdaf84-bb38-4ad9-b3ba-eaeaa7a78f3b",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "client_id": "4bdf668d-7e0d-4c19-beec-268bcb937d79",
+        "branch_id": "00000000-0000-0000-0000-000000000001",
+        "rm_id": null,
+        "status": "CONFIRMED",
+        "trial_start_date": "2026-09-01T18:30:00.000Z",
+        "trial_end_date": "2026-09-15T18:30:00.000Z",
+        "staff_salary": "1842.50",
+        "management_fee": "415.45",
+        "metadata": {},
+        "created_at": "2026-09-02T11:36:18.237Z",
+        "updated_at": "2026-09-02T11:40:10.750Z",
+        "exit_date": null,
+        "exit_scenario_code": null,
+        "confirmed_at": null
+      },
+      {
+        "id": "73cc52ec-4acd-4f07-819b-9d48d2896d6a",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "client_id": "4bdf668d-7e0d-4c19-beec-268bcb937d79",
+        "branch_id": "00000000-0000-0000-0000-000000000001",
+        "rm_id": null,
+        "status": "CONFIRMED",
+        "trial_start_date": "2026-09-01T18:30:00.000Z",
+        "trial_end_date": "2026-09-15T18:30:00.000Z",
+        "staff_salary": "1200.00",
+        "management_fee": "45000.00",
+        "metadata": {},
+        "created_at": "2026-09-02T11:47:33.565Z",
+        "updated_at": "2026-09-02T11:47:56.664Z",
+        "exit_date": null,
+        "exit_scenario_code": null,
+        "confirmed_at": null
+      }
+    ],
+    "pipeline_events": [
+      {
+        "id": "07729a85-ad76-460f-ad22-2cebab580423",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "event_type": "STAGE_ADVANCE",
+        "from_stage": "S1_INTAKE",
+        "to_stage": "S2_VERIFY",
+        "actor_id": "2f351b2f-c45c-433f-8c4b-a3dd203035b1",
+        "scenario_code": null,
+        "reason_code": "INTAKE_COMPLETE",
+        "payload": {
+          "referral_source": "walk in"
+        },
+        "notes": null,
+        "occurred_at": "2026-09-02T11:09:30.300Z"
+      },
+      {
+        "id": "c5668aef-e915-4082-93a5-4c7cce25c6bd",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "event_type": "STAGE_ADVANCE",
+        "from_stage": "S2_VERIFY",
+        "to_stage": "S2_5_ASSESS",
+        "actor_id": "2f351b2f-c45c-433f-8c4b-a3dd203035b1",
+        "scenario_code": null,
+        "reason_code": null,
+        "payload": {},
+        "notes": null,
+        "occurred_at": "2026-09-02T11:10:28.523Z"
+      },
+      {
+        "id": "f1f7f6c5-bae9-4d64-9802-136ba8305f17",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "event_type": "STAGE_ADVANCE",
+        "from_stage": "S2_5_ASSESS",
+        "to_stage": "S3_TRAIN",
+        "actor_id": "2f351b2f-c45c-433f-8c4b-a3dd203035b1",
+        "scenario_code": null,
+        "reason_code": null,
+        "payload": {},
+        "notes": null,
+        "occurred_at": "2026-09-02T11:10:59.743Z"
+      },
+      {
+        "id": "257621e1-fa4a-4ec9-9118-094ee130df8d",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "event_type": "STAGE_ADVANCE",
+        "from_stage": "S3_TRAIN",
+        "to_stage": "S4_AGREEMENTS",
+        "actor_id": "2f351b2f-c45c-433f-8c4b-a3dd203035b1",
+        "scenario_code": null,
+        "reason_code": null,
+        "payload": {},
+        "notes": null,
+        "occurred_at": "2026-09-02T11:11:14.082Z"
+      },
+      {
+        "id": "b89c173b-a95b-418c-ba5a-194f6962cdb8",
+        "staff_id": "2d6a1174-e6be-4464-8e78-f32995b259be",
+        "event_type": "STAGE_ADVANCE",
+        "from_stage": "S4_AGREEMENTS",
+        "to_stage": "S5_DEPLOY",
+        "actor_id": "2f351b2f-c45c-433f-8c4b-a3dd203035b1",
+        "scenario_code": "SC-01",
+        "reason_code": null,
+        "payload": {},
+        "notes": null,
+        "occurred_at": "2026-09-02T11:20:44.994Z"
+      }
+    ]
+  },
+  "user": {
+    "id": "1a69e3a5-a5b7-4ed0-9f02-7937a3476108",
+    "branch_id": "00000000-0000-0000-0000-000000000001",
+    "role": "STAFF",
+    "full_name": "Hunesh Sharma",
+    "phone": "9094951000",
+    "email": null,
+    "password_hash": "$2a$12$JD71pzfrzoCQG4cfzYWskuWcer.aJFcVXA28BCzcrC7nC5BO5m5mW",
+    "refresh_token_hash": "$2a$10$opzqJ.XAG2x50lm7i0UsZ.Wvq9jW0J5KiTBffYqQAXU4ZsjCh9UDy",
+    "active_session_id": "608dcf0e-5dcd-4e64-ad4d-7cf42fe3f256",
+    "is_active": true,
+    "last_login_at": "2026-09-02T11:12:02.390Z",
+    "metadata": {
+      "mustChangePassword": false
+    },
+    "created_at": "2026-09-02T11:09:30.285Z",
+    "updated_at": "2026-09-02T11:09:30.285Z"
+  }
+}
