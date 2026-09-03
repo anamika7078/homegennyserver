@@ -78,6 +78,14 @@ export class StaffAttendanceMirrorService {
     notes?: string | null;
     overtimeHours?: number | null;
     /**
+     * Which client this day was worked at. Optional only when the staff member
+     * has exactly one active placement; required once they have several, since
+     * the day decides whose invoice carries it.
+     */
+    placementId?: string | null;
+    /** Hours worked that day — what an hourly placement is billed from. */
+    hoursWorked?: number | null;
+    /**
      * Allows HR to overwrite the staff member's own live check-in. Off by
      * default: a GPS-stamped self-submission outranks a desk correction, and
      * RM's equivalent endpoint refuses the same case.
@@ -113,19 +121,42 @@ export class StaffAttendanceMirrorService {
       );
     }
 
-    const placement = await this.prisma.placement.findFirst({
+    // A staff member can now be placed with several clients at once — a maid
+    // works more than one house in a day. "Present" on its own no longer says
+    // where, and the day belongs to a client: it decides which invoice carries
+    // it. So the caller has to name the placement whenever there is a choice,
+    // and this refuses rather than picking the most recent one and quietly
+    // billing the wrong client. See docs/HOURLY_MULTI_CLIENT_PLAN.md §S1.
+    const active = await this.prisma.placement.findMany({
       where: { staffId, status: { in: ['CONFIRMED', 'TRIAL'] } },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, branchId: true },
+      select: { id: true, branchId: true, clientId: true },
     });
 
-    const branchId = placement?.branchId ?? employee.branchId;
-    if (!branchId) {
+    let placement: { id: string; branchId: string } | undefined;
+    if (params.placementId) {
+      placement = active.find((p) => p.id === params.placementId);
+      if (!placement) {
+        throw new BadRequestException(
+          `${employee.fullName} has no active placement with that client.`,
+        );
+      }
+    } else if (active.length === 1) {
+      placement = active[0];
+    } else if (active.length > 1) {
+      throw new BadRequestException(
+        `${employee.fullName} is placed with ${active.length} clients. Say which one this ` +
+          `day was worked at — attendance decides which client's invoice carries it.`,
+      );
+    }
+
+    if (!placement) {
       this.logger.warn(
-        `[MIRROR] employee ${employee.id} has no placement and no branch — skipping pipeline attendance`,
+        `[MIRROR] employee ${employee.id} has no active placement — skipping pipeline attendance`,
       );
       return null;
     }
+    const branchId = placement.branchId ?? employee.branchId;
 
     const note = [
       params.notes?.trim() || null,
@@ -136,21 +167,28 @@ export class StaffAttendanceMirrorService {
       .join(' — ');
 
     const record = await this.prisma.staffDailyAttendance.upsert({
-      where: { staffId_attendanceDate: { staffId, attendanceDate } },
+      where: {
+        staffId_placementId_attendanceDate: {
+          staffId, placementId: placement.id, attendanceDate,
+        },
+      },
       create: {
         staffId,
-        placementId: placement?.id ?? null,
+        placementId: placement.id,
         branchId,
         attendanceDate,
         status: mappedStatus,
         overtimeHours: params.overtimeHours ?? null,
+        hoursWorked: params.hoursWorked ?? null,
         markedBy: params.actorId,
         notes: note,
       },
       update: {
         status: mappedStatus,
-        placementId: placement?.id ?? null,
         branchId,
+        ...(params.hoursWorked !== undefined && params.hoursWorked !== null
+          ? { hoursWorked: params.hoursWorked }
+          : {}),
         ...(params.overtimeHours !== undefined && params.overtimeHours !== null
           ? { overtimeHours: params.overtimeHours }
           : {}),

@@ -90,7 +90,12 @@ export class FinanceCustomerController {
   }
 
   @Post(':id/bill-number')
-  @ApiOperation({ summary: 'Generate next bill number for a customer (month-wise counter)' })
+  @ApiOperation({
+    summary: 'What this customer’s next invoice number will be',
+    description:
+      'Read-only. The number is actually taken when the invoice is issued, inside ' +
+      'that transaction — this only reports what it would be.',
+  })
   generateBillNumber(@Param('id') id: string) {
     return this.service.generateBillNumber(id).then((bill_number) => ({ bill_number }));
   }

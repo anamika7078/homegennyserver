@@ -18,7 +18,7 @@ import { PayrollService } from '../payroll/payroll.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
-import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 
 @ApiTags('Employee Attendance')
 @ApiBearerAuth()
@@ -52,6 +52,24 @@ export class AttendanceController {
     return this.service.getStats(date, branchId);
   }
 
+  @Get('roster')
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.FINANCE)
+  @ApiOperation({
+    summary: 'Who has to be marked today, one row per place they work',
+    description:
+      'A maid works several houses in a day, and the day belongs to a client — it ' +
+      'decides which invoice carries it. So attendance is marked per placement, not ' +
+      'per person: this returns one row for each staff member at each client they are ' +
+      'placed with, the kind of placement it is, and whatever is already marked for ' +
+      'that date. Hourly placements are billed on `hours_worked`, so their rows expect it.',
+  })
+  @ApiQuery({ name: 'date', required: true, description: 'YYYY-MM-DD' })
+  @ApiQuery({ name: 'branchId', required: false })
+  async roster(@Query('date') date: string, @Query('branchId') branchId?: string) {
+    if (!date) throw new BadRequestException('date is required (YYYY-MM-DD)');
+    return this.service.roster(date, branchId);
+  }
+
   @Get('payrolls/all')
   @Roles(UserRole.HR, UserRole.FINANCE, UserRole.ADMIN)
   @ApiOperation({ summary: 'Get all generated employee payrolls' })
@@ -67,7 +85,11 @@ export class AttendanceController {
       'Writes the HR attendance ledger, and for an employee onboarded out of the ' +
       'S1-S5 pipeline also mirrors the day into staff_daily_attendance, which is what ' +
       'payroll and client invoicing count. Refuses to overwrite a live self-check-in ' +
-      'from the staff mobile app unless overrideSelfCheckIn: true is passed.',
+      'from the staff mobile app unless overrideSelfCheckIn: true is passed.\n\n' +
+      'Pass `placementId` to say which client the day was worked at — required once ' +
+      'the staff member is placed with more than one, since attendance decides which ' +
+      'invoice carries the day. `hoursWorked` is what an hourly placement is billed on. ' +
+      'GET /attendance/roster lists the rows to mark.',
   })
   async mark(@Body() body: any, @Req() req: any) {
     if (!body.employeeId || !body.date || !body.status) {

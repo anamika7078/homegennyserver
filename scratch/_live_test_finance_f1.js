@@ -213,7 +213,7 @@ const round2 = (n) => Math.round(n * 100) / 100;
         `INSERT INTO staff_daily_attendance
            (id, staff_id, placement_id, branch_id, attendance_date, status, marked_by, created_at, updated_at)
          VALUES (gen_random_uuid(), $1, $2, $3, make_date($4,$5,$6), 'PRESENT', $1, now(), now())
-         ON CONFLICT (staff_id, attendance_date) DO NOTHING
+         ON CONFLICT (staff_id, placement_id, attendance_date) DO NOTHING
          RETURNING id`,
         [target.staff_id, target.placement_id, target.branch_id, TEST_YEAR, TEST_MONTH, day],
       );

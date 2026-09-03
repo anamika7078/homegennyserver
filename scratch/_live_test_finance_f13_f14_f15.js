@@ -137,7 +137,7 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
           `INSERT INTO staff_daily_attendance
              (id, staff_id, placement_id, branch_id, attendance_date, status, marked_by, created_at, updated_at)
            VALUES (gen_random_uuid(), $1, $2, $3, make_date($4,$5,$6), 'PRESENT', $1, now(), now())
-           ON CONFLICT (staff_id, attendance_date) DO NOTHING RETURNING id`,
+           ON CONFLICT (staff_id, placement_id, attendance_date) DO NOTHING RETURNING id`,
           [t.staff_id, t.placement_id, t.branch_id, TEST_YEAR, TEST_MONTH, d],
         );
         if (r.rows[0]) made.attendanceIds.push(r.rows[0].id);
@@ -179,7 +179,13 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
 
     const staffNames = new Set((p?.line_items ?? []).filter((li) => li.staff_name).map((li) => li.staff_name));
     check('line items are grouped per staff member', staffNames.size === 2, [...staffNames]);
-    check('every staff line names its person', (p?.line_items ?? []).some((li) => /Staff Salary$/.test(li.description)), p?.line_items?.slice(0, 3));
+    // The salary line now also carries its working — "(15 of 30 days)" for a
+    // monthly placement, "(12 hours × ₹150)" for an hourly one — so match the
+    // label rather than pinning the end of the string. See §F4.
+    check('every staff line names its person', (p?.line_items ?? []).some((li) => /Staff Salary/.test(li.description)), p?.line_items?.slice(0, 3));
+    check('and the salary line shows its working',
+      (p?.line_items ?? []).some((li) => /Staff Salary \(\d+ of \d+ days\)/.test(li.description)),
+      p?.line_items?.slice(0, 1));
     check('only the management fee is taxable',
       (p?.line_items ?? []).filter((li) => li.is_taxable).every((li) => /Management Fee/.test(li.description)),
       (p?.line_items ?? []).filter((li) => li.is_taxable).map((li) => li.description));

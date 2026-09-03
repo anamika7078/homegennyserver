@@ -16,8 +16,15 @@ interface PayrollLine {
   gross_salary: string;
   esic_employer: string;
   pf_employer: string;
+  /** The placement's monthly fee — null for an hourly placement. */
   management_fee: string;
+  /** What payroll actually charged this client. Preferred over the above. */
+  billed_fee: string | null;
+  /** Days billed, despite the name. */
   shift_days: number | null;
+  placement_type: 'PERMANENT' | 'TEMPORARY' | null;
+  hours_worked: string | null;
+  hourly_rate: string | null;
 }
 
 /**
@@ -88,7 +95,14 @@ export class ConsolidatedInvoiceService {
     const lines = await runner.query<PayrollLine[]>(
       `SELECT pr.id AS payroll_id, pr.placement_id, pr.staff_id,
               sa.full_name AS staff_name, sa.staff_code,
+              -- shift_days is the count of days actually billed, despite the name.
               pr.gross_salary, pr.esic_employer, pr.pf_employer, pr.shift_days,
+              -- What this client was actually charged, as payroll computed it.
+              -- Deriving it from the placement's monthly figure instead billed
+              -- an hourly placement nothing at all, since an hourly placement
+              -- has no monthly fee — it has a fee per hour.
+              pr.management_fee AS billed_fee,
+              pr.placement_type, pr.hours_worked, pr.hourly_rate,
               p.management_fee
        FROM payroll_records pr
        JOIN placements p ON p.id = pr.placement_id
@@ -116,12 +130,18 @@ export class ConsolidatedInvoiceService {
       // The stored management fee is the placement's monthly figure; the
       // payroll pro-rated it, so derive the billed fee the same way rather
       // than billing a full month for a partial one.
-      const fee = this.proratedFeeFor(l, month, year);
+      const fee = l.billed_fee != null
+        ? round2(parseFloat(l.billed_fee))
+        : this.proratedFeeFor(l, month, year);
 
       salaryTotal += salary; esicTotal += esic; pfTotal += pf; feeTotal += fee;
 
       const base = { staff_id: l.staff_id, staff_name: l.staff_name, placement_id: l.placement_id };
-      items.push({ ...base, description: `${l.staff_name} — Staff Salary`, amount: salary, is_taxable: false, sort_order: order++ });
+      items.push({
+        ...base,
+        description: `${l.staff_name} — Staff Salary (${this.workingFor(l, month, year)})`,
+        amount: salary, is_taxable: false, sort_order: order++,
+      });
       if (esic > 0) items.push({ ...base, description: `${l.staff_name} — Employer ESIC`, amount: esic, is_taxable: false, sort_order: order++ });
       if (pf > 0) items.push({ ...base, description: `${l.staff_name} — Employer PF`, amount: pf, is_taxable: false, sort_order: order++ });
       items.push({ ...base, description: `${l.staff_name} — Management Fee`, amount: fee, is_taxable: true, sort_order: order++ });
@@ -187,6 +207,26 @@ export class ConsolidatedInvoiceService {
    * days in the month, which `shift_days` records. Billing a full month's fee
    * against a part-month's salary would quietly overcharge the client.
    */
+  /**
+   * The arithmetic behind a salary line, in words.
+   *
+   * A client reading "Sunita Devi — Staff Salary ₹1,800" has to take it on
+   * trust. "12 hours × ₹150" they can check. Hourly placements show hours and
+   * rate; monthly ones show the days that were pro-rated. See §F4.
+   */
+  private workingFor(line: PayrollLine, month: number, year: number): string {
+    if (line.placement_type === 'TEMPORARY') {
+      const hours = Number(line.hours_worked ?? 0);
+      const rate = Number(line.hourly_rate ?? 0);
+      if (hours > 0 && rate > 0) {
+        return `${hours} hours × ₹${rate.toLocaleString('en-IN')}`;
+      }
+      return `${hours} hours`;
+    }
+    const daysInMonth = new Date(year, month, 0).getDate();
+    return `${Number(line.shift_days ?? 0)} of ${daysInMonth} days`;
+  }
+
   private proratedFeeFor(line: PayrollLine, month: number, year: number): number {
     const monthlyFee = parseFloat(line.management_fee ?? '0');
     if (!Number.isFinite(monthlyFee) || monthlyFee <= 0) return 0;
@@ -244,7 +284,38 @@ export class ConsolidatedInvoiceService {
           `Could not reserve an invoice number for customer ${customerId} — check its bill_no_prefix.`,
         );
       }
-      const invoiceNumber = formatInvoiceNumber(cust.bill_no_prefix, cust.bill_seq);
+      // `bill_seq` counts per customer, but `invoice_number` is unique across
+      // the whole table — and customers onboarded in the same month were given
+      // the same `bill_no_prefix` (see customer.service.buildBillPrefix). Two
+      // such customers both reach "BILL/202609/0001", and the second one's
+      // invoicing died on a raw unique-constraint 500 with nothing to explain
+      // it. New customers no longer share a prefix; the ones already created
+      // that way still do, so skip past any number already taken rather than
+      // leave those clients unable to be billed at all. Skipping leaves a gap
+      // in that customer's own count, which is the harmless half of the
+      // problem — a number issued twice is not.
+      let seq = cust.bill_seq;
+      let invoiceNumber = formatInvoiceNumber(cust.bill_no_prefix, seq);
+      for (let guard = 0; guard < 1000; guard++) {
+        const taken = await manager.query(
+          `SELECT 1 FROM client_invoices WHERE invoice_number = $1 LIMIT 1`,
+          [invoiceNumber],
+        );
+        if (!taken.length) break;
+        seq += 1;
+        invoiceNumber = formatInvoiceNumber(cust.bill_no_prefix, seq);
+      }
+      if (seq !== cust.bill_seq) {
+        await manager.query(
+          `UPDATE finance_customers SET bill_seq = $1 WHERE id = $2`,
+          [seq, customerId],
+        );
+        this.logger.warn(
+          `[CONSOLIDATED_INVOICE] customer ${customerId} shares bill_no_prefix ` +
+            `"${cust.bill_no_prefix}" with another customer — advanced to ${invoiceNumber}.`,
+        );
+      }
+
       const dueDate = new Date(year, month, 5);
       const t = preview.totals;
 
@@ -259,7 +330,7 @@ export class ConsolidatedInvoiceService {
                  $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
          RETURNING *`,
         [
-          customerId, invoiceNumber, cust.bill_seq, month, year,
+          customerId, invoiceNumber, seq, month, year,
           t.staff_salary, t.management_fee, t.gst_total, t.employer_esic, t.employer_pf,
           t.total, dueDate,
           preview.document_type,
@@ -415,6 +486,92 @@ export class ConsolidatedInvoiceService {
 
       return { invoice, preview, amended: true };
     });
+  }
+
+  /**
+   * Everything about a client, found by the code Finance actually knows them by.
+   *
+   * Issuing an invoice used to start with picking a customer out of a list and
+   * hoping it was the right one. Finance identifies a client by their unit
+   * code, so that is the way in: type it, see who it is and what they have
+   * running, then issue. See docs/HOURLY_MULTI_CLIENT_PLAN.md §F1.
+   */
+  async lookupByUnitCode(unitCode: string, month: number, year: number) {
+    const code = String(unitCode ?? '').trim();
+    if (!code) throw new BadRequestException('A unit code is required.');
+
+    const rows = await this.dataSource.query<{
+      id: string; customer_name: string; unit_code: string; gstn: string | null;
+      address: string | null; city: string | null; state: string | null;
+      bill_no_prefix: string;
+    }[]>(
+      `SELECT id, customer_name, unit_code, gstn, address, city, state, bill_no_prefix
+         FROM finance_customers WHERE UPPER(unit_code) = UPPER($1) LIMIT 1`,
+      [code],
+    );
+    if (!rows.length) throw new NotFoundException(`No client with unit code "${code}".`);
+    const customer = rows[0];
+
+    // Permanent and temporary listed apart, because they are billed on
+    // different things — a month of days against a count of hours.
+    const placements = await this.dataSource.query(
+      `SELECT p.id, p.placement_type, p.status::text AS status,
+              p.staff_salary, p.management_fee, p.hourly_rate, p.hourly_fee,
+              p.shift_hours,
+              sa.staff_code, sa.full_name AS staff_name,
+              COALESCE(a.days, 0)::int    AS days_this_period,
+              COALESCE(a.hours, 0)::float AS hours_this_period,
+              pr.id IS NOT NULL           AS payroll_run,
+              pr.client_invoice_id IS NOT NULL AS invoiced
+         FROM placements p
+         JOIN staff_applicants sa ON sa.id = p.staff_id
+         LEFT JOIN LATERAL (
+           SELECT COUNT(*) FILTER (WHERE status IN ('PRESENT','HALF_DAY','OVERTIME')) AS days,
+                  SUM(hours_worked) FILTER (WHERE status IN ('PRESENT','HALF_DAY','OVERTIME')) AS hours
+             FROM staff_daily_attendance sda
+            WHERE sda.placement_id = p.id
+              AND EXTRACT(MONTH FROM sda.attendance_date) = $2
+              AND EXTRACT(YEAR  FROM sda.attendance_date) = $3
+         ) a ON true
+         LEFT JOIN payroll_records pr
+           ON pr.placement_id = p.id AND pr.period_month = $2 AND pr.period_year = $3
+        WHERE p.client_id = $1 AND p.status IN ('CONFIRMED','TRIAL')
+        ORDER BY p.placement_type, sa.staff_code`,
+      [customer.id, month, year],
+    );
+
+    const existing = await this.dataSource.query<
+      { id: string; invoice_number: string; status: string; total_amount: string }[]
+    >(
+      `SELECT id, invoice_number, status, total_amount
+         FROM client_invoices
+        WHERE client_id = $1 AND period_month = $2 AND period_year = $3
+          AND status <> 'CANCELLED'
+        LIMIT 1`,
+      [customer.id, month, year],
+    );
+
+    // What the invoice would carry if issued now — the same query the preview
+    // uses, so the button below never promises something different.
+    const pending = await this.dataSource.query<{ n: string; total: string }[]>(
+      `SELECT COUNT(*)::text AS n, COALESCE(SUM(pr.gross_salary), 0)::text AS total
+         FROM payroll_records pr
+         JOIN placements p ON p.id = pr.placement_id
+        WHERE p.client_id = $1 AND pr.period_month = $2 AND pr.period_year = $3
+          AND pr.client_invoice_id IS NULL`,
+      [customer.id, month, year],
+    );
+
+    return {
+      customer,
+      period: { month, year },
+      placements,
+      existing_invoice: existing[0] ?? null,
+      un_invoiced: {
+        staff_count: parseInt(pending[0]?.n ?? '0', 10),
+        salary_total: parseFloat(pending[0]?.total ?? '0'),
+      },
+    };
   }
 
   /** Customers with un-invoiced payroll for a period — the month-end worklist. */

@@ -148,20 +148,46 @@ export class FinanceAnalyticsService {
    */
   async getBranchPnl(): Promise<BranchPnl[]> {
     return this.dataSource.query<BranchPnl[]>(
-      `WITH eor AS (
+      // The branch used to be found by joining `placements` on
+      // ci.placement_id. A consolidated invoice covers a whole client and
+      // leaves that column NULL, so every invoice the system now produces was
+      // silently dropped from this report — a branch could bill all month and
+      // show zero revenue.
+      //
+      // The branch now comes from the invoice's own placements: for a
+      // consolidated invoice, through the payroll rows it billed; for a legacy
+      // per-placement one, through placement_id as before. Staff are counted
+      // distinctly for the same reason — one invoice now carries several.
+      `WITH invoice_branch AS (
+         SELECT ci.id,
+                COALESCE(
+                  legacy.branch_id,
+                  (SELECT p2.branch_id
+                     FROM payroll_records pr
+                     JOIN placements p2 ON p2.id = pr.placement_id
+                    WHERE pr.client_invoice_id = ci.id
+                    LIMIT 1)
+                ) AS branch_id
+           FROM client_invoices ci
+           LEFT JOIN placements legacy ON legacy.id = ci.placement_id
+          WHERE ci.status = 'PAID'
+       ),
+       eor AS (
          SELECT
-           p.branch_id,
+           ib.branch_id,
            SUM(ci.management_fee)                                   AS revenue,
            SUM(ci.gst_amount)                                       AS gst_collected,
            SUM(ci.staff_salary_component
                + COALESCE(ci.esic_employer, 0)
                + COALESCE(ci.pf_employer, 0))                       AS pass_through,
            SUM(ci.total_amount)                                     AS client_billed,
-           COUNT(DISTINCT ci.placement_id)                          AS staff_count
+           SUM((SELECT COUNT(DISTINCT pr.staff_id)
+                  FROM payroll_records pr
+                 WHERE pr.client_invoice_id = ci.id))               AS staff_count
          FROM client_invoices ci
-         JOIN placements p ON p.id = ci.placement_id
-         WHERE ci.status = 'PAID'
-         GROUP BY p.branch_id
+         JOIN invoice_branch ib ON ib.id = ci.id
+         WHERE ib.branch_id IS NOT NULL
+         GROUP BY ib.branch_id
        ),
        internal AS (
          -- Branch overhead: what the office staff themselves cost.

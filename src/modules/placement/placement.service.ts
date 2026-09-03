@@ -30,6 +30,10 @@ export interface PlacementRow {
   status: string;
   staff_salary: string | number | null;
   management_fee: string | number | null;
+  placement_type?: 'PERMANENT' | 'TEMPORARY';
+  shift_hours?: number | null;
+  hourly_rate?: number | null;
+  hourly_fee?: number | null;
   trial_start_date: Date | string | null;
   trial_end_date: Date | string | null;
   staff_code?: string;
@@ -54,6 +58,10 @@ export class PlacementService {
     status: PlacementStatus;
     staffSalary: unknown;
     managementFee: unknown;
+    placementType?: string | null;
+    shiftHours?: unknown;
+    hourlyRate?: unknown;
+    hourlyFee?: unknown;
     trialStartDate: Date | null;
     trialEndDate: Date | null;
     metadata?: unknown;
@@ -68,6 +76,13 @@ export class PlacementService {
       status: p.status,
       staff_salary: p.staffSalary != null ? Number(p.staffSalary) : null,
       management_fee: p.managementFee != null ? Number(p.managementFee) : null,
+      // Whether this placement is billed monthly or by the hour, and at what
+      // rate. Callers marking attendance need it to know whether to ask for
+      // hours; the placement list needs it to say what kind of placement it is.
+      placement_type: (p.placementType as 'PERMANENT' | 'TEMPORARY' | null) ?? 'PERMANENT',
+      shift_hours: p.shiftHours != null ? Number(p.shiftHours) : null,
+      hourly_rate: p.hourlyRate != null ? Number(p.hourlyRate) : null,
+      hourly_fee: p.hourlyFee != null ? Number(p.hourlyFee) : null,
       trial_start_date: p.trialStartDate,
       trial_end_date: p.trialEndDate,
       wage_config: metadata.wage_config ?? null,

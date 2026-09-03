@@ -542,6 +542,18 @@ model PayrollRecord {
   // stamped only on PAID, so it never claims money moved when it did not (F-09).
   disbursementStatus        String  @default("NOT_STARTED") @map("disbursement_status") @db.VarChar(20)
   disbursementFailureReason String? @map("disbursement_failure_reason")
+  // How this client's share was priced. An hourly placement is billed on hours,
+  // so the row keeps the hours and the rate as they stood that month — an
+  // invoice issued today still explains itself after the client renegotiates.
+  // The statutory share is this client's portion of one ESIC/PF figure computed
+  // on the month's whole earnings, so a line can be checked without recomputing
+  // the other clients. See docs/HOURLY_MULTI_CLIENT_PLAN.md §B2.
+  placementType     String    @default("PERMANENT") @map("placement_type") @db.VarChar(20)
+  hoursWorked       Decimal?  @map("hours_worked") @db.Decimal(6, 1)
+  hourlyRate        Decimal?  @map("hourly_rate") @db.Decimal(10, 2)
+  hourlyFee         Decimal?  @map("hourly_fee") @db.Decimal(10, 2)
+  managementFee     Decimal?  @map("management_fee") @db.Decimal(10, 2)
+  statutoryShare    Decimal?  @map("statutory_share") @db.Decimal(6, 4)
   placement         Placement @relation(fields: [placementId], references: [id])
 
   @@map("payroll_records")
@@ -800,11 +812,16 @@ model ShiftLog {
 model StaffDailyAttendance {
   id             String                @id @default(uuid()) @db.Uuid
   staffId        String                @map("staff_id") @db.Uuid
-  placementId    String?               @map("placement_id") @db.Uuid
+  /// Required: a day has to say which client it was worked at, or payroll
+  /// would have to guess. See docs/HOURLY_MULTI_CLIENT_PLAN.md §S1.
+  placementId    String                @map("placement_id") @db.Uuid
   branchId       String                @map("branch_id") @db.Uuid
   attendanceDate DateTime              @map("attendance_date") @db.Date
   status         StaffAttendanceStatus
   overtimeHours  Decimal?              @map("overtime_hours") @db.Decimal(4, 1)
+  /// Hours actually worked that day at that client. A temporary placement bills
+  /// by the hour, so this is what it is billed from.
+  hoursWorked    Decimal?              @map("hours_worked") @db.Decimal(4, 1)
   markedBy       String                @map("marked_by") @db.Uuid
   notes          String?
   createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -812,7 +829,11 @@ model StaffDailyAttendance {
   branch         Branch                @relation(fields: [branchId], references: [id])
   staff          StaffApplicant        @relation(fields: [staffId], references: [id])
 
-  @@unique([staffId, attendanceDate])
+  /// Was `[staffId, attendanceDate]`, which allowed a maid one day and no more —
+  /// Saxena in the morning and Kapoor in the afternoon could not both exist.
+  /// Keyed by placement too, this still refuses a duplicate day at the same
+  /// client while allowing a second house.
+  @@unique([staffId, placementId, attendanceDate], map: "uniq_attendance_staff_placement_date")
   @@index([branchId, attendanceDate])
   @@map("staff_daily_attendance")
 }

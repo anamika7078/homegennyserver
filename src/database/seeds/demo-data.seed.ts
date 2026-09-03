@@ -411,7 +411,7 @@ export async function seedDemoData(prisma: PrismaClient) {
 
         await prisma.staffDailyAttendance.upsert({
           where: {
-            staffId_attendanceDate: { staffId, attendanceDate },
+            staffId_placementId_attendanceDate: { staffId, placementId, attendanceDate },
           },
           create: {
             staffId,
@@ -420,9 +420,10 @@ export async function seedDemoData(prisma: PrismaClient) {
             attendanceDate,
             status,
             markedBy: rmId,
+            hoursWorked: status === StaffAttendanceStatus.PRESENT ? 8 : null,
             overtimeHours: status === StaffAttendanceStatus.OVERTIME ? 2 : undefined,
           },
-          update: { status, placementId, markedBy: rmId },
+          update: { status, markedBy: rmId },
         });
       }
     }

@@ -148,13 +148,26 @@ async function req(method, path, { token, body, raw } = {}) {
   }
 
   try {
+    // A day now belongs to a client, not just to a person — see §S1.
+    const profPlacement = await db.query(
+      `SELECT id FROM placements WHERE staff_id = $1 AND status = 'CONFIRMED'
+        ORDER BY created_at DESC LIMIT 1`,
+      [target.id],
+    );
+    if (!profPlacement.rowCount) {
+      console.log('candidate has no confirmed placement — aborting');
+      process.exit(1);
+    }
+    const profPlacementId = profPlacement.rows[0].id;
+
     for (const day of [...FIELD_DAYS, UNPROJECTED_DAY]) {
       await db.query(
         `INSERT INTO staff_daily_attendance
-           (id, staff_id, branch_id, attendance_date, status, marked_by, created_at, updated_at)
-         VALUES (gen_random_uuid(), $1, $2, $3::date, 'PRESENT', $1, now(), now())
-         ON CONFLICT (staff_id, attendance_date) DO UPDATE SET status = 'PRESENT'`,
-        [target.id, branchId, day],
+           (id, staff_id, placement_id, branch_id, attendance_date, status, marked_by, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, $4::date, 'PRESENT', $1, now(), now())
+         ON CONFLICT (staff_id, placement_id, attendance_date)
+           DO UPDATE SET status = 'PRESENT'`,
+        [target.id, profPlacementId, branchId, day],
       );
     }
 

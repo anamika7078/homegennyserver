@@ -62,9 +62,25 @@ function generateUnitName(name: string): string {
   return name.toUpperCase().slice(0, 50);
 }
 
-function buildBillPrefix(month: number, year: number): string {
+/**
+ * The invoice series a customer bills under.
+ *
+ * This used to be `BILL/YYYYMM` — the month the customer was onboarded, and
+ * nothing else. Every customer created in the same month therefore shared a
+ * series, while `bill_seq` counts per customer, so the second such customer's
+ * first invoice tried to take a number the first one already held and died on
+ * the unique constraint with a bare 500. The unit code is unique per customer,
+ * so putting it in front makes the series unique by construction.
+ *
+ * Existing customers keep the prefix they were created with: a tax series has
+ * to stay continuous, and renumbering issued invoices is an accounting event,
+ * not a migration. consolidated-invoice.service skips past numbers already
+ * taken so those customers can still be billed.
+ */
+function buildBillPrefix(unitCode: string, month: number, year: number): string {
   const m = String(month).padStart(2, '0');
-  return `BILL/${year}${m}`;
+  const code = (unitCode || '').trim().replace(/\/+$/, '');
+  return code ? `${code}/${year}${m}` : `BILL/${year}${m}`;
 }
 
 @Injectable()
@@ -160,7 +176,7 @@ export class FinanceCustomerService implements OnModuleInit {
     const primaryUnitName = generateUnitName(dto.customer_name);
 
     const now = new Date();
-    const billPrefix = buildBillPrefix(now.getMonth() + 1, now.getFullYear());
+    const billPrefix = buildBillPrefix(primaryUnitCode, now.getMonth() + 1, now.getFullYear());
 
     // Execute in transaction runner
     const queryRunner = this.dataSource.createQueryRunner();
@@ -393,31 +409,25 @@ export class FinanceCustomerService implements OnModuleInit {
     return this.getCustomer(id);
   }
 
-  /** Generate next bill number for this customer (increments monthly counter) */
+  /**
+   * What this customer's next invoice number will be. Read-only.
+   *
+   * This used to reserve the number itself: it rewrote `bill_no_prefix` to the
+   * current month and reset `bill_seq` to 1 whenever the month had turned. But
+   * invoices are numbered by consolidated-invoice.service, which takes the next
+   * number inside its own transaction — so a call to this endpoint moved the
+   * counter under it and could send a series back to 0001 over numbers that
+   * were already issued. Nothing consumed the number it returned. It now only
+   * reports, and the invoicing path remains the single place a number is taken.
+   */
   async generateBillNumber(customerId: string): Promise<string> {
-    const now = new Date();
-    const newPrefix = buildBillPrefix(now.getMonth() + 1, now.getFullYear());
-
     const rows = await this.dataSource.query<{ bill_no_prefix: string; bill_seq: number }[]>(
       `SELECT bill_no_prefix, bill_seq FROM finance_customers WHERE id = $1`,
       [customerId],
     );
     if (!rows.length) throw new NotFoundException(`Customer ${customerId} not found`);
 
-    let seq = rows[0].bill_seq;
-    const prefix = rows[0].bill_no_prefix;
-
-    if (prefix !== newPrefix) {
-      seq = 1;
-    } else {
-      seq += 1;
-    }
-
-    await this.dataSource.query(
-      `UPDATE finance_customers SET bill_no_prefix = $1, bill_seq = $2, updated_at = now() WHERE id = $3`,
-      [newPrefix, seq, customerId],
-    );
-
-    return `${newPrefix}/${String(seq).padStart(4, '0')}`;
+    const prefix = (rows[0].bill_no_prefix || 'INV').trim().replace(/\/+$/, '');
+    return `${prefix}/${String((rows[0].bill_seq ?? 0) + 1).padStart(4, '0')}`;
   }
 }

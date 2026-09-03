@@ -339,8 +339,15 @@ export class StaffMobileController {
 
     // Same sync reviewShift() does on APPROVED — attendance is billable the
     // moment staff checks in, no RM action required.
+    // Keyed by placement too — a maid can check in at a second house the same
+    // day, and each day belongs to the client whose invoice will carry it.
+    // See docs/HOURLY_MULTI_CLIENT_PLAN.md §S1.
     await this.prisma.staffDailyAttendance.upsert({
-      where: { staffId_attendanceDate: { staffId: staff.id, attendanceDate: today } },
+      where: {
+        staffId_placementId_attendanceDate: {
+          staffId: staff.id, placementId: placement.id, attendanceDate: today,
+        },
+      },
       create: {
         staffId: staff.id,
         placementId: placement.id,
@@ -351,7 +358,6 @@ export class StaffMobileController {
       },
       update: {
         status: 'PRESENT',
-        placementId: placement.id,
         branchId: placement.branchId,
         markedBy: req.user.id,
       },

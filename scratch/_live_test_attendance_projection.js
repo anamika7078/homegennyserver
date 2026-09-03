@@ -147,13 +147,27 @@ async function req(method, path, { token, body } = {}) {
 
   try {
     // ── simulate the staff member's own mobile check-ins ───────────────────
+    // A day now belongs to a client, not just to a person — a maid works more
+    // than one house. See docs/HOURLY_MULTI_CLIENT_PLAN.md §S1.
+    const fieldPlacement = await db.query(
+      `SELECT id FROM placements WHERE staff_id = $1 AND status = 'CONFIRMED'
+        ORDER BY created_at DESC LIMIT 1`,
+      [target.id],
+    );
+    if (!fieldPlacement.rowCount) {
+      console.log('candidate has no confirmed placement — aborting');
+      process.exit(1);
+    }
+    const fieldPlacementId = fieldPlacement.rows[0].id;
+
     for (const day of FIELD_DAYS) {
       await db.query(
         `INSERT INTO staff_daily_attendance
-           (id, staff_id, branch_id, attendance_date, status, marked_by, created_at, updated_at)
-         VALUES (gen_random_uuid(), $1, $2, $3::date, 'PRESENT', $1, now(), now())
-         ON CONFLICT (staff_id, attendance_date) DO UPDATE SET status = 'PRESENT'`,
-        [target.id, branchId, day],
+           (id, staff_id, placement_id, branch_id, attendance_date, status, marked_by, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, $4::date, 'PRESENT', $1, now(), now())
+         ON CONFLICT (staff_id, placement_id, attendance_date)
+           DO UPDATE SET status = 'PRESENT'`,
+        [target.id, fieldPlacementId, branchId, day],
       );
     }
 

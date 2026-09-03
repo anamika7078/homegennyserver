@@ -187,7 +187,7 @@ function todayUtc() {
         `INSERT INTO staff_daily_attendance
            (id, staff_id, branch_id, placement_id, attendance_date, status, marked_by, created_at, updated_at)
          VALUES (gen_random_uuid(), $1, $2, $3, $4::date, 'PRESENT', $1, now(), now())
-         ON CONFLICT (staff_id, attendance_date) DO UPDATE SET status = 'PRESENT'`,
+         ON CONFLICT (staff_id, placement_id, attendance_date) DO UPDATE SET status = 'PRESENT'`,
         [target.id, app.branch_id, placementId, DAY],
       );
     }

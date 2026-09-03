@@ -42,6 +42,25 @@ export class FinanceInvoiceController {
     });
   }
 
+  @Get('by-unit-code')
+  @ApiOperation({
+    summary: 'A client, their placements and their invoice status, by unit code',
+    description:
+      'The way Finance identifies a client. Returns who they are, what is running ' +
+      'for them this period — permanent and temporary listed apart — whether an ' +
+      'invoice already exists, and what an invoice issued now would carry.',
+  })
+  @ApiQuery({ name: 'unit_code', required: true })
+  @ApiQuery({ name: 'month', required: true })
+  @ApiQuery({ name: 'year', required: true })
+  byUnitCode(
+    @Query('unit_code') unitCode: string,
+    @Query('month', ParseIntPipe) month: number,
+    @Query('year', ParseIntPipe) year: number,
+  ) {
+    return this.consolidated.lookupByUnitCode(unitCode, month, year);
+  }
+
   @Get('consolidated/pending')
   @ApiOperation({
     summary: 'Customers with un-invoiced payroll for a period',

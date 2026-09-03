@@ -24,6 +24,19 @@ export interface UnifiedPayslip {
   payslipNumber: string | null;
   storedPdfUrl: string | null;
   generatedAt: string | null;
+  /**
+   * Where the month's earnings came from, when they came from more than one
+   * client. A maid working three houses is paid once; her slip is one figure
+   * with the houses listed under it. Absent for single-client months. See
+   * docs/HOURLY_MULTI_CLIENT_PLAN.md §B5.
+   */
+  clientBreakdown?: {
+    clientName: string;
+    placementType: 'PERMANENT' | 'TEMPORARY';
+    /** Hours for an hourly placement, days for a monthly one. */
+    worked: string;
+    grossSalary: number;
+  }[];
 }
 
 const SOURCE_LABELS: Record<PayslipSource, string> = {
@@ -36,6 +49,10 @@ function num(value: unknown): number {
   if (value === null || value === undefined) return 0;
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
 }
 
 function inr(value: number): string {
@@ -58,6 +75,95 @@ function inr(value: number): string {
 @Injectable()
 export class EmployeePayslipService {
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * One slip per month, not one per client.
+   *
+   * `payroll_records` is keyed by placement, which is right — each row is what
+   * one client owes. But the staff member is paid once, so three houses in a
+   * month used to show as three payslips for the same month, three net figures,
+   * none of them what she actually received. They are folded into one, with the
+   * houses listed underneath. See §B5.
+   */
+  private async foldFieldRowsByMonth(
+    rows: {
+      id: string; periodMonth: number; periodYear: number; shiftDays: number | null;
+      grossSalary: unknown; netSalary: unknown; esicEmployee: unknown; pfEmployee: unknown;
+      disbursedAt: Date | null; createdAt: Date | null; placementId: string | null;
+      placementType?: string | null; hoursWorked?: unknown;
+    }[],
+  ): Promise<UnifiedPayslip[]> {
+    if (!rows.length) return [];
+
+    const placementIds = [...new Set(rows.map((r) => r.placementId).filter(Boolean))] as string[];
+    const placements = placementIds.length
+      ? await this.prisma.placement.findMany({
+          where: { id: { in: placementIds } },
+          select: { id: true, clientId: true },
+        })
+      : [];
+    const clientIds = [...new Set(placements.map((p) => p.clientId))];
+    const clients = clientIds.length
+      ? await this.prisma.financeCustomer.findMany({
+          where: { id: { in: clientIds } },
+          select: { id: true, customerName: true },
+        })
+      : [];
+    const clientOf = new Map(placements.map((p) => [p.id, p.clientId]));
+    const nameOf = new Map(clients.map((c) => [c.id, c.customerName]));
+
+    const byMonth = new Map<string, typeof rows>();
+    for (const r of rows) {
+      const key = `${r.periodYear}-${r.periodMonth}`;
+      const bucket = byMonth.get(key);
+      if (bucket) bucket.push(r);
+      else byMonth.set(key, [r]);
+    }
+
+    return [...byMonth.values()].map((group): UnifiedPayslip => {
+      const esic = group.reduce((s, r) => s + num(r.esicEmployee), 0);
+      const pf = group.reduce((s, r) => s + num(r.pfEmployee), 0);
+      const first = group[0];
+      return {
+        // Every row that makes up the month, so the slip can be traced back.
+        ref: `FIELD_PAYROLL:${group.map((r) => r.id).join(',')}`,
+        source: 'FIELD_PAYROLL',
+        sourceLabel: SOURCE_LABELS.FIELD_PAYROLL,
+        periodMonth: first.periodMonth,
+        periodYear: first.periodYear,
+        // Days at the house she attended most — summing days across houses
+        // would claim more days than the month holds.
+        presentDays: Math.max(...group.map((r) => r.shiftDays ?? 0)) || null,
+        grossSalary: round2(group.reduce((s, r) => s + num(r.grossSalary), 0)),
+        totalDeductions: round2(esic + pf),
+        netSalary: round2(group.reduce((s, r) => s + num(r.netSalary), 0)),
+        deductionBreakdown: { esic: round2(esic), pf: round2(pf) },
+        // payroll_records carries no status column — disbursement is the only
+        // state it records, so derive rather than invent one. Not paid until
+        // every client's share is.
+        status: group.every((r) => r.disbursedAt) ? 'PAID' : 'PENDING',
+        payslipNumber: null,
+        storedPdfUrl: null,
+        generatedAt: first.createdAt?.toISOString() ?? null,
+        ...(group.length > 1
+          ? {
+              clientBreakdown: group.map((r) => {
+                const type = (r.placementType as 'PERMANENT' | 'TEMPORARY') ?? 'PERMANENT';
+                return {
+                  clientName:
+                    nameOf.get(clientOf.get(r.placementId ?? '') ?? '') ?? 'Unknown client',
+                  placementType: type,
+                  worked: type === 'TEMPORARY'
+                    ? `${num(r.hoursWorked)} hours`
+                    : `${r.shiftDays ?? 0} days`,
+                  grossSalary: round2(num(r.grossSalary)),
+                };
+              }),
+            }
+          : {}),
+      };
+    });
+  }
 
   async listForEmployee(employeeId: string): Promise<{ items: UnifiedPayslip[]; total: number }> {
     const employee = await this.prisma.employee.findFirst({
@@ -138,24 +244,7 @@ export class EmployeePayslipService {
         storedPdfUrl: r.payslip?.pdfUrl ?? null,
         generatedAt: (r.payslip?.generatedAt ?? r.createdAt)?.toISOString() ?? null,
       })),
-      ...fieldRows.map((r): UnifiedPayslip => ({
-        ref: `FIELD_PAYROLL:${r.id}`,
-        source: 'FIELD_PAYROLL',
-        sourceLabel: SOURCE_LABELS.FIELD_PAYROLL,
-        periodMonth: r.periodMonth,
-        periodYear: r.periodYear,
-        presentDays: r.shiftDays,
-        grossSalary: num(r.grossSalary),
-        totalDeductions: num(r.esicEmployee) + num(r.pfEmployee),
-        netSalary: num(r.netSalary),
-        deductionBreakdown: { esic: num(r.esicEmployee), pf: num(r.pfEmployee) },
-        // payroll_records carries no status column — disbursement is the only
-        // state it records, so derive rather than invent one.
-        status: r.disbursedAt ? 'PAID' : 'PENDING',
-        payslipNumber: null,
-        storedPdfUrl: null,
-        generatedAt: r.createdAt?.toISOString() ?? null,
-      })),
+      ...(await this.foldFieldRowsByMonth(fieldRows)),
     ];
 
     items.sort(
@@ -175,6 +264,11 @@ export class EmployeePayslipService {
    * business, and until now HR could only reach one person's slips at a time.
    * Reads `payroll_records`, the single payroll engine, so this list and the
    * client's invoice are built from the same rows.
+   *
+   * One row per person, not per placement. A maid working three houses has
+   * three payroll rows — that is right, each is what one client owes — but she
+   * is paid once, so listing her three times with three net figures would show
+   * HR three salaries where there is one. See §B5.
    */
   async listForPeriod(month: number, year: number) {
     const rows = await this.prisma.payrollRecord.findMany({
@@ -184,7 +278,8 @@ export class EmployeePayslipService {
     if (!rows.length) return { items: [], total: 0, month, year };
 
     const staffIds = [...new Set(rows.map((r) => r.staffId))];
-    const [applicants, employees] = await Promise.all([
+    const placementIds = [...new Set(rows.map((r) => r.placementId).filter(Boolean))] as string[];
+    const [applicants, employees, placements] = await Promise.all([
       this.prisma.staffApplicant.findMany({
         where: { id: { in: staffIds } },
         select: { id: true, staffCode: true, fullName: true },
@@ -193,30 +288,71 @@ export class EmployeePayslipService {
         where: { staffApplicantId: { in: staffIds } },
         select: { id: true, employeeId: true, staffApplicantId: true, department: true },
       }),
+      placementIds.length
+        ? this.prisma.placement.findMany({
+            where: { id: { in: placementIds } },
+            select: { id: true, clientId: true },
+          })
+        : Promise.resolve([] as { id: string; clientId: string }[]),
     ]);
+    const clientIds = [...new Set(placements.map((p) => p.clientId))];
+    const clients = clientIds.length
+      ? await this.prisma.financeCustomer.findMany({
+          where: { id: { in: clientIds } },
+          select: { id: true, customerName: true },
+        })
+      : [];
+
     const byStaff = new Map(applicants.map((a) => [a.id, a]));
     const empByStaff = new Map(employees.map((e) => [e.staffApplicantId!, e]));
+    const clientOf = new Map(placements.map((p) => [p.id, p.clientId]));
+    const nameOf = new Map(clients.map((c) => [c.id, c.customerName]));
 
-    const items = rows.map((r) => {
-      const who = byStaff.get(r.staffId);
-      const emp = empByStaff.get(r.staffId);
+    const byPerson = new Map<string, typeof rows>();
+    for (const r of rows) {
+      const bucket = byPerson.get(r.staffId);
+      if (bucket) bucket.push(r);
+      else byPerson.set(r.staffId, [r]);
+    }
+
+    const items = [...byPerson.entries()].map(([staffId, group]) => {
+      const who = byStaff.get(staffId);
+      const emp = empByStaff.get(staffId);
+      const deductions = group.reduce(
+        (s, r) => s + Number(r.esicEmployee ?? 0) + Number(r.pfEmployee ?? 0), 0,
+      );
       return {
-        ref: `FIELD_PAYROLL:${r.id}`,
+        ref: `FIELD_PAYROLL:${group.map((r) => r.id).join(',')}`,
         employeeId: emp?.id ?? null,
         employeeCode: emp?.employeeId ?? who?.staffCode ?? null,
         staffCode: who?.staffCode ?? null,
         staffName: who?.fullName ?? null,
         department: emp?.department ?? null,
-        periodMonth: r.periodMonth,
-        periodYear: r.periodYear,
-        presentDays: r.shiftDays,
-        grossSalary: Number(r.grossSalary ?? 0),
-        totalDeductions: Number(r.esicEmployee ?? 0) + Number(r.pfEmployee ?? 0),
-        netSalary: Number(r.netSalary ?? 0),
-        status: r.disbursedAt ? 'PAID' : 'PENDING',
+        periodMonth: month,
+        periodYear: year,
+        // The most days at any one house. Summing across houses would claim
+        // more days than the month holds.
+        presentDays: Math.max(...group.map((r) => r.shiftDays ?? 0)),
+        grossSalary: round2(group.reduce((s, r) => s + Number(r.grossSalary ?? 0), 0)),
+        totalDeductions: round2(deductions),
+        netSalary: round2(group.reduce((s, r) => s + Number(r.netSalary ?? 0), 0)),
+        // Not paid, and not invoiced, until every client's share is.
+        status: group.every((r) => r.disbursedAt) ? 'PAID' : 'PENDING',
         // Null when payroll ran but the client's invoice could not be touched
         // — an already-sent invoice, for instance.
-        invoiced: Boolean((r as { client_invoice_id?: string | null }).client_invoice_id),
+        invoiced: group.every((r) => Boolean(r.client_invoice_id)),
+        /** Which houses this month's pay came from, when it came from several. */
+        clients: group.length > 1
+          ? group.map((r) => ({
+              clientName: nameOf.get(clientOf.get(r.placementId ?? '') ?? '') ?? 'Unknown client',
+              placementType: (r.placementType as 'PERMANENT' | 'TEMPORARY') ?? 'PERMANENT',
+              worked: r.placementType === 'TEMPORARY'
+                ? `${Number(r.hoursWorked ?? 0)} hours`
+                : `${r.shiftDays ?? 0} days`,
+              grossSalary: round2(Number(r.grossSalary ?? 0)),
+              invoiced: Boolean(r.client_invoice_id),
+            }))
+          : undefined,
       };
     });
 
@@ -309,6 +445,17 @@ export class EmployeePayslipService {
 
       doc.moveDown(0.3).fontSize(11).fillColor('#000').text('Earnings');
       doc.fontSize(9);
+      // A month worked across several houses is paid once, so the gross is a
+      // sum. Show what it is a sum of, or the figure has to be taken on trust.
+      if (slip.clientBreakdown?.length) {
+        for (const b of slip.clientBreakdown) {
+          doc
+            .fillColor('#666')
+            .text(`${b.clientName} · ${b.worked}`, left, doc.y, { continued: true, width: 320 });
+          doc.fillColor('#000').text(`INR ${inr(b.grossSalary)}`);
+        }
+        doc.moveDown(0.2);
+      }
       doc.fillColor('#666').text('Gross salary', left, doc.y, { continued: true, width: 320 });
       doc.fillColor('#000').text(`INR ${inr(slip.grossSalary)}`);
       doc.moveDown(0.5);

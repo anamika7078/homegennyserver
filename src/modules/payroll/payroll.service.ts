@@ -368,10 +368,10 @@ export class PayrollService {
     // issued (or extended) outside the payroll transaction — see §B3. A
     // failure here leaves the payroll standing and the client simply
     // un-invoiced, which month-end billing will pick up.
-    const invoice = await this.billClientFor(
+    const billed = await this.billClientFor(
       result.clientId as string, month, year, placementId,
     );
-    return { ...result, invoice };
+    return { ...result, invoice: billed.invoice, not_invoiced_because: billed.not_invoiced_because };
   }
 
   /**
@@ -381,22 +381,28 @@ export class PayrollService {
    * Returns null rather than throwing when the invoice cannot be touched — an
    * already-sent invoice, for instance. The payroll is real either way, and
    * refusing to record it because billing is closed would be the wrong trade.
+   *
+   * The reason comes back with it. Swallowing it left the caller a bare
+   * success and no invoice, which is exactly what "payroll ran but no invoice
+   * appeared" looks like from the outside — the failure has to reach whoever
+   * pressed the button, not only the log.
    */
   private async billClientFor(
     clientId: string,
     month: number,
     year: number,
     placementId: string,
-  ): Promise<Record<string, unknown> | null> {
+  ): Promise<{ invoice: Record<string, unknown> | null; not_invoiced_because?: string }> {
     try {
       const { invoice } = await this.consolidatedInvoices.generateOrAmend(clientId, month, year);
-      return invoice as Record<string, unknown>;
+      return { invoice: invoice as Record<string, unknown> };
     } catch (e) {
+      const reason = (e as Error).message;
       this.logger.warn(
         `[PAYROLL] Payroll for placement ${placementId} ${month}/${year} is recorded, ` +
-          `but the client invoice was not updated: ${(e as Error).message}`,
+          `but the client invoice was not updated: ${reason}`,
       );
-      return null;
+      return { invoice: null, not_invoiced_because: reason };
     }
   }
 
@@ -417,48 +423,225 @@ export class PayrollService {
     return this.summarizeAttendanceCounts(rows, month, year);
   }
 
+  /**
+   * What this staff member earned across every client in the month, and each
+   * client's share of it.
+   *
+   * ESIC and PF belong to the person, not to the engagement: the ₹21,000 ESIC
+   * ceiling applies to what they earned altogether. Computed per placement, a
+   * maid earning ₹30,000 across three houses would look like three people
+   * earning ₹10,000 — every one under the ceiling — and each client would be
+   * charged ESIC that is not owed.
+   *
+   * So the statutory figures are worked out once on the total, and each client
+   * carries its share in proportion to what it paid.
+   * See docs/HOURLY_MULTI_CLIENT_PLAN.md §B3.
+   */
+  private async staffMonthEarnings(staffId: string, month: number, year: number) {
+    const rows = await this.dataSource.query<{
+      id: string;
+      placement_type: string;
+      staff_salary: string | null;
+      hourly_rate: string | null;
+      present_days: string;
+      hours: string;
+    }[]>(
+      `SELECT p.id, p.placement_type, p.staff_salary, p.hourly_rate,
+              COALESCE(a.present_days, 0)::text AS present_days,
+              COALESCE(a.hours, 0)::text        AS hours
+         FROM placements p
+         LEFT JOIN LATERAL (
+           SELECT COUNT(*) FILTER (
+                    WHERE status IN ('PRESENT','HALF_DAY','OVERTIME')
+                  ) AS present_days,
+                  SUM(hours_worked) FILTER (
+                    WHERE status IN ('PRESENT','HALF_DAY','OVERTIME')
+                  ) AS hours
+             FROM staff_daily_attendance sda
+            WHERE sda.placement_id = p.id
+              AND EXTRACT(MONTH FROM sda.attendance_date) = $2
+              AND EXTRACT(YEAR  FROM sda.attendance_date) = $3
+         ) a ON true
+        WHERE p.staff_id = $1
+          AND p.status IN ('CONFIRMED', 'TRIAL')`,
+      [staffId, month, year],
+    );
+
+    const daysInMonth = this.daysInMonth(month, year);
+    const perPlacement = rows.map((r) => {
+      const gross = r.placement_type === 'TEMPORARY'
+        ? round2(parseFloat(r.hours) * parseFloat(r.hourly_rate ?? '0'))
+        : this.calculateProratedGross(
+            parseFloat(r.staff_salary ?? '0'), parseInt(r.present_days, 10), daysInMonth,
+          );
+      return { placementId: r.id, gross };
+    });
+
+    const totalGross = round2(perPlacement.reduce((s, x) => s + x.gross, 0));
+    return { perPlacement, totalGross };
+  }
+
+  /**
+   * The days worked *at one client*, and the hours behind them.
+   *
+   * Payroll used to count by staff member, which was the same thing while
+   * everyone had a single placement. Now that a maid works several houses, it
+   * is not: counting by staff would bill every client for every day she worked
+   * anywhere. See docs/HOURLY_MULTI_CLIENT_PLAN.md §B2.
+   */
+  async countAttendanceForPlacement(
+    placementId: string,
+    month: number,
+    year: number,
+  ): Promise<AttendanceSummary & { hours_worked: number }> {
+    const rows = await this.dataSource.query<AttendanceCountRow[]>(
+      `SELECT status::text, COUNT(*)::text AS count
+       FROM staff_daily_attendance
+       WHERE placement_id = $1
+         AND EXTRACT(MONTH FROM attendance_date) = $2
+         AND EXTRACT(YEAR  FROM attendance_date) = $3
+       GROUP BY status`,
+      [placementId, month, year],
+    );
+
+    // Only days that are actually worked carry hours. A LEAVE day with hours
+    // recorded against it would otherwise be billed.
+    const hours = await this.dataSource.query<{ total: string }[]>(
+      `SELECT COALESCE(SUM(hours_worked), 0)::text AS total
+       FROM staff_daily_attendance
+       WHERE placement_id = $1
+         AND EXTRACT(MONTH FROM attendance_date) = $2
+         AND EXTRACT(YEAR  FROM attendance_date) = $3
+         AND status IN ('PRESENT', 'HALF_DAY', 'OVERTIME')`,
+      [placementId, month, year],
+    );
+
+    return {
+      ...this.summarizeAttendanceCounts(rows, month, year),
+      hours_worked: round2(parseFloat(hours[0]?.total ?? '0')),
+    };
+  }
+
   async previewAttendancePayroll(placementId: string, month: number, year: number) {
-    const placements = await this.dataSource.query<PlacementRow[]>(
-      `SELECT staff_id, client_id, staff_salary, management_fee, metadata
+    const placements = await this.dataSource.query<
+      (PlacementRow & {
+        placement_type: string;
+        hourly_rate: string | null;
+        hourly_fee: string | null;
+        shift_hours: string | null;
+      })[]
+    >(
+      `SELECT staff_id, client_id, staff_salary, management_fee, metadata,
+              placement_type, hourly_rate, hourly_fee, shift_hours
        FROM placements WHERE id = $1`,
       [placementId],
     );
     if (!placements.length) throw new NotFoundException(`Placement ${placementId} not found`);
     const p = placements[0];
 
-    const summary = await this.countAttendanceForStaff(p.staff_id, month, year);
-    const monthlySalary = parseFloat(p.staff_salary);
-    const monthlyFee = parseFloat(p.management_fee);
-    this.assertValidSalaryTerms(monthlySalary, monthlyFee, placementId);
-    const proratedGross = this.calculateProratedGross(
-      monthlySalary,
-      summary.billable_days,
-      summary.days_in_month,
-    );
-    const proratedFee = this.calculateProratedGross(
-      monthlyFee,
-      summary.billable_days,
-      summary.days_in_month,
-    );
+    // Counted at this client, not across the staff member's whole month — she
+    // may be working three houses. See §B2.
+    const summary = await this.countAttendanceForPlacement(placementId, month, year);
+    const isHourly = p.placement_type === 'TEMPORARY';
+
+    const monthlySalary = parseFloat(p.staff_salary ?? '0');
+    const monthlyFee = parseFloat(p.management_fee ?? '0');
+    const hourlyRate = p.hourly_rate != null ? parseFloat(p.hourly_rate) : 0;
+    const hourlyFee = p.hourly_fee != null ? parseFloat(p.hourly_fee) : 0;
+
+    let proratedGross: number;
+    let proratedFee: number;
+
+    if (isHourly) {
+      // Hours are the whole basis. A client who booked four hours owes four
+      // hours, whether that was one visit or a month of them.
+      if (!(hourlyRate > 0)) {
+        throw new BadRequestException(
+          `Placement ${placementId} is hourly but carries no hourly_rate — nothing to bill.`,
+        );
+      }
+      proratedGross = round2(summary.hours_worked * hourlyRate);
+      proratedFee = round2(summary.hours_worked * hourlyFee);
+    } else {
+      this.assertValidSalaryTerms(monthlySalary, monthlyFee, placementId);
+      proratedGross = this.calculateProratedGross(
+        monthlySalary,
+        summary.billable_days,
+        summary.days_in_month,
+      );
+      proratedFee = this.calculateProratedGross(
+        monthlyFee,
+        summary.billable_days,
+        summary.days_in_month,
+      );
+    }
     // PF follows the base agreed with the client, pro-rated the same way the
     // salary is. Without a wage breakup the whole wage is the base. See F-20.
+    // An hourly placement has no agreed monthly base to pro-rate, so the hours
+    // earned are the base.
     const agreedPfBase = pfBaseFromPlacementMetadata(p.metadata);
-    const proratedPfBase = agreedPfBase != null
-      ? this.calculateProratedGross(agreedPfBase, summary.billable_days, summary.days_in_month)
-      : undefined;
-    const calc = await this.applySupplierGstPolicy(
-      this.calculatePayrollWithAbsoluteFee(
-        proratedGross, proratedFee, ratesFromPlacementMetadata(p.metadata), proratedPfBase,
-      ),
+    const proratedPfBase = isHourly
+      ? undefined
+      : agreedPfBase != null
+        ? this.calculateProratedGross(agreedPfBase, summary.billable_days, summary.days_in_month)
+        : undefined;
+    const rates = ratesFromPlacementMetadata(p.metadata);
+
+    // Statutory once on the month's whole earnings, then this client's share.
+    // See staffMonthEarnings() for why per-placement would be wrong.
+    const monthEarnings = await this.staffMonthEarnings(p.staff_id, month, year);
+    const share = monthEarnings.totalGross > 0
+      ? proratedGross / monthEarnings.totalGross
+      : 1;
+
+    let calc = this.calculatePayrollWithAbsoluteFee(
+      proratedGross, proratedFee, rates, proratedPfBase,
     );
+
+    // Only worth recomputing when the staff member actually works elsewhere —
+    // otherwise the share is 1 and the figures are already correct.
+    if (monthEarnings.perPlacement.length > 1) {
+      const whole = this.calculatePayrollWithAbsoluteFee(
+        monthEarnings.totalGross, proratedFee, rates,
+      );
+      calc = {
+        ...calc,
+        esicEmployee: round2(whole.esicEmployee * share),
+        esicEmployer: round2(whole.esicEmployer * share),
+        pfEmployee: round2(whole.pfEmployee * share),
+        pfEmployer: round2(whole.pfEmployer * share),
+        netSalary: round2(
+          proratedGross - whole.esicEmployee * share - whole.pfEmployee * share,
+        ),
+        clientTotalCharge: round2(
+          proratedGross
+            + whole.esicEmployer * share
+            + whole.pfEmployer * share
+            + calc.managementFee
+            + calc.gstOnFee,
+        ),
+      };
+    }
+
+    calc = await this.applySupplierGstPolicy(calc);
 
     return {
       placement_id: placementId,
+      /** This client's portion of one month-wide ESIC/PF figure. */
+      statutory_share: round2(share * 10000) / 10000,
+      month_total_gross: monthEarnings.totalGross,
+      placements_this_month: monthEarnings.perPlacement.length,
       staff_id: p.staff_id,
       period_month: month,
       period_year: year,
-      monthly_salary: monthlySalary,
-      monthly_management_fee: monthlyFee,
+      // What the figures above were derived from, so the invoice line can show
+      // its working: "12 hours × ₹150" rather than a total nobody can check.
+      placement_type: p.placement_type,
+      shift_hours: p.shift_hours != null ? parseFloat(p.shift_hours) : null,
+      hourly_rate: isHourly ? hourlyRate : null,
+      hourly_fee: isHourly ? hourlyFee : null,
+      monthly_salary: isHourly ? null : monthlySalary,
+      monthly_management_fee: isHourly ? null : monthlyFee,
       ...summary,
       prorated_gross: proratedGross,
       prorated_management_fee: proratedFee,
@@ -526,8 +709,18 @@ export class PayrollService {
     }
 
     const preview = await this.previewAttendancePayroll(placementId, month, year);
-    if (preview.billable_days <= 0) {
-      throw new BadRequestException('No billable attendance days for this period');
+    // What makes a period billable depends on how the placement is priced:
+    // days for a permanent one, hours for an hourly one. A four-hour visit is
+    // one day and would otherwise be judged the same as a full month.
+    const nothingToBill = preview.placement_type === 'TEMPORARY'
+      ? preview.hours_worked <= 0
+      : preview.billable_days <= 0;
+    if (nothingToBill) {
+      throw new BadRequestException(
+        preview.placement_type === 'TEMPORARY'
+          ? 'No hours recorded at this client for the period.'
+          : 'No billable attendance days for this period',
+      );
     }
 
     const placements = await this.dataSource.query<PlacementRow[]>(
@@ -538,15 +731,48 @@ export class PayrollService {
     const p = placements[0];
     const calc = preview.calculation as PayrollCalculation;
 
-    const [payroll] = await this.dataSource.query<Record<string, unknown>[]>(
+    const [payroll] = await this.insertPayrollRecord(
+      this.dataSource, placementId, p.staff_id, month, year, preview, calc,
+    );
+
+    this.logger.log(`[ATTENDANCE_PAYROLL_ONLY] placement ${placementId} ${month}/${year}`);
+    return { payroll, preview, calculation: calc };
+  }
+
+  /**
+   * The one place a payroll row is written.
+   *
+   * Both entry points used to inline their own near-identical INSERT, which is
+   * how they drift: the hourly columns would have gone into one and not the
+   * other, and an invoice would explain itself on one path and not the other.
+   *
+   * `hourly_rate` is stored rather than read back from the placement, so an
+   * invoice issued today still shows the arithmetic a client can check after
+   * the rate is renegotiated.
+   */
+  private insertPayrollRecord(
+    runner: { query: <T = any>(sql: string, params?: unknown[]) => Promise<T> },
+    placementId: string,
+    staffId: string,
+    month: number,
+    year: number,
+    preview: { billable_days: number; hours_worked?: number; placement_type?: string;
+               hourly_rate?: number | null; hourly_fee?: number | null;
+               prorated_management_fee?: number },
+    calc: PayrollCalculation,
+  ) {
+    const isHourly = preview.placement_type === 'TEMPORARY';
+    return runner.query<Record<string, unknown>[]>(
       `INSERT INTO payroll_records
          (id, placement_id, staff_id, period_month, period_year, shift_days,
           gross_salary, deductions, net_salary,
-          esic_employer, esic_employee, pf_employer, pf_employee)
-       VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+          esic_employer, esic_employee, pf_employer, pf_employee,
+          placement_type, hours_worked, hourly_rate, hourly_fee, management_fee)
+       VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+               $13,$14,$15,$16,$17) RETURNING *`,
       [
         placementId,
-        p.staff_id,
+        staffId,
         month,
         year,
         preview.billable_days,
@@ -557,11 +783,13 @@ export class PayrollService {
         calc.esicEmployee,
         calc.pfEmployer,
         calc.pfEmployee,
+        preview.placement_type ?? 'PERMANENT',
+        isHourly ? (preview.hours_worked ?? 0) : null,
+        isHourly ? preview.hourly_rate : null,
+        isHourly ? preview.hourly_fee : null,
+        preview.prorated_management_fee ?? calc.managementFee,
       ],
     );
-
-    this.logger.log(`[ATTENDANCE_PAYROLL_ONLY] placement ${placementId} ${month}/${year}`);
-    return { payroll, preview, calculation: calc };
   }
 
   async runAttendancePayroll(
@@ -585,8 +813,18 @@ export class PayrollService {
     }
 
     const preview = await this.previewAttendancePayroll(placementId, month, year);
-    if (preview.billable_days <= 0) {
-      throw new BadRequestException('No billable attendance days for this period');
+    // What makes a period billable depends on how the placement is priced:
+    // days for a permanent one, hours for an hourly one. A four-hour visit is
+    // one day and would otherwise be judged the same as a full month.
+    const nothingToBill = preview.placement_type === 'TEMPORARY'
+      ? preview.hours_worked <= 0
+      : preview.billable_days <= 0;
+    if (nothingToBill) {
+      throw new BadRequestException(
+        preview.placement_type === 'TEMPORARY'
+          ? 'No hours recorded at this client for the period.'
+          : 'No billable attendance days for this period',
+      );
     }
 
     const placements = await this.dataSource.query<PlacementRow[]>(
@@ -598,36 +836,18 @@ export class PayrollService {
     const calc = preview.calculation as PayrollCalculation;
 
     const result = await this.dataSource.transaction(async (manager) => {
-      const [payroll] = await manager.query<Record<string, unknown>[]>(
-        `INSERT INTO payroll_records
-           (id, placement_id, staff_id, period_month, period_year, shift_days,
-            gross_salary, deductions, net_salary,
-            esic_employer, esic_employee, pf_employer, pf_employee)
-         VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-        [
-          placementId,
-          p.staff_id,
-          month,
-          year,
-          preview.billable_days,
-          calc.grossSalary,
-          JSON.stringify({ esic: calc.esicEmployee, pf: calc.pfEmployee }),
-          calc.netSalary,
-          calc.esicEmployer,
-          calc.esicEmployee,
-          calc.pfEmployer,
-          calc.pfEmployee,
-        ],
+      const [payroll] = await this.insertPayrollRecord(
+        manager, placementId, p.staff_id, month, year, preview, calc,
       );
 
       this.logger.log(`[ATTENDANCE_PAYROLL] placement ${placementId} ${month}/${year}`);
       return { payroll, clientId: p.client_id, preview, calculation: calc };
     });
 
-    const invoice = await this.billClientFor(
+    const billed = await this.billClientFor(
       result.clientId as string, month, year, placementId,
     );
-    return { ...result, invoice };
+    return { ...result, invoice: billed.invoice, not_invoiced_because: billed.not_invoiced_because };
   }
 
   /**

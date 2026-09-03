@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { AttendanceRepository } from './attendance.repository';
 import { StaffAttendanceMirrorService } from './staff-attendance-mirror.service';
+import { PrismaService } from '../../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
 
 /**
@@ -22,10 +23,100 @@ export class AttendanceService {
   constructor(
     private readonly repo: AttendanceRepository,
     private readonly mirror: StaffAttendanceMirrorService,
+    private readonly prisma: PrismaService,
   ) {}
 
   async findAll(params: any) {
     return this.repo.findAll(params);
+  }
+
+  /**
+   * The day's marking list — one row per place a staff member works.
+   *
+   * HR's screen used to list employees, one row each, and mark "Present" with
+   * nothing to say where. That worked while everyone held exactly one
+   * placement. A maid doing three houses needs three rows, because the day
+   * belongs to a client: it decides whose invoice carries it, and for an
+   * hourly placement how many hours were worked decides what it costs.
+   *
+   * Employees with no active placement (office hires) are not here — there is
+   * nothing to bill and no client to name. They stay on HR's own ledger.
+   */
+  async roster(date: string, branchId?: string) {
+    const attendanceDate = parseDateOnly(date);
+
+    const placements = await this.prisma.placement.findMany({
+      where: {
+        status: { in: ['CONFIRMED', 'TRIAL'] },
+        ...(branchId ? { branchId } : {}),
+      },
+      select: {
+        id: true, staffId: true, clientId: true, status: true,
+        placementType: true, shiftHours: true, hourlyRate: true,
+      },
+    });
+    if (!placements.length) return { date, rows: [] };
+
+    const staffIds = [...new Set(placements.map((p) => p.staffId))];
+    const clientIds = [...new Set(placements.map((p) => p.clientId))];
+
+    const [staff, clients, employees, marked] = await Promise.all([
+      this.prisma.staffApplicant.findMany({
+        where: { id: { in: staffIds } },
+        select: { id: true, fullName: true, staffCode: true, series: true },
+      }),
+      this.prisma.financeCustomer.findMany({
+        where: { id: { in: clientIds } },
+        select: { id: true, customerName: true, unitCode: true },
+      }),
+      // The HR-side id, which is what POST /attendance/mark takes.
+      this.prisma.employee.findMany({
+        where: { staffApplicantId: { in: staffIds }, deletedAt: null },
+        select: { id: true, staffApplicantId: true },
+      }),
+      this.prisma.staffDailyAttendance.findMany({
+        where: { placementId: { in: placements.map((p) => p.id) }, attendanceDate },
+        select: { placementId: true, status: true, hoursWorked: true, notes: true },
+      }),
+    ]);
+
+    const staffMap    = new Map(staff.map((s) => [s.id, s]));
+    const clientMap   = new Map(clients.map((c) => [c.id, c]));
+    const employeeMap = new Map(employees.map((e) => [e.staffApplicantId as string, e.id]));
+    const markedMap   = new Map(marked.map((m) => [m.placementId as string, m]));
+
+    const rows = placements
+      .map((p) => {
+        const s = staffMap.get(p.staffId);
+        const c = clientMap.get(p.clientId);
+        const m = markedMap.get(p.id);
+        return {
+          placement_id: p.id,
+          placement_type: p.placementType ?? 'PERMANENT',
+          placement_status: p.status,
+          shift_hours: p.shiftHours != null ? Number(p.shiftHours) : null,
+          hourly_rate: p.hourlyRate != null ? Number(p.hourlyRate) : null,
+          staff_id: p.staffId,
+          staff_name: s?.fullName ?? null,
+          staff_code: s?.staffCode ?? null,
+          series: s?.series ?? null,
+          client_id: p.clientId,
+          client_name: c?.customerName ?? null,
+          unit_code: c?.unitCode ?? null,
+          // Null for a staff member never onboarded into HR — the row is shown
+          // so the gap is visible rather than the person silently missing.
+          employee_id: employeeMap.get(p.staffId) ?? null,
+          marked_status: m?.status ?? null,
+          marked_hours: m?.hoursWorked != null ? Number(m.hoursWorked) : null,
+          notes: m?.notes ?? null,
+        };
+      })
+      .sort((a, b) =>
+        (a.staff_name ?? '').localeCompare(b.staff_name ?? '') ||
+        (a.client_name ?? '').localeCompare(b.client_name ?? ''),
+      );
+
+    return { date, rows };
   }
 
   async findOne(id: string) {
@@ -69,6 +160,11 @@ export class AttendanceService {
       actorId,
       notes: dto.notes,
       overtimeHours: dto.overtimeHours,
+      // Which client's day this was, and how long it ran. Both matter once a
+      // staff member works more than one house: the placement decides whose
+      // invoice carries the day, the hours decide what an hourly one costs.
+      placementId: dto.placementId ?? null,
+      hoursWorked: dto.hoursWorked != null ? Number(dto.hoursWorked) : undefined,
       overrideSelfCheckIn: dto.overrideSelfCheckIn === true,
     });
 

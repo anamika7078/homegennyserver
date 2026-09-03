@@ -482,10 +482,20 @@ export class RmService {
     if (action === 'APPROVED' && log.placementId) {
       const placement = await this.prisma.placement.findUnique({ where: { id: log.placementId } });
       if (placement) {
+        // Keyed by placement as well as date: the shift log already knows which
+        // client it was worked at, and a staff member can now have a second one
+        // the same day. See docs/HOURLY_MULTI_CLIENT_PLAN.md §S1.
+        const shiftHours = log.checkInAt && log.checkOutAt
+          ? Math.round(
+              ((log.checkOutAt.getTime() - log.checkInAt.getTime()) / 3_600_000) * 10,
+            ) / 10
+          : null;
+
         await this.prisma.staffDailyAttendance.upsert({
           where: {
-            staffId_attendanceDate: {
+            staffId_placementId_attendanceDate: {
               staffId: log.staffId,
+              placementId: placement.id,
               attendanceDate: log.shiftDate,
             },
           },
@@ -495,12 +505,15 @@ export class RmService {
             branchId: placement.branchId,
             attendanceDate: log.shiftDate,
             status: 'PRESENT',
+            hoursWorked: shiftHours,
             markedBy: user.id,
           },
           update: {
             status: 'PRESENT',
-            placementId: placement.id,
             branchId: placement.branchId,
+            // The check-in/out times are the staff member's own record of the
+            // day, so they win over anything entered from a desk.
+            ...(shiftHours != null ? { hoursWorked: shiftHours } : {}),
             markedBy: user.id,
           },
         }).catch((e) => this.logger.warn(`Could not sync shift approval to daily attendance: ${e.message}`));
@@ -793,6 +806,10 @@ export class RmService {
       date: string;
       status?: StaffAttendanceStatus | null;
       overtime_hours?: number;
+      /** Hours worked at this client — what an hourly placement is billed from. */
+      hours_worked?: number;
+      /** Required once the staff member is placed with more than one client. */
+      placement_id?: string;
       branch_id?: string;
     },
   ) {
@@ -802,7 +819,12 @@ export class RmService {
     if (!staff) throw new NotFoundException('Staff not found');
     assertStaffAccess(user, staff);
 
-    const placement = await this.prisma.placement.findFirst({
+    // A maid works more than one house in a day, so "present" no longer says
+    // where — and the day decides which client's invoice carries it. Where
+    // there is a choice, the caller has to make it rather than this quietly
+    // taking the most recent placement and billing the wrong client.
+    // See docs/HOURLY_MULTI_CLIENT_PLAN.md §S1.
+    const active = await this.prisma.placement.findMany({
       where: {
         staffId: body.staff_id,
         status: 'CONFIRMED',
@@ -810,7 +832,21 @@ export class RmService {
       },
       orderBy: { createdAt: 'desc' },
     });
-    if (!placement) throw new BadRequestException('No confirmed placement for staff');
+    if (!active.length) throw new BadRequestException('No confirmed placement for staff');
+
+    let placement = active[0];
+    if (body.placement_id) {
+      const chosen = active.find((p) => p.id === body.placement_id);
+      if (!chosen) {
+        throw new BadRequestException('That placement does not belong to this staff member.');
+      }
+      placement = chosen;
+    } else if (active.length > 1) {
+      throw new BadRequestException(
+        `${staff.fullName} is placed with ${active.length} clients. Send placement_id to say ` +
+          `which one this day was worked at.`,
+      );
+    }
 
     const attendanceDate = new Date(body.date);
     if (Number.isNaN(attendanceDate.getTime())) {
@@ -847,8 +883,9 @@ export class RmService {
 
     const record = await this.prisma.staffDailyAttendance.upsert({
       where: {
-        staffId_attendanceDate: {
+        staffId_placementId_attendanceDate: {
           staffId: body.staff_id,
+          placementId: placement.id,
           attendanceDate,
         },
       },
@@ -858,14 +895,15 @@ export class RmService {
         branchId: placement.branchId,
         attendanceDate,
         status: body.status,
+        hoursWorked: body.hours_worked ?? null,
         overtimeHours: body.overtime_hours,
         markedBy: user.id,
       },
       update: {
         status: body.status,
+        ...(body.hours_worked != null ? { hoursWorked: body.hours_worked } : {}),
         overtimeHours: body.overtime_hours,
         markedBy: user.id,
-        placementId: placement.id,
         branchId: placement.branchId,
       },
     });

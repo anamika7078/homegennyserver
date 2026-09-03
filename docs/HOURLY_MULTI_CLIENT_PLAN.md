@@ -180,10 +180,25 @@ ESIC figure, rather than three wrong ones.
 row is what one client owes for one person. What changes is that a staff member
 now has several rows in a month, and the salary slip sums them.
 
+**What this turned up.** Running payroll by staff code resolved *one*
+placement — `lookupByCode` takes the most recently confirmed one and stops —
+so a maid working three houses had one house billed and two silently left out,
+with nothing on screen to say so. `generateAttendanceByCode` now runs every
+house she works at and reports each; a house already run is skipped rather than
+failing the call, so someone joining a second client mid-month is not blocked by
+the first being done. The preview shows every house too — previewing one and
+billing three is worse than no preview at all.
+
 ### B5 — the salary slip aggregates
 
 HR's slip shows one net figure — the person is paid once — with a breakdown by
 client underneath. The client invoice keeps showing only its own share.
+
+Both HR views needed this, not just one: `listForEmployee` (a person's own
+slips) and `listForPeriod` (HR's month-end list) each returned one row per
+placement, so a three-house month showed as three salaries. Days paid is the
+most days at any one house, never the sum — a month has no extra days to give.
+The PDF lists the houses above the gross, so the total is checkable.
 
 ### B6 — single-day invoicing
 
@@ -209,6 +224,21 @@ The requested flow, and the main usability change:
 One box, the client's details confirming you have the right one, and the button
 right there. No separate page, no hunting.
 
+As built, each person on the panel also carries their own state — days worked,
+or `hours × rate` for an hourly placement, and whether payroll has run and
+whether they are already on an invoice. The button underneath follows that
+state rather than always offering the same thing: **Create invoice** when there
+is un-invoiced payroll, **Add to this invoice** when a draft is open and someone
+joined since, **Go to Payroll** when payroll has not run yet, and **View
+invoice** once the period is fully billed. A greyed-out button is never the
+answer — the screen always offers the action that is actually next.
+
+Backend: `GET /finance/invoices/by-unit-code?unit_code&month&year`
+(`ConsolidatedInvoiceService.lookupByUnitCode`). Frontend:
+`src/app/finance/invoices/components/client-lookup.tsx`, sitting above the
+invoice list — the list is the record of what has been done, the panel is the
+thing Finance comes here to do.
+
 ### F2 — placement form takes a type
 
 PERMANENT asks for monthly salary and fee; TEMPORARY asks for hourly rate and
@@ -228,19 +258,46 @@ it: `12 hours × ₹150 = ₹1,800`, not just a total.
 
 ## 7. Order of work
 
-| # | Step | Why here |
-|---|---|---|
-| 1 | **S2** placement type + rates | Additive, defaults keep today's behaviour |
-| 2 | **B1** allow a second client | Small, unblocks the rest |
-| 3 | **S1** attendance per placement | The destructive one — backfill first |
-| 4 | **B2 + B3** hourly earnings, statutory once | The real calculation |
-| 5 | **F2 + F3** placement type, attendance hours | Data can now be entered |
-| 6 | **B4 + B5** slip aggregation | Follows from B3 |
-| 7 | **F1** unit-code invoice screen | The usability ask |
-| 8 | **F4 + B6** hourly lines, single-day invoice | Presentation |
+| # | Step | Why here | State |
+|---|---|---|---|
+| 1 | **S2** placement type + rates | Additive, defaults keep today's behaviour | done |
+| 2 | **B1** allow a second client | Small, unblocks the rest | done |
+| 3 | **S1** attendance per placement | The destructive one — backfill first | done |
+| 4 | **B2 + B3** hourly earnings, statutory once | The real calculation | done |
+| 5 | **F2 + F3** placement type, attendance hours | Data can now be entered | done |
+| 6 | **B4 + B5** slip aggregation | Follows from B3 | done |
+| 7 | **F1** unit-code invoice screen | The usability ask | done |
+| 8 | **F4 + B6** hourly lines, single-day invoice | Presentation | done |
 
 Steps 1 and 2 are safe to ship on their own. Step 3 changes stored data and
 needs the backfill checked by hand before the constraint goes on.
+
+### What the live tests cover
+
+| Suite | Covers |
+|---|---|
+| `_live_test_f2_placement_type.js` | Both kinds created; one person at two houses; refused twice at one house; an hourly placement with no rate refused |
+| `_live_test_f3_roster.js` | One row per house per day; marking refused without naming the house; hours kept per house; two attendance rows for one date |
+| `_live_test_f1_unit_code.js` | Unit-code lookup; payroll issuing the client's invoice; a later joiner folded into the same invoice; hourly lines showing `hours × rate`; the hourly management fee actually billed |
+| `_live_test_b5_salary_slip.js` | One slip per month across houses, with the houses listed under it, and its PDF |
+
+### Two defects this work uncovered
+
+**Invoice numbers could collide.** `bill_no_prefix` was `BILL/YYYYMM` — the
+month the customer was onboarded — so every customer onboarded in the same
+month shared a series, while `bill_seq` counts per customer. The second such
+customer's first invoice took a number the first already held and died on the
+unique constraint with a bare 500. Ten customers shared one prefix locally.
+Production had not hit it only because it has two customers, created in
+different months. New customers now take their unit code into the prefix, which
+is unique by construction; existing ones keep their series (renumbering issued
+invoices is an accounting event, not a migration) and the invoicing path skips
+past a number already taken.
+
+**Hourly placements were billed no management fee at all.** The invoice derived
+the fee from the placement's *monthly* `management_fee`, which is null for an
+hourly placement — so HomeGenny earned nothing on them. It now reads the fee
+payroll actually computed and stored.
 
 ---
 

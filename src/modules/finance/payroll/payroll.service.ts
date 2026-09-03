@@ -260,6 +260,29 @@ export class FinancePayrollService {
     return this.lookupByCode(code);
   }
 
+  /**
+   * Every house this staff member currently works at.
+   *
+   * `lookupByCode` takes the most recent confirmed placement and stops, which
+   * was right while a person could only hold one. A maid working three houses
+   * has three, and running payroll for her means running all three — picking
+   * one silently left two clients unbilled and their staff member unpaid for
+   * that work. See docs/HOURLY_MULTI_CLIENT_PLAN.md §B4.
+   */
+  private async activePlacementsFor(staffId: string) {
+    return this.dataSource.query<{
+      id: string; client_name: string | null; placement_type: string;
+    }[]>(
+      `SELECT p.id, c.customer_name AS client_name,
+              COALESCE(p.placement_type, 'PERMANENT') AS placement_type
+         FROM placements p
+         LEFT JOIN finance_customers c ON c.id = p.client_id
+        WHERE p.staff_id = $1 AND p.status = 'CONFIRMED'
+        ORDER BY c.customer_name`,
+      [staffId],
+    );
+  }
+
   /** Preview attendance-based payroll / invoice for a staff or employee code */
   async previewAttendanceByCode(code: string, month: number, year: number) {
     const lookup = await this.resolveCode(code);
@@ -284,6 +307,30 @@ export class FinancePayrollService {
           LIMIT 1`,
         [lookup.placement_id, month, year],
       );
+      // Generating runs every house she works at, so the preview has to show
+      // every house too — previewing one and billing three is the mismatch
+      // that makes a preview worse than none. See §B4.
+      const placements = await this.activePlacementsFor(lookup.staff_id);
+      const perPlacement = placements.length > 1
+        ? await Promise.all(
+            placements.map(async (p) => {
+              const pv = await this.corePayroll.previewAttendancePayroll(p.id, month, year);
+              const run = await this.dataSource.query<{ id: string }[]>(
+                `SELECT id FROM payroll_records
+                  WHERE placement_id = $1 AND period_month = $2 AND period_year = $3 LIMIT 1`,
+                [p.id, month, year],
+              );
+              return {
+                placement_id: p.id,
+                client_name: p.client_name,
+                placement_type: p.placement_type,
+                already_run: run.length > 0,
+                preview: pv,
+              };
+            }),
+          )
+        : undefined;
+
       return {
         ...preview,
         type: 'PLACEMENT',
@@ -293,6 +340,8 @@ export class FinancePayrollService {
         payroll_id: existing[0]?.id ?? null,
         invoice_id: existing[0]?.invoice_id ?? null,
         invoice_number: existing[0]?.invoice_number ?? null,
+        /** Present only when she works at more than one house. */
+        placements: perPlacement,
       };
     }
 
@@ -311,6 +360,13 @@ export class FinancePayrollService {
    * person has been added to — not an invoice for them alone. It can be null
    * when that invoice has already been sent and so cannot be amended; the
    * payroll is recorded either way. See ONE_STAFF_MODEL_PLAN.md §B3.
+   *
+   * Every house she works at is run, not the most recent one. Running a single
+   * placement left the other clients unbilled and her unpaid for that work,
+   * with nothing on screen to say so. A house whose payroll has already run is
+   * skipped rather than failing the whole call — someone joining a second
+   * client mid-month must not be blocked by the first one already being done.
+   * See docs/HOURLY_MULTI_CLIENT_PLAN.md §B4.
    */
   async generateAttendanceByCode(code: string, month: number, year: number) {
     const lookup = await this.resolveCode(code);
@@ -321,17 +377,58 @@ export class FinancePayrollService {
       );
     }
 
-    const result = await this.corePayroll.runAttendancePayroll(lookup.placement_id, month, year);
-    const invoice = result.invoice as Record<string, unknown> | null;
+    const placements = await this.activePlacementsFor(lookup.staff_id);
+    const runs: Record<string, unknown>[] = [];
+    const skipped: { client_name: string | null; reason: string }[] = [];
+
+    for (const p of placements) {
+      try {
+        const result = await this.corePayroll.runAttendancePayroll(p.id, month, year);
+        const invoice = result.invoice as Record<string, unknown> | null;
+        runs.push({
+          placement_id: p.id,
+          client_name: p.client_name,
+          placement_type: p.placement_type,
+          invoice_id: invoice?.id ?? null,
+          invoice_number: invoice?.invoice_number ?? null,
+          not_invoiced_because: result.not_invoiced_because ?? null,
+          payroll_id: (result.payroll as Record<string, unknown>).id,
+          preview: result.preview,
+          calculation: result.calculation,
+        });
+      } catch (e) {
+        skipped.push({ client_name: p.client_name, reason: (e as Error).message });
+      }
+    }
+
+    if (!runs.length) {
+      // Nothing ran at all — the caller asked for work that cannot be done, so
+      // this is a failure rather than an empty success.
+      throw new BadRequestException(
+        skipped.map((s) => `${s.client_name ?? 'client'}: ${s.reason}`).join('; ') ||
+          `Nothing to run for ${code} in ${month}/${year}.`,
+      );
+    }
+
+    // The top-level fields describe the first house, so a caller that only
+    // knows about one placement still reads something true.
+    const first = runs[0];
     return {
       type: 'PLACEMENT',
-      invoice_id: invoice?.id ?? null,
-      invoice_number: invoice?.invoice_number ?? null,
-      payroll_id: (result.payroll as Record<string, unknown>).id,
-      preview: result.preview,
-      calculation: result.calculation,
+      invoice_id: first.invoice_id,
+      invoice_number: first.invoice_number,
+      // Why there is no invoice, when there is none. A bare null read as
+      // "payroll ran and nothing happened" with no way to find out why.
+      not_invoiced_because: first.not_invoiced_because,
+      payroll_id: first.payroll_id,
+      preview: first.preview,
+      calculation: first.calculation,
       staff_code: lookup.staff_code,
       staff_name: lookup.staff_name,
+      /** One entry per house that was run this call. */
+      runs,
+      /** Houses that could not be run, and why — usually already run. */
+      skipped,
     };
   }
 
