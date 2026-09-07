@@ -74,7 +74,11 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
 (async () => {
   const db = new Client({ connectionString: process.env.DATABASE_URL });
   await db.connect();
-  const made = { employeeId: null, loanId: null, attendanceIds: [], payrollId: null, code: null };
+  const made = {
+    employeeId: null, loanId: null, attendanceIds: [], payrollId: null, code: null,
+    /** An invoice marked PAID for the P&L check, to be put back as it was. */
+    borrowedInvoice: null,
+  };
 
   try {
     const finance = await login(FINANCE_PHONE);
@@ -93,11 +97,35 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
 
     // ── F-10 · Branch P&L ───────────────────────────────────────────────────
     console.log('F-10  Branch P&L separates revenue from pass-through');
+
+    // The report counts collected money only (ci.status = 'PAID'), so it needs
+    // a paid invoice to have anything to say. Depending on one happening to
+    // exist made this suite fail the moment the database was cleared — and the
+    // check that matters is that a *consolidated* invoice reaches the report at
+    // all, which is exactly the defect this once caught. So mark one paid for
+    // the duration and put its status back afterwards.
+    const payable = await db.query(
+      `SELECT id, status FROM client_invoices
+        WHERE status <> 'CANCELLED' AND is_consolidated = true
+        ORDER BY created_at DESC LIMIT 1`,
+    );
+    const borrowed = payable.rows[0] ?? null;
+    if (borrowed && borrowed.status !== 'PAID') {
+      made.borrowedInvoice = borrowed;
+      await db.query(`UPDATE client_invoices SET status = 'PAID' WHERE id = $1`, [borrowed.id]);
+    }
+
     const pnl = await req('GET', '/finance/analytics/branch-pnl', { token: finance });
     check('branch P&L loads', pnl.status === 200, pnl.status);
     const rows = pnl.body || [];
     const active = rows.filter((r) => Number(r.client_billed) > 0);
-    check('at least one branch has billing', active.length > 0, rows.length);
+    check(
+      borrowed
+        ? 'a consolidated invoice reaches branch P&L (it used to be dropped)'
+        : 'branch P&L returns branches',
+      borrowed ? active.length > 0 : rows.length > 0,
+      { branches: rows.length, withBilling: active.length },
+    );
 
     for (const b of active) {
       const rev = money(b.revenue), gst = money(b.gst_collected);
@@ -248,6 +276,13 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
   } finally {
     console.log('\ncleaning up…');
     try {
+      // Put the borrowed invoice back exactly as it was — this suite must not
+      // leave real billing marked paid.
+      if (made.borrowedInvoice) {
+        await db.query(`UPDATE client_invoices SET status = $1 WHERE id = $2`,
+          [made.borrowedInvoice.status, made.borrowedInvoice.id]);
+        console.log(`restored ${made.borrowedInvoice.id.slice(0, 8)} to ${made.borrowedInvoice.status}`);
+      }
       if (made.employeeId) {
         for (const t of ['employee_payrolls', 'attendance', 'employee_loans', 'overtime_records', 'bonus_records', 'reimbursement_requests', 'payroll_details']) {
           await db.query(`DELETE FROM ${t} WHERE employee_id = $1::uuid`, [made.employeeId]).catch(() => {});

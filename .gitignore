@@ -30,3 +30,9 @@ lerna-debug.log*
 # OS files
 .DS_Store
 Thumbs.db
+
+# Database snapshots taken before a destructive scratch script runs. They are
+# whole tables of real people — Aadhaar numbers, phones, addresses — and exist
+# only so a wrong call can be undone locally. Never commit one.
+scratch/_wiped_local_*.json
+scratch/_deleted_*.json

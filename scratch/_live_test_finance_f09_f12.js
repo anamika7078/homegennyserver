@@ -21,7 +21,11 @@ const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
 const FINANCE_PHONE = '9800000004';
 const PASSWORDS = ['HomeGenny@2024', 'Admin@123', 'Password@123'];
 
-const TEST_MONTH = 9;
+// A period far enough back that real billing will never sit in it. This used
+// to be the current month, so the suite fought whatever invoice the office had
+// actually raised — and lost, with a cascade of 500s once its own invoice came
+// back null. 2/2026 and 3/2026 belong to the unit-code and F1 suites.
+const TEST_MONTH = 4;
 const TEST_YEAR = 2026;
 const PRESENT_DAYS = 18;
 
@@ -87,8 +91,13 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
       JOIN finance_customers fc ON fc.id = p.client_id
       WHERE p.status = 'CONFIRMED'
         AND p.staff_salary IS NOT NULL AND p.management_fee IS NOT NULL
+        -- Both shapes of invoice. Checking only placement_id missed every
+        -- consolidated one (that column is null on them), so a client already
+        -- billed for the period still looked free and the raise below failed.
         AND NOT EXISTS (SELECT 1 FROM client_invoices ci
-                        WHERE ci.placement_id = p.id AND ci.period_month = $1 AND ci.period_year = $2)
+                         WHERE ci.period_month = $1 AND ci.period_year = $2
+                           AND ci.status <> 'CANCELLED'
+                           AND (ci.placement_id = p.id OR ci.client_id = p.client_id))
       ORDER BY p.created_at DESC LIMIT 1
     `, [TEST_MONTH, TEST_YEAR]);
     if (!cand.rows.length) { console.log('no billable placement available'); process.exitCode = 1; return; }

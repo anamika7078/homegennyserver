@@ -1,9 +1,13 @@
-import { Controller, Get, Post, Put, Body, UseGuards, Req, BadRequestException } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody } from '@nestjs/swagger';
+import {
+  Controller, Get, Post, Put, Body, UseGuards, Req, Res, Query, BadRequestException,
+} from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiQuery } from '@nestjs/swagger';
+import { Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EmployeePayslipService } from '../employees/employee-payslip.service';
 
 const PIPELINE_STAGE_LABELS: Record<string, string> = {
   S1_INTAKE: 'Stage 1 - Intake',
@@ -43,6 +47,11 @@ const REQUIRED_VERIFICATION_TRACKS: Record<string, string[]> = {
   MAID: ['AADHAAR_EKYC'],
 };
 
+/** "1 day", not "1 days" — this text is read by the staff member, not a log. */
+function plural(n: number, unit: string): string {
+  return `${n} ${unit}${n === 1 ? '' : 's'}`;
+}
+
 /** MAID may proceed with PV still pending (only an adverse result blocks); every other series needs a CLEAR result. */
 function isPvClear(seriesShort: string, pvStatus: string): boolean {
   if (seriesShort === 'MAID') return pvStatus !== 'ADVERSE';
@@ -55,7 +64,10 @@ function isPvClear(seriesShort: string, pvStatus: string): boolean {
 @Roles(UserRole.STAFF, UserRole.RM, UserRole.BM, UserRole.ADMIN)
 @Controller({ path: 'staff', version: '1' })
 export class StaffMobileController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly payslips: EmployeePayslipService,
+  ) {}
 
   /**
    * Builds the 6-stage progress array (completed/current/pending) from real
@@ -441,5 +453,173 @@ export class StaffMobileController {
         location: s.checkInLat && s.checkInLng ? `${s.checkInLat},${s.checkInLng}` : null,
       })),
     };
+  }
+
+  /**
+   * What this staff member was paid, from `payroll_records` — the one payroll
+   * engine, and the same rows the client's invoice is built from. A staff
+   * member and their client therefore cannot be shown different numbers.
+   *
+   * A maid working three houses is paid once, so one month is one figure with
+   * the houses named underneath it, not three payslips.
+   */
+  private async payMonths(staffId: string) {
+    const rows = await this.prisma.payrollRecord.findMany({
+      where: { staffId },
+      orderBy: [{ periodYear: 'desc' }, { periodMonth: 'desc' }],
+    });
+    if (!rows.length) return [];
+
+    const placementIds = [...new Set(rows.map((r) => r.placementId).filter(Boolean))] as string[];
+    const placements = placementIds.length
+      ? await this.prisma.placement.findMany({
+          where: { id: { in: placementIds } },
+          select: { id: true, clientId: true, placementType: true },
+        })
+      : [];
+    const clients = placements.length
+      ? await this.prisma.financeCustomer.findMany({
+          where: { id: { in: [...new Set(placements.map((p) => p.clientId))] } },
+          select: { id: true, customerName: true },
+        })
+      : [];
+    const placementById = new Map(placements.map((p) => [p.id, p]));
+    const clientName = new Map(clients.map((c) => [c.id, c.customerName]));
+
+    const byPeriod = new Map<string, typeof rows>();
+    for (const r of rows) {
+      const key = `${r.periodYear}-${r.periodMonth}`;
+      const bucket = byPeriod.get(key);
+      if (bucket) bucket.push(r);
+      else byPeriod.set(key, [r]);
+    }
+
+    return [...byPeriod.values()].map((group) => {
+      const num = (v: unknown) => Number(v ?? 0);
+      const gross = group.reduce((s, r) => s + num(r.grossSalary), 0);
+      const net = group.reduce((s, r) => s + num(r.netSalary), 0);
+      const esic = group.reduce((s, r) => s + num(r.esicEmployee), 0);
+      const pf = group.reduce((s, r) => s + num(r.pfEmployee), 0);
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+
+      return {
+        period_month: group[0].periodMonth,
+        period_year: group[0].periodYear,
+        days_worked: group.reduce((s, r) => s + Number(r.shiftDays ?? 0), 0),
+        gross_salary: round2(gross),
+        esic_employee: round2(esic),
+        pf_employee: round2(pf),
+        total_deductions: round2(gross - net),
+        net_salary: round2(net),
+        // PENDING until Finance approves it. Saying so stops "why is my money
+        // not here yet" being a mystery.
+        status: group.every((r) => r.status === 'PAID')
+          ? 'PAID'
+          : group.every((r) => r.status === 'APPROVED' || r.status === 'PAID')
+            ? 'APPROVED'
+            : 'PENDING',
+        houses: group.map((r) => {
+          const p = r.placementId ? placementById.get(r.placementId) : undefined;
+          return {
+            client_name: p ? clientName.get(p.clientId) ?? 'Client' : 'Client',
+            placement_type: p?.placementType ?? 'PERMANENT',
+            worked: p?.placementType === 'TEMPORARY'
+              ? plural(Number(r.hoursWorked ?? 0), 'hour')
+              : plural(Number(r.shiftDays ?? 0), 'day'),
+            gross_salary: round2(num(r.grossSalary)),
+          };
+        }),
+      };
+    });
+  }
+
+  @Get('salary')
+  @Roles(UserRole.STAFF, UserRole.RM, UserRole.BM, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'This month’s pay, and what it is made of',
+    description:
+      'Reads payroll_records — the same rows the client is invoiced from. Returns the ' +
+      'latest month by default; pass month and year for an older one. `houses` names ' +
+      'every client the month’s pay came from.',
+  })
+  async getSalary(
+    @Req() req: any,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
+  ) {
+    const staff = await this.prisma.staffApplicant.findFirst({ where: { userId: req.user.id } });
+    if (!staff) return { salary: null, message: 'No staff record is linked to this login.' };
+
+    const months = await this.payMonths(staff.id);
+    if (!months.length) {
+      return { salary: null, message: 'No payroll has been run for you yet.' };
+    }
+    const wanted = month && year
+      ? months.find((m) => m.period_month === Number(month) && m.period_year === Number(year))
+      : months[0];
+
+    return {
+      salary: wanted ?? null,
+      ...(wanted ? {} : { message: `No payroll for ${month}/${year}.` }),
+    };
+  }
+
+  @Get('payslips')
+  @Roles(UserRole.STAFF, UserRole.RM, UserRole.BM, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Every month this staff member has been paid for',
+    description: 'Newest first. Each entry carries the same shape as GET /staff/salary.',
+  })
+  async getPayslips(@Req() req: any) {
+    const staff = await this.prisma.staffApplicant.findFirst({ where: { userId: req.user.id } });
+    if (!staff) return { payslips: [], total: 0 };
+    const months = await this.payMonths(staff.id);
+    return { payslips: months, total: months.length };
+  }
+
+  @Get('payslips/pdf')
+  @Roles(UserRole.STAFF, UserRole.RM, UserRole.BM, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'One month’s payslip as a PDF',
+    description:
+      'Renders the same document HR downloads, so a staff member and the office are ' +
+      'never looking at two different payslips.',
+  })
+  async getPayslipPdf(
+    @Req() req: any,
+    @Res() res: Response,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
+  ) {
+    const staff = await this.prisma.staffApplicant.findFirst({ where: { userId: req.user.id } });
+    if (!staff) throw new BadRequestException('No staff record is linked to this login.');
+
+    const employee = await this.prisma.employee.findFirst({
+      where: { staffApplicantId: staff.id, deletedAt: null },
+      select: { id: true },
+    });
+    if (!employee) {
+      throw new BadRequestException(
+        'Your employment record is not set up yet, so a payslip cannot be issued. Ask HR to complete onboarding.',
+      );
+    }
+
+    const slips = await this.payslips.listForEmployee(employee.id);
+    const items: { ref: string; periodMonth: number; periodYear: number }[] =
+      (slips as any)?.items ?? (Array.isArray(slips) ? slips : []);
+    const wanted = month && year
+      ? items.find((s) => s.periodMonth === Number(month) && s.periodYear === Number(year))
+      : items[0];
+    if (!wanted) {
+      throw new BadRequestException(
+        month && year ? `No payslip for ${month}/${year}.` : 'No payslip has been issued for you yet.',
+      );
+    }
+
+    const { buffer, filename } = await this.payslips.renderPdf(employee.id, wanted.ref);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', String(buffer.length));
+    res.end(buffer);
   }
 }

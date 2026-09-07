@@ -85,6 +85,17 @@ function todayUtc() {
 
   // ── set up a deployed candidate with a confirmed placement + staff login ──
   const pending = await req('GET', '/employees/pending-onboarding', { token: hrToken });
+  // A throttled request has no items either, and reporting that as "no
+  // candidate" sent someone hunting through the database for a fixture that
+  // was sitting right there. Say which it was.
+  if (pending.status !== 200) {
+    console.log(
+      pending.status === 429
+        ? 'rate limited on /employees/pending-onboarding — aborting (run the suites further apart)'
+        : `/employees/pending-onboarding returned ${pending.status} — aborting`,
+    );
+    process.exit(1);
+  }
   const target = (pending.body?.items ?? [])[0];
   if (!target) {
     console.log('no S5 candidate available — aborting');
