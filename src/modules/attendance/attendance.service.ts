@@ -184,7 +184,11 @@ export class AttendanceService {
         // the correction.
         markedBy: actorId,
       });
-      return { ...updated, pipelineAttendance: mirrored };
+      return {
+        ...updated,
+        pipelineAttendance: mirrored,
+        payrollWarning: await this.payrollAlreadyRunWarning(mirrored, attendanceDate),
+      };
     }
 
     const workingHours = this.calculateWorkingHours(dto.checkIn, dto.checkOut);
@@ -201,7 +205,66 @@ export class AttendanceService {
     };
 
     const created = await this.repo.create(createData);
-    return { ...created, pipelineAttendance: mirrored };
+    return {
+      ...created,
+      pipelineAttendance: mirrored,
+      payrollWarning: await this.payrollAlreadyRunWarning(mirrored, attendanceDate),
+    };
+  }
+
+  /**
+   * Whether this day arrived too late to be paid on its own.
+   *
+   * Payroll counts attendance once, when it runs. A day marked afterwards sits
+   * in the table and reaches nobody: not the payslip, not the client's
+   * invoice. The call still succeeds — the day is real and belongs on record —
+   * but returning a bare 200 let it look finished when it was not. Whoever
+   * marked it is the one person in a position to act, so they are told.
+   *
+   * Never throws. A day must not fail to be recorded because the warning
+   * lookup did.
+   */
+  private async payrollAlreadyRunWarning(
+    mirrored: { placementId?: string | null } | null,
+    attendanceDate: Date,
+  ): Promise<{ message: string; action: string } | null> {
+    const placementId = mirrored?.placementId;
+    if (!placementId) return null;
+
+    try {
+      const month = attendanceDate.getUTCMonth() + 1;
+      const year = attendanceDate.getUTCFullYear();
+      const rows = await this.prisma.$queryRaw<
+        { status: string; invoice_number: string | null; invoice_status: string | null }[]
+      >`SELECT pr.status::text AS status,
+               ci.invoice_number, ci.status::text AS invoice_status
+          FROM payroll_records pr
+          LEFT JOIN client_invoices ci ON ci.id = pr.client_invoice_id
+         WHERE pr.placement_id = ${placementId}::uuid
+           AND pr.period_month = ${month} AND pr.period_year = ${year}
+         LIMIT 1`;
+      if (!rows.length) return null;
+
+      const { status, invoice_number, invoice_status } = rows[0];
+      const period = `${month}/${year}`;
+      const settled = invoice_status && invoice_status !== 'DRAFT';
+
+      return {
+        message:
+          `Payroll for ${period} has already run, so this day is not on the payslip or the ` +
+          `client's invoice yet.` +
+          (settled
+            ? ` Invoice ${invoice_number} is ${invoice_status} — the client has been given that figure.`
+            : ''),
+        action: settled
+          ? 'Raise a credit note, or carry it into next month — the billed figure cannot be changed quietly.'
+          : status === 'PENDING'
+            ? 'Re-run payroll for this staff member to include it.'
+            : `Payroll is ${status}; the figure is locked. Finance has to reopen it.`,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**

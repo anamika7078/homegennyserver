@@ -606,6 +606,121 @@ export class FinancePayrollService {
    * straight to the database and disbursement would pay whatever was there.
    * See F-12.
    */
+  /**
+   * Where attendance and payroll disagree for a period.
+   *
+   * Payroll is a snapshot taken the moment it runs. Attendance keeps being
+   * marked afterwards — a day someone forgot, a correction the RM made — and
+   * nothing ever went back to look. The payroll row kept its original count,
+   * the payslip kept showing it, and the client's invoice was raised on it. A
+   * staff member worked three days and was paid for one, and the only way to
+   * notice was to compare the two by hand.
+   *
+   * This is the comparison. It changes nothing; it only says where the two
+   * have drifted apart, so the drift can be seen before it is paid.
+   *
+   * `billable` counts the same statuses payroll counts — PRESENT, HALF_DAY
+   * and OVERTIME — so a month of leave does not read as a shortfall.
+   */
+  async attendanceDrift(month: number, year: number) {
+    const rows = await this.dataSource.query<{
+      placement_id: string; staff_id: string; staff_code: string; staff_name: string;
+      client_name: string | null; placement_type: string;
+      attendance_days: string; attendance_hours: string | null;
+      payroll_id: string | null; payroll_days: string | null; payroll_hours: string | null;
+      payroll_status: string | null; gross_salary: string | null;
+      invoice_id: string | null; invoice_number: string | null; invoice_status: string | null;
+    }[]>(
+      `SELECT p.id AS placement_id, p.staff_id, p.placement_type,
+              sa.staff_code, sa.full_name AS staff_name,
+              fc.customer_name AS client_name,
+              COALESCE(a.days, 0)::text  AS attendance_days,
+              COALESCE(a.hours, 0)::text AS attendance_hours,
+              pr.id AS payroll_id,
+              pr.shift_days::text   AS payroll_days,
+              pr.hours_worked::text AS payroll_hours,
+              pr.status::text       AS payroll_status,
+              pr.gross_salary::text AS gross_salary,
+              ci.id AS invoice_id, ci.invoice_number, ci.status::text AS invoice_status
+         FROM placements p
+         JOIN staff_applicants sa ON sa.id = p.staff_id
+         LEFT JOIN finance_customers fc ON fc.id = p.client_id
+         LEFT JOIN LATERAL (
+           SELECT COUNT(*) FILTER (WHERE status IN ('PRESENT','HALF_DAY','OVERTIME')) AS days,
+                  SUM(hours_worked) FILTER (WHERE status IN ('PRESENT','HALF_DAY','OVERTIME')) AS hours
+             FROM staff_daily_attendance sda
+            WHERE sda.placement_id = p.id
+              AND EXTRACT(MONTH FROM sda.attendance_date) = $1
+              AND EXTRACT(YEAR  FROM sda.attendance_date) = $2
+         ) a ON true
+         LEFT JOIN payroll_records pr
+           ON pr.placement_id = p.id AND pr.period_month = $1 AND pr.period_year = $2
+         LEFT JOIN client_invoices ci ON ci.id = pr.client_invoice_id
+        WHERE p.status IN ('CONFIRMED','TRIAL')
+        ORDER BY sa.staff_code`,
+      [month, year],
+    );
+
+    const items = rows.map((r) => {
+      const hourly = r.placement_type === 'TEMPORARY';
+      const attDays = parseInt(r.attendance_days, 10);
+      const attHours = parseFloat(r.attendance_hours ?? '0');
+      const payDays = r.payroll_days === null ? null : parseInt(r.payroll_days, 10);
+      const payHours = r.payroll_hours === null ? null : parseFloat(r.payroll_hours);
+
+      // An hourly placement is billed on hours, a permanent one on days —
+      // comparing the wrong unit would report drift on every hourly row.
+      const counted = hourly ? payHours : payDays;
+      const worked = hourly ? attHours : attDays;
+      const missing = r.payroll_id ? Math.round((worked - (counted ?? 0)) * 10) / 10 : worked;
+
+      return {
+        placement_id: r.placement_id,
+        staff_code: r.staff_code,
+        staff_name: r.staff_name,
+        client_name: r.client_name,
+        placement_type: r.placement_type,
+        unit: hourly ? 'hours' : 'days',
+        attendance: worked,
+        payroll: counted,
+        missing,
+        /** Ready to print: "1 day short", not "1 days". */
+        shortfall: `${missing} ${hourly ? 'hour' : 'day'}${missing === 1 ? '' : 's'} short`,
+        payroll_id: r.payroll_id,
+        payroll_status: r.payroll_status,
+        gross_salary: r.gross_salary === null ? null : parseFloat(r.gross_salary),
+        invoice_number: r.invoice_number,
+        invoice_status: r.invoice_status,
+        /**
+         * Whether re-running payroll would fix it on its own. Once the invoice
+         * is approved or sent, the client has been told a number, and quietly
+         * changing it is not a correction — that needs a credit note.
+         */
+        fixable:
+          missing > 0 &&
+          (!r.payroll_id ||
+            (r.payroll_status === 'PENDING' &&
+              (!r.invoice_status || r.invoice_status === 'DRAFT'))),
+        reason: !r.payroll_id
+          ? 'Payroll has not been run for this placement yet.'
+          : r.payroll_status !== 'PENDING'
+            ? `Payroll is ${r.payroll_status} — approval locks the figure.`
+            : r.invoice_status && r.invoice_status !== 'DRAFT'
+              ? `Invoice ${r.invoice_number} is ${r.invoice_status} — the client has been told this figure.`
+              : 'Payroll can be re-run for this placement.',
+      };
+    });
+
+    const drifted = items.filter((i) => i.missing > 0);
+    return {
+      period: { month, year },
+      checked: items.length,
+      drifted: drifted.length,
+      /** Only the rows that disagree — a clean month returns an empty list. */
+      items: drifted,
+    };
+  }
+
   async approvePayrollRecord(payrollId: string, actorId?: string) {
     const rows = await this.dataSource.query<{ id: string; status: string; net_salary: string }[]>(
       `SELECT id, status, net_salary FROM payroll_records WHERE id = $1`, [payrollId],

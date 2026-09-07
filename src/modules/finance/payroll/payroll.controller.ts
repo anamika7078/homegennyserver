@@ -102,6 +102,26 @@ export class FinancePayrollController {
     return this.service.payoutReadiness();
   }
 
+  // Declared above the `:id` routes below — a literal path after a parameter
+  // route is swallowed by it. This has bitten the codebase twice already.
+  @Get('attendance-drift')
+  @ApiOperation({
+    summary: 'Where attendance and payroll disagree for a period',
+    description:
+      'Payroll is a snapshot taken when it runs; attendance keeps being marked afterwards ' +
+      'and nothing went back to look. A staff member could work three days, be paid for one, ' +
+      'and nobody would know. This reports the difference and whether re-running payroll ' +
+      'would fix it — it changes nothing itself. An untouched month returns an empty list.',
+  })
+  @ApiQuery({ name: 'month', required: true })
+  @ApiQuery({ name: 'year', required: true })
+  attendanceDrift(
+    @Query('month', ParseIntPipe) month: number,
+    @Query('year', ParseIntPipe) year: number,
+  ) {
+    return this.service.attendanceDrift(month, year);
+  }
+
   @Get('staff/:staffId/bank-account')
   @Roles(UserRole.FINANCE, UserRole.ADMIN)
   @ApiOperation({
