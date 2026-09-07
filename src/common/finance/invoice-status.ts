@@ -73,3 +73,24 @@ export function assertTransition(from: string, to: InvoiceStatus, invoiceNumber?
     );
   }
 }
+
+/**
+ * The statuses a client is allowed to see in their own app.
+ *
+ * The client's invoice list had no filter at all, so a DRAFT appeared on their
+ * phone the moment Finance created it — before anyone approved it, before it
+ * was sent, and it stayed there after being cancelled. Two cancelled invoices
+ * were sitting in a live client's app when this was found.
+ *
+ * The rule is "has it been sent to them", not "is it SENT". Filtering on SENT
+ * alone would make an invoice vanish the moment the client paid it, taking
+ * their own history with it — PAID, OVERDUE, PARTIALLY_PAID and CREDIT_NOTE
+ * are all only reachable through SENT.
+ */
+export const CLIENT_VISIBLE_INVOICE_STATUSES: InvoiceStatus[] = [
+  'SENT',
+  'PARTIALLY_PAID',
+  'PAID',
+  'OVERDUE',
+  'CREDIT_NOTE',
+];

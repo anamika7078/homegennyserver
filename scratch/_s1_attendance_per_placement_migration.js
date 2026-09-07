@@ -95,8 +95,24 @@ async function main() {
     );
     console.log(`  ok    ${NEW_INDEX} created`);
 
-    await c.query(`DROP INDEX IF EXISTS ${OLD_INDEX}`);
-    console.log(`  ok    ${OLD_INDEX} dropped — a second house in a day is now possible`);
+    // The old rule may be a bare index or a UNIQUE constraint backed by one,
+    // depending on whether the table was built by Prisma or by hand. A
+    // constraint's index cannot be dropped directly — Postgres refuses,
+    // which is how this migration first stopped on production. Ask which it
+    // is rather than guessing.
+    const backing = await c.query(
+      `SELECT conname FROM pg_constraint
+        WHERE conrelid = 'staff_daily_attendance'::regclass
+          AND conname = $1`,
+      [OLD_INDEX],
+    );
+    if (backing.rowCount) {
+      await c.query(`ALTER TABLE staff_daily_attendance DROP CONSTRAINT ${OLD_INDEX}`);
+      console.log(`  ok    ${OLD_INDEX} dropped (it was a constraint) — a second house in a day is now possible`);
+    } else {
+      await c.query(`DROP INDEX IF EXISTS ${OLD_INDEX}`);
+      console.log(`  ok    ${OLD_INDEX} dropped — a second house in a day is now possible`);
+    }
 
     await c.query('COMMIT');
 

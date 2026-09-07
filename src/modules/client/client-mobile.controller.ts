@@ -6,6 +6,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { IncidentsService } from '../incidents/incidents.service';
+import { CLIENT_VISIBLE_INVOICE_STATUSES } from '../../common/finance/invoice-status';
 
 /**
  * Same series-based required-track logic used in staff-mobile.controller.ts, so a
@@ -94,9 +95,19 @@ export class ClientMobileController {
       return { customerName: req.user.fullName, activePlacementsCount: 0, todayAttendanceStatus: null, pendingInvoicesCount: 0, totalUnpaidAmount: 0 };
     }
 
-    const [placementsCount, pendingInvoices, placement] = await Promise.all([
+    // 'PENDING' stopped being a status when the invoice state machine went in
+    // (F-12) and this query was never updated, so it matched nothing: the
+    // client's dashboard showed "0 invoices, ₹0 outstanding" however much they
+    // owed. Unpaid means sent and not yet settled — PAID is done and
+    // CREDIT_NOTE has been reversed.
+    const [placementsCount, unpaidInvoices, placement] = await Promise.all([
       this.prisma.placement.count({ where: { clientId: customer.id, status: 'CONFIRMED' } }),
-      this.prisma.invoice.findMany({ where: { clientId: customer.id, status: 'PENDING' } }),
+      this.prisma.invoice.findMany({
+        where: {
+          clientId: customer.id,
+          status: { in: ['SENT', 'PARTIALLY_PAID', 'OVERDUE'] },
+        },
+      }),
       this.resolveActivePlacement(customer.id),
     ]);
 
@@ -114,8 +125,9 @@ export class ClientMobileController {
       customerName: customer.customerName,
       activePlacementsCount: placementsCount,
       todayAttendanceStatus,
-      pendingInvoicesCount: pendingInvoices.length,
-      totalUnpaidAmount: pendingInvoices.reduce((sum, i) => sum + Number(i.totalAmount), 0),
+      pendingInvoicesCount: unpaidInvoices.length,
+      totalUnpaidAmount:
+        Math.round(unpaidInvoices.reduce((sum, i) => sum + Number(i.totalAmount), 0) * 100) / 100,
     };
   }
 
@@ -273,8 +285,11 @@ export class ClientMobileController {
     const customer = await this.resolveCustomer(req.user.id);
     if (!customer) return { invoices: [] };
 
+    // Only what has actually been sent to them. There was no filter here at
+    // all, so a DRAFT reached the client's phone the moment Finance created
+    // it, and a cancelled one never left. See CLIENT_VISIBLE_INVOICE_STATUSES.
     const invoices = await this.prisma.invoice.findMany({
-      where: { clientId: customer.id },
+      where: { clientId: customer.id, status: { in: CLIENT_VISIBLE_INVOICE_STATUSES } },
       orderBy: { dueDate: 'desc' },
     });
 
@@ -348,15 +363,251 @@ export class ClientMobileController {
 
   @Post('replacements')
   @ApiOperation({
-    summary: 'Request staff replacement',
-    description: '⚠️ Not yet persisted — no Replacement/ExitRequest schema exists yet. Deferred to a follow-up pass (needs a new Prisma model + migration).',
+    summary: 'Request that a staff member be replaced',
+    description:
+      'Recorded against the client and, where given, the placement — so the RM has ' +
+      'something to work from and the client can look it up again. This used to return ' +
+      'a made-up ticket number and write nothing anywhere.',
   })
-  async requestReplacement(@Body() body: any) {
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['reason'],
+      properties: {
+        reason: { type: 'string', example: 'Frequently late, and the work is not to standard' },
+        placement_id: { type: 'string', description: 'Which placement — required once more than one staff member is placed' },
+        preferred_date: { type: 'string', example: '2026-10-01', description: 'When they would like the change' },
+      },
+    },
+  })
+  async requestReplacement(@Req() req: any, @Body() body: any) {
+    const customer = await this.resolveCustomer(req.user.id);
+    if (!customer) throw new BadRequestException('No client account is linked to this login.');
+
+    const reason = String(body?.reason ?? '').trim();
+    if (!reason) throw new BadRequestException('Tell us why — the RM needs a reason to act on.');
+
+    const active = await this.prisma.placement.findMany({
+      where: { clientId: customer.id, status: { in: ['CONFIRMED', 'TRIAL'] } },
+      select: { id: true, staffId: true, branchId: true, rmId: true },
+    });
+    if (!active.length) {
+      throw new BadRequestException('Nobody is placed with you right now, so there is nobody to replace.');
+    }
+
+    // Naming the placement matters once more than one person works here —
+    // otherwise the RM cannot tell who is being complained about.
+    let placement = active.length === 1 ? active[0] : undefined;
+    if (body?.placement_id) {
+      placement = active.find((p) => p.id === body.placement_id);
+      if (!placement) throw new BadRequestException('That placement is not one of yours.');
+    }
+    if (!placement) {
+      throw new BadRequestException(
+        `${active.length} staff are placed with you — send placement_id to say which one.`,
+      );
+    }
+
+    const [row] = await this.prisma.$queryRaw<{ id: string; status: string; created_at: Date }[]>`
+      INSERT INTO replacement_requests
+        (client_id, placement_id, staff_id, branch_id, rm_id, reason, preferred_date, raised_by)
+      VALUES (${customer.id}::uuid, ${placement.id}::uuid, ${placement.staffId}::uuid,
+              ${placement.branchId}::uuid, ${placement.rmId ?? null}::uuid, ${reason},
+              ${body?.preferred_date ? new Date(body.preferred_date) : null}::date,
+              ${req.user.id}::uuid)
+      RETURNING id, status, created_at`;
+
     return {
       success: true,
-      requestId: `REQ_REPLACE_${Date.now()}`,
-      status: 'UNDER_RM_REVIEW',
-      message: 'Staff replacement request initiated. RM will contact you within 24 hours.',
+      requestId: row.id,
+      status: row.status,
+      raisedAt: row.created_at,
+      message: 'Replacement request recorded. Your RM can see it and will be in touch.',
+    };
+  }
+
+  @Get('replacements')
+  @ApiOperation({ summary: 'Replacement requests this client has raised, newest first' })
+  async listReplacements(@Req() req: any) {
+    const customer = await this.resolveCustomer(req.user.id);
+    if (!customer) return { requests: [], total: 0 };
+
+    const rows = await this.prisma.$queryRaw<any[]>`
+      SELECT rr.id, rr.reason, rr.status, rr.preferred_date, rr.resolution,
+             rr.resolved_at, rr.created_at, sa.full_name AS staff_name, sa.staff_code
+        FROM replacement_requests rr
+        LEFT JOIN staff_applicants sa ON sa.id = rr.staff_id
+       WHERE rr.client_id = ${customer.id}::uuid
+       ORDER BY rr.created_at DESC`;
+
+    return {
+      requests: rows.map((r) => ({
+        id: r.id,
+        staffName: r.staff_name,
+        staffCode: r.staff_code,
+        reason: r.reason,
+        status: r.status,
+        preferredDate: r.preferred_date,
+        resolution: r.resolution,
+        resolvedAt: r.resolved_at,
+        raisedAt: r.created_at,
+      })),
+      total: rows.length,
+    };
+  }
+
+  @Get('complaints')
+  @ApiOperation({
+    summary: 'Complaints this client has raised, newest first',
+    description:
+      'A complaint is filed as an Incident, so this reads them back from there. ' +
+      'The client could raise one and never see it again.',
+  })
+  async listComplaints(@Req() req: any) {
+    const customer = await this.resolveCustomer(req.user.id);
+    if (!customer) return { complaints: [], total: 0 };
+
+    const rows = await this.prisma.incident.findMany({
+      where: { clientId: customer.id },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true, type: true, status: true, title: true, description: true,
+        resolution: true, resolvedAt: true, createdAt: true,
+        staff: { select: { fullName: true, staffCode: true } },
+      },
+    });
+
+    return {
+      complaints: rows.map((r) => ({
+        ticketNumber: r.id,
+        type: r.type,
+        status: r.status,
+        title: r.title,
+        description: r.description,
+        staffName: r.staff?.fullName ?? null,
+        staffCode: r.staff?.staffCode ?? null,
+        resolution: r.resolution,
+        resolvedAt: r.resolvedAt,
+        raisedAt: r.createdAt,
+      })),
+      total: rows.length,
+    };
+  }
+
+  @Get('invoices/:id')
+  @ApiOperation({
+    summary: 'One invoice, with the line items behind the total',
+    description:
+      'Takes the invoice number the list returns (or the id). A client could see what ' +
+      'they owed but never what it was made of.',
+  })
+  async getInvoiceDetail(@Req() req: any, @Param('id') id: string) {
+    const customer = await this.resolveCustomer(req.user.id);
+    if (!customer) throw new BadRequestException('No client account is linked to this login.');
+
+    // The list hands out invoice_number as the id, so accept either — and scope
+    // to this customer, so one client can never read another's bill.
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+    const invoice = await this.prisma.invoice.findFirst({
+      where: {
+        clientId: customer.id,
+        // The same rule as the list. Without it, knowing a number would open a
+        // draft the client was never meant to see.
+        status: { in: CLIENT_VISIBLE_INVOICE_STATUSES },
+        ...(isUuid ? { id } : { invoiceNumber: id }),
+      },
+    });
+    if (!invoice) throw new BadRequestException(`No invoice ${id} on your account.`);
+
+    const items = await this.prisma.$queryRaw<any[]>`
+      SELECT description, amount, is_taxable, staff_name, sac_code
+        FROM invoice_items WHERE invoice_id = ${invoice.id}::uuid
+       ORDER BY sort_order NULLS LAST, created_at`;
+
+    const paid = await this.prisma.$queryRaw<{ total: string }[]>`
+      SELECT COALESCE(SUM(amount), 0)::text AS total
+        FROM invoice_payments WHERE invoice_id = ${invoice.id}::uuid AND status = 'SUCCESS'`;
+    const paidTotal = Number(paid[0]?.total ?? 0);
+
+    return {
+      id: invoice.invoiceNumber,
+      invoiceId: invoice.id,
+      documentType: invoice.documentType,
+      billingMonth: `${invoice.periodMonth}/${invoice.periodYear}`,
+      status: invoice.status,
+      dueDate: invoice.dueDate,
+      salaryComponent: Number(invoice.staffSalaryComponent),
+      employerEsic: Number(invoice.esicEmployer),
+      employerPf: Number(invoice.pfEmployer),
+      managementFee: Number(invoice.managementFee),
+      gstAmount: Number(invoice.gstAmount),
+      totalAmount: Number(invoice.totalAmount),
+      amountPaid: paidTotal,
+      amountDue: Math.round((Number(invoice.totalAmount) - paidTotal) * 100) / 100,
+      lineItems: items.map((i) => ({
+        description: i.description,
+        staffName: i.staff_name,
+        amount: Number(i.amount),
+        taxable: i.is_taxable,
+        sacCode: i.sac_code,
+      })),
+    };
+  }
+
+  @Get('payments/history')
+  @ApiOperation({ summary: 'Payments this client has made, newest first' })
+  async getPaymentHistory(@Req() req: any) {
+    const customer = await this.resolveCustomer(req.user.id);
+    if (!customer) return { payments: [], total: 0, totalPaid: 0 };
+
+    const rows = await this.prisma.$queryRaw<any[]>`
+      SELECT ip.id, ip.amount, ip.payment_date, ip.payment_method, ip.transaction_id,
+             ip.status, ci.invoice_number, ci.period_month, ci.period_year
+        FROM invoice_payments ip
+        JOIN client_invoices ci ON ci.id = ip.invoice_id
+       WHERE ci.client_id = ${customer.id}::uuid
+       ORDER BY ip.payment_date DESC`;
+
+    return {
+      payments: rows.map((r) => ({
+        id: r.id,
+        invoiceNumber: r.invoice_number,
+        billingMonth: `${r.period_month}/${r.period_year}`,
+        amount: Number(r.amount),
+        paidOn: r.payment_date,
+        method: r.payment_method,
+        reference: r.transaction_id,
+        status: r.status,
+      })),
+      total: rows.length,
+      totalPaid: rows
+        .filter((r) => r.status === 'SUCCESS')
+        .reduce((s, r) => s + Number(r.amount), 0),
+    };
+  }
+
+  @Get('notifications')
+  @ApiOperation({
+    summary: 'This client’s in-app notifications',
+    description:
+      'The same rows /notifications/in-app serves, scoped to the caller — so the app ' +
+      'does not have to know about a second module.',
+  })
+  async getNotifications(@Req() req: any) {
+    const rows = await this.prisma.notification.findMany({
+      where: { userId: req.user.id, channel: 'IN_APP' },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    return {
+      notifications: rows.map((n) => ({
+        id: n.id,
+        title: n.title,
+        body: n.body,
+        read: n.readAt !== null,
+        sentAt: n.sentAt ?? n.createdAt,
+      })),
+      unread: rows.filter((n) => n.readAt === null).length,
     };
   }
 }

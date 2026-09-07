@@ -36,3 +36,4 @@ Thumbs.db
 # only so a wrong call can be undone locally. Never commit one.
 scratch/_wiped_local_*.json
 scratch/_deleted_*.json
+scratch/_prod_before_*.json

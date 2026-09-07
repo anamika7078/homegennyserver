@@ -47,6 +47,21 @@ const REQUIRED_VERIFICATION_TRACKS: Record<string, string[]> = {
   MAID: ['AADHAAR_EKYC'],
 };
 
+/**
+ * How many RM-approved prompts each series needs, and the short code the
+ * deployment gate keys them by. Both mirror pipeline-fsm.service.ts, whose
+ * copies are file-local and not exported; if that gate's numbers change, this
+ * has to change with it or the app will show a completion the gate disagrees
+ * with.
+ */
+const REQUIRED_VIDEO_PROMPTS: Record<string, number> = { MAID: 9, SC: 10, UC: 10, DR: 12 };
+const STAFF_SERIES_SHORT: Record<string, string> = {
+  MAID: 'MAID',
+  SKILLED_CARE: 'SC',
+  UNSKILLED_CARE: 'UC',
+  DRIVER: 'DR',
+};
+
 /** "1 day", not "1 days" — this text is read by the staff member, not a log. */
 function plural(n: number, unit: string): string {
   return `${n} ${unit}${n === 1 ? '' : 's'}`;
@@ -621,5 +636,189 @@ export class StaffMobileController {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', String(buffer.length));
     res.end(buffer);
+  }
+
+  /** The staff record behind the token, or a clear refusal. */
+  private async requireStaff(req: any) {
+    const staff = await this.prisma.staffApplicant.findFirst({ where: { userId: req.user.id } });
+    if (!staff) throw new BadRequestException('No staff record is linked to this login.');
+    return staff;
+  }
+
+  @Get('bank-account')
+  @ApiOperation({
+    summary: 'Where this staff member is paid',
+    description:
+      'The account number is masked — the app only needs to show which account it is, ' +
+      'and a full number on a phone screen is a liability.',
+  })
+  async getBankAccount(@Req() req: any) {
+    const staff = await this.requireStaff(req);
+    const rows = await this.prisma.$queryRaw<any[]>`
+      SELECT account_holder_name, account_number, ifsc, bank_name, is_verified, verified_at
+        FROM staff_bank_accounts WHERE staff_id = ${staff.id}::uuid
+       ORDER BY created_at DESC LIMIT 1`;
+    if (!rows.length) {
+      return { bankAccount: null, message: 'No bank account on record yet. Add one to be paid.' };
+    }
+    const b = rows[0];
+    const acc = String(b.account_number ?? '');
+    return {
+      bankAccount: {
+        accountHolderName: b.account_holder_name,
+        accountNumberMasked: acc.length > 4 ? `${'X'.repeat(acc.length - 4)}${acc.slice(-4)}` : acc,
+        last4: acc.slice(-4),
+        ifsc: b.ifsc,
+        bankName: b.bank_name,
+        verified: b.is_verified,
+        verifiedAt: b.verified_at,
+      },
+    };
+  }
+
+  @Put('bank-account')
+  @ApiOperation({
+    summary: 'Add or replace the account this staff member is paid into',
+    description:
+      'Saving a new account clears the verified flag — a changed account has not been ' +
+      'checked, and paying into an unverified one on the strength of the old check is ' +
+      'how money goes to the wrong place.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['account_holder_name', 'account_number', 'ifsc'],
+      properties: {
+        account_holder_name: { type: 'string', example: 'Anamika Devi' },
+        account_number: { type: 'string', example: '50100123456789' },
+        ifsc: { type: 'string', example: 'HDFC0000133' },
+        bank_name: { type: 'string', example: 'HDFC Bank' },
+      },
+    },
+  })
+  async saveBankAccount(@Req() req: any, @Body() body: any) {
+    const staff = await this.requireStaff(req);
+    const holder = String(body?.account_holder_name ?? '').trim();
+    const account = String(body?.account_number ?? '').replace(/\s+/g, '');
+    const ifsc = String(body?.ifsc ?? '').trim().toUpperCase();
+
+    if (!holder) throw new BadRequestException('The account holder’s name is required.');
+    if (!/^\d{9,18}$/.test(account)) {
+      throw new BadRequestException('An account number is 9 to 18 digits.');
+    }
+    // The RBI format: four letters, a zero, then the branch code.
+    if (!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)) {
+      throw new BadRequestException('That IFSC does not look right — it is 11 characters, like HDFC0000133.');
+    }
+
+    await this.prisma.$executeRaw`
+      DELETE FROM staff_bank_accounts WHERE staff_id = ${staff.id}::uuid`;
+    await this.prisma.$executeRaw`
+      INSERT INTO staff_bank_accounts
+        (id, staff_id, account_holder_name, account_number, ifsc, bank_name,
+         is_verified, created_by, created_at, updated_at)
+      VALUES (gen_random_uuid(), ${staff.id}::uuid, ${holder}, ${account}, ${ifsc},
+              ${body?.bank_name ?? null}, false, ${req.user.id}::uuid, now(), now())`;
+
+    return {
+      saved: true,
+      verified: false,
+      message: 'Account saved. It has to be verified before a payout can go to it.',
+    };
+  }
+
+  @Get('agreement')
+  @ApiOperation({
+    summary: 'This staff member’s agreements',
+    description:
+      'Read-only. Signing goes through /agreements/:id/sign with its OTP flow — that ' +
+      'lives in the agreements module and is not duplicated here.',
+  })
+  async getAgreements(@Req() req: any) {
+    const staff = await this.requireStaff(req);
+    const rows = await this.prisma.agreement.findMany({
+      where: { staffId: staff.id },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true, type: true, status: true, pdfUrl: true,
+        otpVerified: true, createdAt: true, updatedAt: true,
+      },
+    });
+    return {
+      agreements: rows.map((a) => ({
+        id: a.id,
+        type: a.type,
+        status: a.status,
+        signed: a.status === 'SIGNED',
+        pdfUrl: a.pdfUrl,
+        otpVerified: a.otpVerified,
+        createdAt: a.createdAt,
+        updatedAt: a.updatedAt,
+      })),
+      /** Everything below S5 needs a signed one before deployment. */
+      hasSigned: rows.some((a) => a.status === 'SIGNED'),
+      signAt: '/agreements/{id}/sign',
+    };
+  }
+
+  @Get('video-certification')
+  @ApiOperation({
+    summary: 'This staff member’s video certification, and what is left',
+    description:
+      'Recording and uploading live in the /video-cert module; this says where they ' +
+      'stand, which is what the app’s own screen needs.',
+  })
+  async getVideoCertification(@Req() req: any) {
+    const staff = await this.requireStaff(req);
+    const rows = await this.prisma.videoCertification.findMany({
+      where: { staffId: staff.id },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, promptKey: true, reviewStatus: true, attemptNumber: true, createdAt: true },
+    });
+
+    const seriesShort = STAFF_SERIES_SHORT[staff.series] ?? 'MAID';
+    const required = REQUIRED_VIDEO_PROMPTS[seriesShort] ?? 9;
+    const approved = new Set(
+      rows.filter((r) => r.reviewStatus === 'APPROVED').map((r) => r.promptKey),
+    ).size;
+
+    return {
+      required,
+      approved,
+      complete: approved >= required,
+      submissions: rows.map((r) => ({
+        id: r.id,
+        promptKey: r.promptKey,
+        reviewStatus: r.reviewStatus,
+        attempt: r.attemptNumber,
+        submittedAt: r.createdAt,
+      })),
+      recordAt: '/video-cert',
+    };
+  }
+
+  @Get('notifications')
+  @ApiOperation({
+    summary: 'This staff member’s in-app notifications',
+    description:
+      'The same rows /notifications/in-app serves, scoped to the caller, so the app ' +
+      'does not have to know about a second module.',
+  })
+  async getNotifications(@Req() req: any) {
+    const rows = await this.prisma.notification.findMany({
+      where: { userId: req.user.id, channel: 'IN_APP' },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    return {
+      notifications: rows.map((n) => ({
+        id: n.id,
+        title: n.title,
+        body: n.body,
+        read: n.readAt !== null,
+        sentAt: n.sentAt ?? n.createdAt,
+      })),
+      unread: rows.filter((n) => n.readAt === null).length,
+    };
   }
 }
