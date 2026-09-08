@@ -291,6 +291,119 @@ export class FinanceCustomerService implements OnModuleInit {
   }
 
   /**
+   * Everything about one customer for one month, in a single call.
+   *
+   * Opening a customer used to mean the list and nothing else — who worked
+   * there, whether they turned up, and what was billed all lived on different
+   * screens. This gathers them so the dialog is filled the moment it opens
+   * rather than fetching four times and rendering in pieces.
+   *
+   * The attendance comes back as one row per staff member with a day-by-day
+   * map, which is what a month grid needs; days nobody worked simply are not
+   * in the map.
+   */
+  async getCustomerOverview(id: string, month: number, year: number) {
+    const customer = await this.getCustomer(id);
+
+    const placements = await this.dataSource.query<any[]>(
+      `SELECT p.id, p.placement_type, p.status::text AS status,
+              p.staff_salary, p.management_fee, p.hourly_rate, p.hourly_fee,
+              p.shift_hours, p.trial_start_date, p.trial_end_date, p.confirmed_at,
+              sa.id AS staff_id, sa.staff_code, sa.full_name AS staff_name,
+              sa.mobile AS staff_mobile, sa.series::text AS series,
+              e.id AS employee_id
+         FROM placements p
+         JOIN staff_applicants sa ON sa.id = p.staff_id
+         LEFT JOIN employees e ON e.staff_applicant_id = sa.id AND e.deleted_at IS NULL
+        WHERE p.client_id = $1
+        ORDER BY (p.status = 'CONFIRMED') DESC, sa.full_name`,
+      [id],
+    );
+
+    const active = placements.filter((p) => p.status === 'CONFIRMED' || p.status === 'TRIAL');
+
+    // One query for every placement's month, rather than one per staff member.
+    const attendance = active.length
+      ? await this.dataSource.query<any[]>(
+          // The day number comes from Postgres, not from JavaScript. The pg
+          // driver hands a `date` column back as a JS Date at *local*
+          // midnight, so on this IST server getUTCDate() reads the day before
+          // — the 3rd of the month rendered as the 2nd. Ask the database for
+          // the number it already knows.
+          `SELECT placement_id, EXTRACT(DAY FROM attendance_date)::int AS day,
+                  attendance_date, status::text AS status, hours_worked
+             FROM staff_daily_attendance
+            WHERE placement_id = ANY($1::uuid[])
+              AND EXTRACT(MONTH FROM attendance_date) = $2
+              AND EXTRACT(YEAR  FROM attendance_date) = $3
+            ORDER BY attendance_date`,
+          [active.map((p) => p.id), month, year],
+        )
+      : [];
+
+    const byPlacement = new Map<string, Record<number, { status: string; hours: number | null }>>();
+    for (const row of attendance) {
+      const bucket = byPlacement.get(row.placement_id) ?? {};
+      bucket[row.day] = {
+        status: row.status,
+        hours: row.hours_worked === null ? null : Number(row.hours_worked),
+      };
+      byPlacement.set(row.placement_id, bucket);
+    }
+
+    const invoices = await this.dataSource.query<any[]>(
+      `SELECT id, invoice_number, period_month, period_year, status::text AS status,
+              document_type, total_amount, staff_salary_component, management_fee,
+              gst_amount, due_date, created_at
+         FROM client_invoices
+        WHERE client_id = $1
+        ORDER BY period_year DESC, period_month DESC, created_at DESC`,
+      [id],
+    );
+
+    const worked = (s: string) => ['PRESENT', 'HALF_DAY', 'OVERTIME'].includes(s);
+
+    return {
+      customer,
+      period: { month, year, days_in_month: new Date(Date.UTC(year, month, 0)).getUTCDate() },
+      staff: active.map((p) => {
+        const days = byPlacement.get(p.id) ?? {};
+        const workedDays = Object.values(days).filter((d) => worked(d.status)).length;
+        const hours = Object.values(days)
+          .filter((d) => worked(d.status))
+          .reduce((s, d) => s + (d.hours ?? 0), 0);
+        return {
+          placement_id: p.id,
+          staff_id: p.staff_id,
+          employee_id: p.employee_id,
+          staff_code: p.staff_code,
+          staff_name: p.staff_name,
+          mobile: p.staff_mobile,
+          series: p.series,
+          placement_type: p.placement_type,
+          status: p.status,
+          shift_hours: p.shift_hours,
+          staff_salary: p.staff_salary === null ? null : Number(p.staff_salary),
+          management_fee: p.management_fee === null ? null : Number(p.management_fee),
+          hourly_rate: p.hourly_rate === null ? null : Number(p.hourly_rate),
+          hourly_fee: p.hourly_fee === null ? null : Number(p.hourly_fee),
+          trial_start_date: p.trial_start_date,
+          trial_end_date: p.trial_end_date,
+          confirmed_at: p.confirmed_at,
+          /** day-of-month → what happened that day. Absent days are absent. */
+          days,
+          days_worked: workedDays,
+          hours_worked: Math.round(hours * 10) / 10,
+        };
+      }),
+      /** Everyone who has ever been placed here, including those who left. */
+      staff_total: placements.length,
+      staff_active: active.length,
+      invoices,
+    };
+  }
+
+  /**
    * PAN verification — mirrors VerificationService.verifyAadhaar's shape
    * (mock mode until a real provider is configured), but finance_customers
    * has no dedicated VerificationTrack-style table, so the result is merged

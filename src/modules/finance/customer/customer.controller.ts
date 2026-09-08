@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Put, Body, Param, Query, UseGuards,
+  Controller, Get, Post, Put, Body, Param, Query, UseGuards, BadRequestException,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
@@ -60,6 +60,33 @@ export class FinanceCustomerController {
   @ApiOperation({ summary: 'Get a single finance customer by ID' })
   getCustomer(@Param('id') id: string) {
     return this.service.getCustomer(id);
+  }
+
+  @Get(':id/overview')
+  @ApiOperation({
+    summary: 'One customer, one month: their staff, the days worked, and their invoices',
+    description:
+      'What the customer dialog needs, in one call. Each staff member carries a ' +
+      '`days` map of day-of-month → status, which is what a month grid reads. ' +
+      'Defaults to the current month.',
+  })
+  @ApiQuery({ name: 'month', required: false })
+  @ApiQuery({ name: 'year', required: false })
+  getCustomerOverview(
+    @Param('id') id: string,
+    @Query('month') month?: string,
+    @Query('year') year?: string,
+  ) {
+    const now = new Date();
+    const m = Number(month ?? now.getMonth() + 1);
+    const y = Number(year ?? now.getFullYear());
+    if (!Number.isInteger(m) || m < 1 || m > 12) {
+      throw new BadRequestException('month must be a whole number between 1 and 12');
+    }
+    if (!Number.isInteger(y) || y < 2000 || y > 2100) {
+      throw new BadRequestException('year must be a whole number between 2000 and 2100');
+    }
+    return this.service.getCustomerOverview(id, m, y);
   }
 
   @Get(':id/branches')
