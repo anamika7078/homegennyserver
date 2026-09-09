@@ -1,11 +1,16 @@
-import { Controller, Get, Post, Param, Body, UseGuards, UseInterceptors, Req, BadRequestException } from '@nestjs/common';
+import {
+  Controller, Get, Post, Param, Query, Body, Res, UseGuards, UseInterceptors, Req,
+  BadRequestException,
+} from '@nestjs/common';
 import { AnyFilesInterceptor } from '@nestjs/platform-express';
-import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiConsumes } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiConsumes, ApiQuery } from '@nestjs/swagger';
+import { Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { IncidentsService } from '../incidents/incidents.service';
+import { FinanceInvoiceService } from '../finance/invoice/invoice.service';
 import { CLIENT_VISIBLE_INVOICE_STATUSES } from '../../common/finance/invoice-status';
 
 /**
@@ -52,6 +57,9 @@ export class ClientMobileController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly incidents: IncidentsService,
+    // The same renderer Finance uses, so the client downloads the very
+    // document the office sees rather than a second version of it.
+    private readonly financeInvoices: FinanceInvoiceService,
   ) {}
 
   private async resolveCustomer(userId: string) {
@@ -299,7 +307,13 @@ export class ClientMobileController {
     // Finance console, on a worse surface. See docs/FINANCE_MODULE_AUDIT.md.
     return {
       invoices: invoices.map((i) => ({
+        // `id` has always been the invoice number, and the app puts it
+        // straight into a URL — but a number looks like HPL-01/202609/0002,
+        // so its slashes become path segments and nothing matches. The number
+        // stays for display; `invoiceId` is what belongs in a URL.
         id: i.invoiceNumber,
+        invoiceId: i.id,
+        invoiceNumber: i.invoiceNumber,
         billingMonth: `${i.periodMonth}/${i.periodYear}`,
         salaryComponent: Number(i.staffSalaryComponent),
         employerEsic: Number(i.esicEmployer),
@@ -494,6 +508,71 @@ export class ClientMobileController {
     };
   }
 
+  /**
+   * One invoice that belongs to this client and has actually been sent to
+   * them — by UUID or by invoice number, whichever the caller has.
+   *
+   * Detail and download both go through here so they can never disagree about
+   * who may see what: without the status rule, knowing a number would open a
+   * draft the client was never meant to see.
+   */
+  private async resolveOwnInvoice(req: any, idOrNumber: string) {
+    const customer = await this.resolveCustomer(req.user.id);
+    if (!customer) throw new BadRequestException('No client account is linked to this login.');
+
+    const key = String(idOrNumber ?? '').trim();
+    if (!key) throw new BadRequestException('Which invoice? Pass id or number.');
+
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(key);
+    const invoice = await this.prisma.invoice.findFirst({
+      where: {
+        clientId: customer.id,
+        status: { in: CLIENT_VISIBLE_INVOICE_STATUSES },
+        ...(isUuid ? { id: key } : { invoiceNumber: key }),
+      },
+    });
+    if (!invoice) throw new BadRequestException(`No invoice ${key} on your account.`);
+    return invoice;
+  }
+
+  /**
+   * The invoice as a document, for the client's own records.
+   *
+   * Declared above `invoices/:id` because a literal path after a parameter
+   * route is swallowed by it.
+   *
+   * It takes the number in a query string rather than the path because an
+   * invoice number contains slashes — HPL-01/202609/0002 — so putting one in a
+   * path turns it into three segments and nothing matches. That is exactly how
+   * the app's download button was 404ing. Pass `id` (the UUID) or `number`;
+   * both work, and neither has to be escaped.
+   */
+  @Get('invoices/download')
+  @ApiOperation({
+    summary: 'Download one of this client’s invoices',
+    description:
+      'Pass ?id=<uuid> or ?number=<invoice number>. The number is accepted in a query ' +
+      'string because it contains slashes and cannot live in a path segment. Renders the ' +
+      'same document Finance sees — a second renderer would mean two versions of one bill.',
+  })
+  @ApiQuery({ name: 'id', required: false })
+  @ApiQuery({ name: 'number', required: false })
+  async downloadInvoice(
+    @Req() req: any,
+    @Res() res: Response,
+    @Query('id') id?: string,
+    @Query('number') number?: string,
+  ) {
+    const invoice = await this.resolveOwnInvoice(req, id ?? number ?? '');
+    const html = await this.financeInvoices.generateInvoiceHtml(invoice.id);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="invoice-${invoice.invoiceNumber.replace(/\//g, '-')}.html"`,
+    );
+    res.send(html);
+  }
+
   @Get('invoices/:id')
   @ApiOperation({
     summary: 'One invoice, with the line items behind the total',
@@ -507,17 +586,7 @@ export class ClientMobileController {
 
     // The list hands out invoice_number as the id, so accept either — and scope
     // to this customer, so one client can never read another's bill.
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-    const invoice = await this.prisma.invoice.findFirst({
-      where: {
-        clientId: customer.id,
-        // The same rule as the list. Without it, knowing a number would open a
-        // draft the client was never meant to see.
-        status: { in: CLIENT_VISIBLE_INVOICE_STATUSES },
-        ...(isUuid ? { id } : { invoiceNumber: id }),
-      },
-    });
-    if (!invoice) throw new BadRequestException(`No invoice ${id} on your account.`);
+    const invoice = await this.resolveOwnInvoice(req, id);
 
     const items = await this.prisma.$queryRaw<any[]>`
       SELECT description, amount, is_taxable, staff_name, sac_code

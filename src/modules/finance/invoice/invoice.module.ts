@@ -11,6 +11,9 @@ import { NotificationsModule } from '../../notifications/notifications.module';
   imports: [TypeOrmModule.forFeature([]), NotificationsModule],
   controllers: [FinanceInvoiceController],
   providers: [FinanceInvoiceService, ConsolidatedInvoiceService],
-  exports: [ConsolidatedInvoiceService],
+  // FinanceInvoiceService is exported so the client app can download the very
+  // same document Finance sees. A second renderer would mean two versions of
+  // one invoice.
+  exports: [ConsolidatedInvoiceService, FinanceInvoiceService],
 })
 export class InvoiceModule {}

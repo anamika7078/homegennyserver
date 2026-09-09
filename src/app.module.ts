@@ -52,6 +52,9 @@ import { HealthModule } from './modules/health/health.module';
 import { RmModule } from './modules/rm/rm.module';
 import { TrainingModule } from './modules/training/training.module';
 import { FinanceModule } from './modules/finance/finance.module';
+// ClientMobileController is registered here, not in a module of its own, so the
+// invoice module has to be imported here for it to reach the HTML renderer.
+import { InvoiceModule } from './modules/finance/invoice/invoice.module';
 import { AssessorsModule } from './modules/assessors/assessors.module';
 import { AssessmentsModule } from './modules/assessments/assessments.module';
 import { DriverTestsModule } from './modules/driver-tests/driver-tests.module';
@@ -154,6 +157,7 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     RmModule,
     TrainingModule,
     FinanceModule,
+    InvoiceModule,
     AssessorsModule,
     AssessmentsModule,
     DriverTestsModule,
