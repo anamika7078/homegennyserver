@@ -103,6 +103,44 @@ export class DocumentsService implements OnModuleInit {
     return mandatory.filter((m) => !satisfied.has(m));
   }
 
+  /**
+   * What this employee owes, what they have handed in, and whether that is all
+   * of it.
+   *
+   * The required set already existed in getMandatoryDocumentTypes but never
+   * left this service, so the onboarding screen could only list what happened
+   * to be there — it had no way to say what was still missing. The set depends
+   * on the category: a driver needs a licence, a maid does not need a PAN.
+   */
+  async checklistForEmployeeId(employeeId: string) {
+    const employee = await this.repo.findEmployeeById(employeeId);
+    if (!employee) throw new NotFoundException(`Employee ${employeeId} not found`);
+    return this.checklistFor(employee as any);
+  }
+
+  async checklistFor(employee: { id: string; category?: { name?: string } | null }) {
+    const categoryName = employee.category?.name ?? '';
+    const required = this.getMandatoryDocumentTypes(categoryName);
+    const missing = await this.getMissingDocuments(employee);
+    const uploaded = await this.repo.findByEmployeeId(employee.id);
+
+    return {
+      employeeId: employee.id,
+      category: categoryName || null,
+      required,
+      missing,
+      /** Everything on file, including types outside the required set. */
+      uploaded: (uploaded ?? []).map((d: any) => ({
+        id: d.id,
+        type: d.type,
+        status: d.status,
+        docNumber: d.docNumber,
+        uploadedAt: d.createdAt,
+      })),
+      complete: missing.length === 0,
+    };
+  }
+
   async markUnavailable(employeeId: string, type: string, remark: string) {
     if (!type?.trim()) {
       throw new BadRequestException('Document type is required');

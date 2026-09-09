@@ -37,3 +37,6 @@ Thumbs.db
 scratch/_wiped_local_*.json
 scratch/_deleted_*.json
 scratch/_prod_before_*.json
+
+# Local backend run logs — never useful to anyone else.
+*.log

@@ -78,6 +78,20 @@ export class DocumentsController {
     return this.service.findByEmployee(employeeId);
   }
 
+  @Get('employee/:employeeId/checklist')
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.BM)
+  @ApiOperation({
+    summary: 'Which documents this employee needs, and which are still missing',
+    description:
+      'The rule lived in the service and never came out, so the onboarding screen had ' +
+      'no way to say what was still owed — it could only list what happened to be there. ' +
+      'The required set depends on the employee’s category: a driver needs a licence, a ' +
+      'maid does not need a PAN.',
+  })
+  async checklist(@Param('employeeId') employeeId: string) {
+    return this.service.checklistForEmployeeId(employeeId);
+  }
+
   @Get(':id/preview')
   @Roles(UserRole.HR, UserRole.ADMIN)
   @ApiOperation({ summary: 'Preview document in browser' })

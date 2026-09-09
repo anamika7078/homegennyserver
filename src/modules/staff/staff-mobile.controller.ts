@@ -1,13 +1,16 @@
 import {
-  Controller, Get, Post, Put, Body, UseGuards, Req, Res, Query, BadRequestException,
+  Controller, Get, Post, Put, Body, Param, UseGuards, Req, Res, Query,
+  BadRequestException, ForbiddenException,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
+import { createReadStream } from 'fs';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EmployeePayslipService } from '../employees/employee-payslip.service';
+import { DocumentsService } from '../documents/documents.service';
 
 const PIPELINE_STAGE_LABELS: Record<string, string> = {
   S1_INTAKE: 'Stage 1 - Intake',
@@ -82,6 +85,7 @@ export class StaffMobileController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly payslips: EmployeePayslipService,
+    private readonly documents: DocumentsService,
   ) {}
 
   /**
@@ -795,6 +799,93 @@ export class StaffMobileController {
       })),
       recordAt: '/video-cert',
     };
+  }
+
+  /**
+   * The employee record behind this login, which is where documents hang.
+   *
+   * Documents belong to an `employees` row (employee_documents.employee_id is
+   * NOT NULL), and that row only exists once HR has onboarded the candidate.
+   * Before then there is nothing to list, and saying so plainly beats an empty
+   * array that reads as "your papers are missing".
+   */
+  private async requireEmployee(req: any) {
+    const staff = await this.requireStaff(req);
+    const employee = await this.prisma.employee.findFirst({
+      where: { staffApplicantId: staff.id, deletedAt: null },
+      select: { id: true },
+    });
+    if (!employee) {
+      throw new BadRequestException(
+        'Your employment record is not set up yet, so there are no documents on file. ' +
+          'Ask HR to complete onboarding.',
+      );
+    }
+    return { staff, employee };
+  }
+
+  @Get('documents')
+  @ApiOperation({
+    summary: 'This staff member’s own documents',
+    description:
+      'The app has been calling this with nothing behind it: the request fell through ' +
+      'to the RM controller’s @Get(":id"), whose guard excludes STAFF, so a missing ' +
+      'endpoint answered "Role \'STAFF\' is not permitted to access this resource" — a ' +
+      'permissions error for something that simply did not exist. Reads the same rows ' +
+      'HR sees at /documents/employee/:employeeId, scoped to the caller.',
+  })
+  async getDocuments(@Req() req: any) {
+    const { employee } = await this.requireEmployee(req);
+    const docs = (await this.documents.findByEmployee(employee.id)) ?? [];
+    return {
+      documents: docs.map((d: any) => ({
+        id: d.id,
+        type: d.type,
+        status: d.status,
+        docNumber: d.docNumber,
+        issuedBy: d.issuedBy,
+        issueDate: d.issueDate,
+        validTill: d.validTill,
+        uploadedAt: d.createdAt,
+        // Both go back through this controller, where ownership is checked.
+        previewUrl: `/staff/documents/${d.id}/preview`,
+        downloadUrl: `/staff/documents/${d.id}/download`,
+      })),
+      total: docs.length,
+    };
+  }
+
+  /**
+   * Ownership, checked before any file is handed over. Without it the id is
+   * the only thing between one staff member and everybody else's papers.
+   */
+  private async ownDocumentOr403(req: any, documentId: string) {
+    const { employee } = await this.requireEmployee(req);
+    const doc: any = await this.documents.findOne(documentId);
+    if (doc.employeeId !== employee.id) {
+      throw new ForbiddenException('That document does not belong to you.');
+    }
+    return doc;
+  }
+
+  @Get('documents/:id/preview')
+  @ApiOperation({ summary: 'Open one of this staff member’s own documents' })
+  async previewDocument(@Req() req: any, @Param('id') id: string, @Res() res: Response) {
+    await this.ownDocumentOr403(req, id);
+    const { fullPath, mimeType, originalName } = await this.documents.getFileDetails(id);
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Disposition', `inline; filename="${originalName}"`);
+    createReadStream(fullPath).pipe(res);
+  }
+
+  @Get('documents/:id/download')
+  @ApiOperation({ summary: 'Save one of this staff member’s own documents' })
+  async downloadDocument(@Req() req: any, @Param('id') id: string, @Res() res: Response) {
+    await this.ownDocumentOr403(req, id);
+    const { fullPath, mimeType, originalName } = await this.documents.getFileDetails(id);
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${originalName}"`);
+    createReadStream(fullPath).pipe(res);
   }
 
   @Get('notifications')
