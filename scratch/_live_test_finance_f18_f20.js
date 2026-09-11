@@ -10,6 +10,7 @@
  *   node scratch/_live_test_finance_f18_f20.js
  */
 const { Client } = require('pg');
+const { createCustomer } = require('./_fixtures');
 require('dotenv').config();
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
@@ -64,21 +65,31 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
 (async () => {
   const db = new Client({ connectionString: process.env.DATABASE_URL });
   await db.connect();
-  const made = { invoiceIds: [], noteIds: [], customerId: null, seqBefore: null, cnSeqBefore: null };
+  const made = { invoiceIds: [], noteIds: [], customerId: null, seqBefore: null, cnSeqBefore: null, fixture: null };
 
   try {
     const finance = await login(FINANCE_PHONE);
     console.log('logged in as FINANCE\n');
 
     // ── build two invoices of our own to credit ─────────────────────────────
-    const cust = (await db.query(
+    // Any customer will do — this suite only needs a bill series to draw from.
+    // It used to take the oldest one and crash with "cannot read id" on a
+    // database with none, which reads like a bug in the code under test rather
+    // than a missing fixture.
+    let cust = (await db.query(
       `SELECT id, bill_no_prefix, bill_seq, credit_note_seq FROM finance_customers ORDER BY created_at LIMIT 1`,
     )).rows[0];
+    if (!cust) {
+      const fx = await createCustomer(db, 'F18');
+      made.fixture = fx;
+      cust = { id: fx.customerId, ...fx.row };
+      console.log('  (seeded a fixture customer)\n');
+    }
     made.customerId = cust.id;
     made.seqBefore = cust.bill_seq;
     made.cnSeqBefore = cust.credit_note_seq;
 
-    // salary 10000, fee 2000, GST 360 (18% of fee), total 12360 — round
+    // salary 10000, fee 2000, GST 2160 (18% of the whole 12000), total 14160 — round
     // numbers make the proportional reversal easy to read.
     const mkInvoice = async (suffix) => {
       const r = await db.query(
@@ -86,8 +97,8 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
            (id, placement_id, client_id, invoice_number, period_month, period_year,
             staff_salary_component, management_fee, gst_amount, esic_employer, pf_employer,
             total_amount, due_date, status, taxable_value, cgst_amount, sgst_amount, igst_amount)
-         VALUES (gen_random_uuid(), NULL, $1, $2, 12, 2026, 10000, 2000, 360, 0, 0,
-                 12360, CURRENT_DATE, 'SENT', 2000, 180, 180, 0)
+         VALUES (gen_random_uuid(), NULL, $1, $2, 12, 2026, 10000, 2000, 2160, 0, 0,
+                 14160, CURRENT_DATE, 'SENT', 12000, 1080, 1080, 0)
          RETURNING id, invoice_number, total_amount`,
         [cust.id, `F18TEST/${Date.now().toString().slice(-6)}/${suffix}`],
       );
@@ -111,15 +122,16 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
     check('a full credit note issues', full.status === 200 || full.status === 201, { status: full.status, body: full.body });
     const fullNote = full.body;
     check('it has its own number', /^CN\//.test(fullNote?.credit_note_number ?? ''), fullNote?.credit_note_number);
-    check('it credits the whole invoice', money(fullNote?.credit_amount) === 12360, fullNote?.credit_amount);
+    check('it credits the whole invoice', money(fullNote?.credit_amount) === 14160, fullNote?.credit_amount);
     check('it is marked a full reversal', fullNote?.is_full_reversal === true, fullNote);
 
-    // GST reverses in proportion, and only the fee ever carried tax.
+    // GST reverses in proportion to what is credited, off the taxable value
+    // the invoice actually stored — the whole consideration, not the fee.
     check('tax reverses in full too',
-      money(fullNote?.tax_reversed?.cgst) === 180 && money(fullNote?.tax_reversed?.sgst) === 180,
+      money(fullNote?.tax_reversed?.cgst) === 1080 && money(fullNote?.tax_reversed?.sgst) === 1080,
       fullNote?.tax_reversed);
-    check('taxable value reversed is the fee, not the total',
-      money(fullNote?.tax_reversed?.taxable_value) === 2000, fullNote?.tax_reversed);
+    check('taxable value reversed is the whole consideration, not the fee',
+      money(fullNote?.tax_reversed?.taxable_value) === 12000, fullNote?.tax_reversed);
 
     const storedNote = (await db.query(
       `SELECT * FROM credit_notes WHERE invoice_id = $1`, [invFull.id],
@@ -133,7 +145,7 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
       `SELECT status, credited_amount FROM client_invoices WHERE id = $1`, [invFull.id],
     )).rows[0];
     check('a full reversal moves the invoice to CREDIT_NOTE', invAfter?.status === 'CREDIT_NOTE', invAfter);
-    check('the credited amount is recorded on the invoice', money(invAfter?.credited_amount) === 12360, invAfter);
+    check('the credited amount is recorded on the invoice', money(invAfter?.credited_amount) === 14160, invAfter);
 
     const again = await req('POST', `/finance/settlements/${invFull.id}/credit-note`, {
       token: finance, body: { reason: 'second attempt' },
@@ -149,32 +161,32 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
     check('crediting more than the invoice is refused', tooMuch.status === 400, tooMuch.status);
 
     const partial = await req('POST', `/finance/settlements/${invPartial.id}/credit-note`, {
-      token: finance, body: { reason: 'One day disputed', amount: 6180 },
+      token: finance, body: { reason: 'One day disputed', amount: 7080 },
     });
     check('a partial credit issues', partial.status === 200 || partial.status === 201, partial.status);
     const pNote = partial.body;
     made.noteIds.push(pNote?.credit_note?.id);
     check('it is not a full reversal', pNote?.is_full_reversal === false, pNote);
     check('tax reverses proportionally (half)',
-      money(pNote?.tax_reversed?.cgst) === 90 && money(pNote?.tax_reversed?.sgst) === 90,
+      money(pNote?.tax_reversed?.cgst) === 540 && money(pNote?.tax_reversed?.sgst) === 540,
       pNote?.tax_reversed);
-    check('it reports what is left', money(pNote?.remaining_on_invoice) === 6180, pNote?.remaining_on_invoice);
+    check('it reports what is left', money(pNote?.remaining_on_invoice) === 7080, pNote?.remaining_on_invoice);
 
     const partialInv = (await db.query(
       `SELECT status, credited_amount FROM client_invoices WHERE id = $1`, [invPartial.id],
     )).rows[0];
     check('a partial credit leaves the invoice status alone', partialInv?.status === 'SENT', partialInv);
-    check('but records the credited amount', money(partialInv?.credited_amount) === 6180, partialInv);
+    check('but records the credited amount', money(partialInv?.credited_amount) === 7080, partialInv);
 
     const second = await req('POST', `/finance/settlements/${invPartial.id}/credit-note`, {
-      token: finance, body: { reason: 'Rest of it too', amount: 6180 },
+      token: finance, body: { reason: 'Rest of it too', amount: 7080 },
     });
     check('the balance can be credited afterwards', second.status === 200 || second.status === 201, second.status);
     made.noteIds.push(second.body?.credit_note?.id);
     const afterSecond = (await db.query(
       `SELECT credited_amount FROM client_invoices WHERE id = $1`, [invPartial.id],
     )).rows[0];
-    check('credits accumulate', money(afterSecond?.credited_amount) === 12360, afterSecond);
+    check('credits accumulate', money(afterSecond?.credited_amount) === 14160, afterSecond);
 
     const notes = await req('GET', '/finance/settlements/credit-notes', { token: finance });
     check('credit notes are listable', Array.isArray(notes.body) && notes.body.length >= 3, notes.body?.length);
@@ -242,7 +254,11 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
         await db.query(`DELETE FROM client_invoices WHERE id = ANY($1::uuid[])`, [made.invoiceIds]);
       }
       // Put both series back so the test leaves no gap in either.
-      if (made.customerId) {
+      // A customer this run invented goes back out; one that was already
+      // there only gets its series wound back.
+      if (made.fixture) {
+        await made.fixture.teardown();
+      } else if (made.customerId) {
         await db.query(
           `UPDATE finance_customers SET bill_seq = $1, credit_note_seq = $2 WHERE id = $3`,
           [made.seqBefore, made.cnSeqBefore, made.customerId],

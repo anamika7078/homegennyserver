@@ -1,5 +1,7 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { amountInWords } from '../../../common/finance/amount-in-words.util';
+import { buildServiceLines, periodRange, type ServiceLine } from '../../../common/finance/service-lines.util';
 import { assertTransition, type InvoiceStatus } from '../../../common/finance/invoice-status';
 import { NotificationsService } from '../../notifications/notifications.service';
 
@@ -201,11 +203,32 @@ export class FinanceInvoiceService {
             { description: 'GST on Management Fee',  amount: parseFloat(inv.gst_amount),             gst_applicable: false },
           ];
 
+      // Who this invoice bills.
+      //
+      // A consolidated invoice covers every staff member placed with the
+      // client, so it has no `placement_id` and the join above leaves
+      // staff_name null — which is why the document used to print "Staff: — ()"
+      // and the dialog said "0 staff" even with four line items naming a
+      // person. The line items are the authority on who is billed.
+      const billed = await this.dataSource.query<{ staff_name: string; staff_code: string }[]>(
+        `SELECT DISTINCT sa.full_name AS staff_name, sa.staff_code
+           FROM invoice_items ii
+           JOIN staff_applicants sa ON sa.id = ii.staff_id
+          WHERE ii.invoice_id = $1 AND ii.staff_id IS NOT NULL
+          ORDER BY sa.staff_code`,
+        [id],
+      );
+      const staff_name = inv.staff_name ?? (billed.length ? billed.map((b) => b.staff_name).join(', ') : undefined);
+      const staff_code = inv.staff_code ?? (billed.length === 1 ? billed[0].staff_code : undefined);
+
       const itemsTotal = Math.round(line_items.reduce((s, li) => s + li.amount, 0) * 100) / 100;
       const total = parseFloat(inv.total_amount);
 
       return {
         ...inv,
+        staff_name,
+        staff_code,
+        staff_count: billed.length || (inv.staff_name ? 1 : 0),
         line_items,
         // Surfaced rather than hidden: a legacy invoice whose stored columns
         // can't explain its total should be visible to Finance, not silently
@@ -267,37 +290,285 @@ export class FinanceInvoiceService {
     throw new NotFoundException(`Invoice or payroll record ${id} not found`);
   }
 
+  /**
+   * The supplier's own identity, as it has to appear on the document.
+   *
+   * Read fresh rather than cached: these are filled in once, by hand, and a
+   * document printed from a stale blank GSTIN would be the wrong document
+   * entirely.
+   */
+  private async supplierIdentity() {
+    const rows = await this.dataSource.query<{ key: string; value: unknown }[]>(
+      `SELECT key, value FROM system_settings WHERE key LIKE 'finance.%'`,
+    );
+    const get = (k: string): string | null => {
+      const raw = rows.find((r) => r.key === k)?.value;
+      const v = typeof raw === 'string' ? raw : raw == null ? '' : String(raw).replace(/^"|"$/g, '');
+      return v.trim() ? v.trim() : null;
+    };
+    return {
+      legalName: get('finance.supplier_legal_name') ?? 'HomeGenny',
+      gstin: get('finance.supplier_gstin'),
+      state: get('finance.supplier_state'),
+      sacCode: get('finance.sac_code'),
+      address: get('finance.supplier_address'),
+      pan: get('finance.supplier_pan'),
+      bankName: get('finance.bank_name'),
+      bankAccount: get('finance.bank_account'),
+      bankIfsc: get('finance.bank_ifsc'),
+      bankBranch: get('finance.bank_branch'),
+    };
+  }
+
+  /**
+   * The lines the client sees: one per kind of staff, all-inclusive.
+   *
+   * `invoice_items` holds the real breakdown — salary, employer ESIC, employer
+   * PF, fee — and keeps reconciling to the total, because Finance and the
+   * statutory filings read it. None of that belongs on the client's copy, so
+   * this rebuilds the lines from the payroll rows the invoice settled: how
+   * many people, how many duties, what it came to.
+   *
+   * Falls back to the stored items when an invoice has no payroll linked to it
+   * (one raised by hand, or an old per-placement invoice), because a document
+   * that renders nothing is worse than one showing the breakdown.
+   */
+  private async clientServiceLines(
+    invoiceId: string, month: number, year: number,
+  ): Promise<ServiceLine[] | null> {
+    const rows = await this.dataSource.query<{
+      staff_name: string; series: string | null; placement_type: string | null;
+      shift_days: string | null; hours_worked: string | null; hourly_rate: string | null;
+      shift_hours: string | null; amount: string | null;
+    }[]>(
+      `SELECT sa.full_name AS staff_name, sa.series::text AS series,
+              pr.placement_type, pr.shift_days, pr.hours_worked, pr.hourly_rate,
+              p.shift_hours,
+              (SELECT COALESCE(SUM(ii.amount), 0) FROM invoice_items ii
+                WHERE ii.invoice_id = $1 AND ii.staff_id = pr.staff_id) AS amount
+         FROM payroll_records pr
+         JOIN placements p ON p.id = pr.placement_id
+         JOIN staff_applicants sa ON sa.id = pr.staff_id
+        WHERE pr.client_invoice_id = $1
+        ORDER BY sa.staff_code`,
+      [invoiceId],
+    );
+    if (!rows.length) return null;
+
+    const { days } = periodRange(month, year);
+    return buildServiceLines(
+      rows.map((r) => ({
+        staff_name: r.staff_name,
+        series: r.series,
+        placement_type: r.placement_type,
+        shift_days: Number(r.shift_days ?? 0),
+        hours_worked: r.hours_worked == null ? null : Number(r.hours_worked),
+        hourly_rate: r.hourly_rate == null ? null : Number(r.hourly_rate),
+        shift_hours: r.shift_hours == null ? null : Number(r.shift_hours),
+        amount: Number(r.amount ?? 0),
+      })),
+      days,
+    );
+  }
+
+  /**
+   * The printable document a client actually receives.
+   *
+   * It carries what an Indian tax invoice is required to carry: both parties
+   * named with their GSTINs, the place of supply, the SAC for the service, the
+   * taxable value stated apart from the tax, that tax split into CGST+SGST or
+   * IGST according to where the supply lands, and the total in words as well
+   * as figures.
+   *
+   * With no supplier GSTIN on file the heading reads **Bill of Supply** and no
+   * tax is shown, because that is the correct document for an unregistered
+   * supplier. The template this replaces called every document a "Client
+   * Invoice" regardless, showed no tax breakdown at all, and printed
+   * "Staff: — ()" on every consolidated invoice. What is still missing to make
+   * this a tax invoice is now stated on the document instead of left for
+   * someone to notice.
+   */
   async generateInvoiceHtml(id: string): Promise<string> {
     const inv = await this.getInvoice(id);
+    const supplier = await this.supplierIdentity();
+
     const fmt = (n: number | string) =>
-      new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 })
-        .format(Number(n));
+      new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        .format(Number(n ?? 0));
+    const esc = (s: unknown) =>
+      String(s ?? '').replace(/[&<>"]/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 
-    const lineItems = (inv.line_items as { description: string; amount: number }[])
-      .map((li) =>
-        `<tr>
-          <td style="padding:8px;border-bottom:1px solid #e5e7eb">${li.description}</td>
-          <td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:600">${fmt(li.amount)}</td>
-        </tr>`,
-      )
-      .join('');
+    const isPayslip = inv.type === 'EMPLOYEE';
+    const row = inv as unknown as Record<string, string | number | null>;
 
-    const title = inv.type === 'EMPLOYEE' ? 'Staff Payslip' : 'Client Invoice';
+    const cgst = Number(row.cgst_amount ?? 0);
+    const sgst = Number(row.sgst_amount ?? 0);
+    const igst = Number(row.igst_amount ?? 0);
+    const totalTax = Number(row.gst_amount ?? 0);
+    // A document raised before the tax columns existed has none of them, so
+    // fall back to the total less the tax rather than printing a blank.
+    const taxable = Number(row.taxable_value ?? 0)
+      || Math.round((Number(inv.total_amount) - totalTax) * 100) / 100;
+    const sac = row.sac_code ?? supplier.sacCode;
+    const isTaxInvoice = row.document_type === 'TAX_INVOICE';
+    const title = isPayslip ? 'Staff Payslip' : isTaxInvoice ? 'Tax Invoice' : 'Bill of Supply';
+
+    // What the client is charged for, stated the way the trade states it: one
+    // line per kind of staff, strength and duties and the all-in rate. The
+    // salary/ESIC/PF/fee breakdown behind it stays on invoice_items, where
+    // Finance and the statutory filings read it, and off the client's copy.
+    const service = isPayslip ? null : await this.clientServiceLines(id, inv.period_month, inv.period_year);
+    const charges = (inv.line_items as { description: string; amount: number }[])
+      .filter((li) => !/^(CGST|SGST|IGST|GST)\b/i.test(li.description));
+
+    const lineRows = (service ?? charges.map((li) => ({ strength: 1, ...li })))
+      .map((li, i) => `
+        <tr>
+          <td class="c">${i + 1}</td>
+          <td class="c">${service ? (li as ServiceLine).strength.toFixed(2) : ''}</td>
+          <td>${esc(li.description)}</td>
+          <td class="c">${esc(sac ?? '—')}</td>
+          <td class="r">${fmt(li.amount)}</td>
+        </tr>`).join('');
+
+    const period = periodRange(inv.period_month, inv.period_year);
+    const asDate = (d: Date) => d.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
+    // Each tax line states the value it was charged on as well as the tax, so
+    // the rate can be checked against the base without doing the sum.
+    const taxLine = (label: string, amount: number) =>
+      `<tr><td>${label}</td><td class="r base">${fmt(taxable)}</td><td class="r">${fmt(amount)}</td></tr>`;
+    const taxRows = isPayslip ? '' : igst > 0
+      ? taxLine('18% IGST', igst)
+      : (cgst > 0 || sgst > 0)
+        ? taxLine('9% CGST', cgst) + taxLine('9% SGST', sgst)
+        : '';
+
+    // Say on the document what is stopping this from being a tax invoice,
+    // rather than quietly issuing a lesser one and hoping someone checks.
+    const missing: string[] = [];
+    if (!isPayslip) {
+      if (!supplier.gstin) missing.push('supplier GSTIN');
+      if (!supplier.state) missing.push('supplier state');
+      if (!sac) missing.push('SAC code');
+    }
+    const notice = missing.length
+      ? `<div class="notice"><strong>This is a Bill of Supply, not a Tax Invoice.</strong>
+           No GST has been charged, because this is not on file yet:
+           ${esc(missing.join(', '))}. Add it in Finance settings and invoices
+           raised afterwards will carry tax.</div>`
+      : '';
+
+    const bankBlock = (supplier.bankAccount || supplier.bankIfsc)
+      ? `<div class="bank"><div class="h">Bank details for payment</div>
+           <div>${esc(supplier.bankName ?? '')}${supplier.bankBranch ? ' — ' + esc(supplier.bankBranch) : ''}</div>
+           <div>A/c <strong>${esc(supplier.bankAccount ?? '—')}</strong> &nbsp;·&nbsp;
+                IFSC <strong>${esc(supplier.bankIfsc ?? '—')}</strong></div></div>`
+      : '';
 
     return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>${title} ${inv.invoice_number}</title></head>
-<body style="font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:24px;color:#0f172a">
-  <h1 style="margin:0 0 4px">HomeGenny</h1>
-  <p style="margin:0 0 24px;color:#64748b">${title}</p>
-  <p><strong>${inv.type === 'EMPLOYEE' ? 'Payslip' : 'Invoice'} #:</strong> ${inv.invoice_number}</p>
-  <p><strong>Client/Department:</strong> ${inv.client_name ?? '—'}</p>
-  <p><strong>Staff:</strong> ${inv.staff_name ?? '—'} (${inv.staff_code ?? ''})</p>
-  <p><strong>Period:</strong> ${inv.period_month}/${inv.period_year}</p>
-  <p><strong>Date:</strong> ${new Date(inv.due_date).toLocaleDateString('en-IN')}</p>
-  <p><strong>Status:</strong> ${inv.status}</p>
-  <table style="width:100%;border-collapse:collapse;margin-top:24px">${lineItems}</table>
-  <p style="margin-top:16px;font-size:18px;font-weight:700;text-align:right">Total Amount: ${fmt(inv.total_amount)}</p>
-  <p style="margin-top:32px;font-size:12px;color:#94a3b8">Generated ${new Date().toLocaleString('en-IN')}</p>
+<html><head><meta charset="utf-8"><title>${esc(title)} ${esc(inv.invoice_number)}</title>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;max-width:820px;margin:32px auto;
+       padding:32px;color:#0f172a;font-size:13px;line-height:1.5}
+  h1{margin:0;font-size:24px;letter-spacing:-.01em}
+  .doc{margin:2px 0 0;font-size:15px;font-weight:600;color:#334155;
+       text-transform:uppercase;letter-spacing:.06em}
+  .rule{height:2px;background:#0f172a;margin:16px 0 20px}
+  .parties{display:flex;gap:32px;margin-bottom:20px}
+  .parties>div{flex:1}
+  .h{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin-bottom:4px}
+  .name{font-weight:700;font-size:14px}
+  .meta{margin:0 0 20px;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden}
+  .meta div{display:flex;justify-content:space-between;padding:6px 12px;border-bottom:1px solid #f1f5f9}
+  .meta div:last-child{border-bottom:0}
+  .meta span{color:#64748b}
+  table.items{width:100%;border-collapse:collapse;margin-bottom:16px}
+  table.items th{background:#0f172a;color:#fff;font-size:10px;text-transform:uppercase;
+                 letter-spacing:.06em;padding:8px;text-align:left}
+  table.items td{padding:8px;border-bottom:1px solid #e2e8f0}
+  .r{text-align:right;font-variant-numeric:tabular-nums}
+  .c{text-align:center}
+  tr.svc td{padding:10px 8px;text-align:center;background:#f8fafc;border-bottom:1px solid #e2e8f0;font-weight:600}
+  tr.svc .range{display:inline-block;margin-top:4px;font-weight:400;color:#475569}
+  .totals{margin-left:auto;width:400px}
+  .totals .base{color:#64748b;font-weight:400;width:110px}
+  .totals table{width:100%;border-collapse:collapse}
+  .totals td{padding:5px 8px}
+  .totals tr.sum td{border-top:1px solid #cbd5e1;font-weight:600}
+  .totals tr.grand td{border-top:2px solid #0f172a;font-size:15px;font-weight:700;padding-top:8px}
+  .words{clear:both;margin:18px 0;padding:10px 12px;background:#f8fafc;border-left:3px solid #0f172a}
+  .notice{margin:16px 0;padding:10px 12px;background:#fffbeb;border-left:3px solid #d97706;color:#78350f}
+  .bank{margin-top:20px;padding:10px 12px;border:1px solid #e2e8f0;border-radius:6px}
+  .foot{margin-top:28px;padding-top:12px;border-top:1px solid #e2e8f0;
+        display:flex;justify-content:space-between;color:#94a3b8;font-size:11px}
+</style></head>
+<body>
+  <h1>${esc(supplier.legalName)}</h1>
+  <p class="doc">${esc(title)}</p>
+  <div class="rule"></div>
+
+  <div class="parties">
+    <div>
+      <div class="h">Supplier</div>
+      <div class="name">${esc(supplier.legalName)}</div>
+      ${supplier.address ? `<div>${esc(supplier.address)}</div>` : ''}
+      <div>GSTIN: ${esc(supplier.gstin ?? '—')}</div>
+      ${supplier.pan ? `<div>PAN: ${esc(supplier.pan)}</div>` : ''}
+      <div>State: ${esc(supplier.state ?? '—')}</div>
+    </div>
+    <div>
+      <div class="h">Billed to</div>
+      <div class="name">${esc(inv.client_name ?? '—')}</div>
+      ${row.client_address ? `<div>${esc(row.client_address)}</div>` : ''}
+      <div>GSTIN: ${esc(row.client_gstn ?? '—')}</div>
+      ${row.client_pan ? `<div>PAN: ${esc(row.client_pan)}</div>` : ''}
+      <div>State: ${esc(row.client_state ?? '—')}</div>
+    </div>
+  </div>
+
+  <div class="meta">
+    <div><span>${isPayslip ? 'Payslip' : 'Invoice'} no.</span><strong>${esc(inv.invoice_number)}</strong></div>
+    <div><span>Date</span><strong>${new Date(inv.due_date).toLocaleDateString('en-IN')}</strong></div>
+    <div><span>Period</span><strong>${String(inv.period_month).padStart(2, '0')}/${inv.period_year}</strong></div>
+    ${!isPayslip ? `<div><span>Place of supply</span><strong>${esc(row.place_of_supply ?? row.client_state ?? '—')}</strong></div>` : ''}
+    ${!isPayslip ? `<div><span>Staff strength</span><strong>${inv.staff_count ?? 0}</strong></div>` : ''}
+    ${inv.staff_name ? `<div><span>Staff billed</span><strong>${esc(inv.staff_name)}</strong></div>` : ''}
+    <div><span>Status</span><strong>${esc(inv.status)}</strong></div>
+  </div>
+
+  ${notice}
+
+  <table class="items">
+    <thead><tr><th style="width:36px">S.No.</th><th style="width:66px" class="c">Strength</th>
+      <th>Description of Service</th>
+      <th style="width:80px" class="c">SAC</th><th style="width:120px" class="r">Amount (₹)</th></tr></thead>
+    ${isPayslip ? '' : `<tr class="svc"><td colspan="5">
+      Service charges for domestic staff services rendered at your premises<br>
+      <span class="range">From <strong>${asDate(period.from)}</strong> To <strong>${asDate(period.to)}</strong></span>
+    </td></tr>`}
+    <tbody>${lineRows}</tbody>
+  </table>
+
+  <div class="totals"><table>
+    <tr class="sum"><td>Amount</td><td class="r base"></td><td class="r">${fmt(taxable)}</td></tr>
+    ${taxRows}
+    <tr class="grand"><td>Total</td><td class="r base"></td><td class="r">₹${fmt(inv.total_amount)}</td></tr>
+  </table></div>
+
+  <div class="words">
+    <div class="h">Total invoice value (in words)</div>
+    <strong>${esc(amountInWords(inv.total_amount).toUpperCase())}</strong>
+  </div>
+
+  ${bankBlock}
+
+  <div class="foot">
+    <span>Generated ${new Date().toLocaleString('en-IN')}</span>
+    <span>For ${esc(supplier.legalName)}</span>
+  </div>
 </body></html>`;
   }
 

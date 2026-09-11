@@ -182,7 +182,13 @@ async function main() {
         `SELECT staff_id, amount FROM invoice_items WHERE invoice_id = $1`,
         [inv.id],
       );
-      const distinctStaff = new Set(items.rows.map((r) => String(r.staff_id))).size;
+      // The tax line belongs to the invoice, not to a person, so it carries no
+      // staff_id. Counting it made this assertion depend on whether a supplier
+      // GSTIN happened to be configured: with one, every consolidated invoice
+      // gains a CGST/SGST line and two staff looked like three.
+      const distinctStaff = new Set(
+        items.rows.filter((r) => r.staff_id).map((r) => String(r.staff_id)),
+      ).size;
       check(
         'both staff appear as line items on that one invoice',
         distinctStaff === 2,

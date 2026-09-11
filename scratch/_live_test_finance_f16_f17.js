@@ -10,6 +10,7 @@
  *   node scratch/_live_test_finance_f16_f17.js
  */
 const { Client } = require('pg');
+const { ensureBillableCustomer } = require('./_fixtures');
 require('dotenv').config();
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
@@ -67,7 +68,7 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
 (async () => {
   const db = new Client({ connectionString: process.env.DATABASE_URL });
   await db.connect();
-  const made = { employeeId: null, attendanceIds: [], payrollId: null, settlementId: null, placementId: null, depositRestored: null };
+  const made = { employeeId: null, attendanceIds: [], payrollId: null, settlementId: null, placementId: null, depositRestored: null, fixture: null };
 
   try {
     const finance = await login(FINANCE_PHONE);
@@ -183,14 +184,19 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
 
     // ── F-17 · the fee matrix ───────────────────────────────────────────────
     console.log('\nF-17  The late-exit fee matrix is computed');
-    const cand = (await db.query(`
-      SELECT p.id, p.staff_id, p.staff_salary, p.confirmed_at, sa.staff_code
-      FROM placements p JOIN staff_applicants sa ON sa.id = p.staff_id
-      WHERE p.status = 'CONFIRMED' AND p.staff_salary IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM exit_settlements es WHERE es.placement_id = p.id)
-      ORDER BY p.created_at DESC LIMIT 1
-    `)).rows[0];
-    if (!cand) { console.log('  no confirmed placement available — skipping F-17'); return; }
+    const fx = await ensureBillableCustomer(db, { staffCount: 1, label: 'F17' });
+    made.fixture = fx;
+    if (fx.seeded) console.log('  (seeded a fixture customer with one placed staff)');
+    const placed = fx.placements[0];
+    const row = (await db.query(
+      `SELECT p.id, p.staff_id, p.staff_salary, p.confirmed_at, sa.staff_code
+         FROM placements p JOIN staff_applicants sa ON sa.id = p.staff_id
+        WHERE p.id = $1`, [placed.placement_id])).rows[0];
+    const priorExit = await db.query(
+      `SELECT 1 FROM exit_settlements WHERE placement_id = $1`, [placed.placement_id]);
+    check('the placement has no exit settlement yet', priorExit.rows.length === 0, placed.placement_id);
+    if (priorExit.rows.length) return;
+    const cand = row;
     made.placementId = cand.id;
     const salary = money(cand.staff_salary);
     const daily = money(salary / 30);
@@ -320,6 +326,9 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
         }
         await db.query(`DELETE FROM employees WHERE id = $1`, [made.employeeId]);
       }
+      // Whatever this run had to invent goes back out; a fixture that was
+      // already in the database is left untouched.
+      if (made.fixture) await made.fixture.teardown();
       console.log('cleanup done');
     } catch (e) {
       console.log(`cleanup problem: ${e.message}`);

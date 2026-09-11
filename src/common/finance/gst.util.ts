@@ -1,14 +1,16 @@
 import { round2 } from './statutory-calc.util';
 
 /**
- * Turning a management fee into the tax lines an Indian invoice has to show.
+ * Turning the amount a client is charged into the tax lines an Indian
+ * invoice has to show.
  *
  * Two rules drive everything here:
  *
- *  1. **GST applies only to the management fee.** Salary and employer
- *     ESIC/PF are a reimbursement, not a supply, so they are never taxable.
- *     This is the same rule `statutory-calc.util.ts` enforces; here it decides
- *     what goes in the "taxable value" box.
+ *  1. **GST applies to the whole consideration** — wages, employer ESIC and
+ *     PF, and the management fee. Manpower supply is taxed on the full
+ *     contract value; the fee-only reading needed a pure-agent relationship
+ *     that does not exist here. The caller decides the base, so a genuine
+ *     pure-agent reimbursement can still be left out by passing less.
  *  2. **Same state → CGST + SGST, different state → IGST.** The comparison is
  *     between the supplier's state and the place of supply.
  *
@@ -55,14 +57,29 @@ export function isValidGstin(gstin: string | null | undefined): boolean {
   return /^\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}Z[A-Z\d]{1}$/.test(gstin.trim().toUpperCase());
 }
 
+/**
+ * GST on a supply of manpower.
+ *
+ * `taxableValue` is the whole consideration — wages, employer ESIC and PF, and
+ * the management fee — not the fee alone. This used to take the fee only, on
+ * the reading that the wages pass through as a pure agent under Rule 33. That
+ * reading is hard to sustain for manpower supply, where the agency contracts
+ * to provide the service and the worker is its own employee; the industry
+ * bills the full amount, and so does every invoice HomeGenny is measured
+ * against. Charging on the fee alone under-collects GST, and the shortfall is
+ * the supplier's to make good.
+ *
+ * The caller decides what goes into the base, so a genuine pure-agent
+ * reimbursement could still be excluded by passing a smaller figure.
+ */
 export function computeGst(args: {
-  managementFee: number;
+  taxableValue: number;
   gstRatePct: number;
   supplier: SupplierTaxIdentity;
   recipientGstin: string | null;
   recipientState: string | null;
 }): GstBreakdown {
-  const { managementFee, gstRatePct, supplier, recipientState } = args;
+  const { taxableValue: rawTaxable, gstRatePct, supplier, recipientState } = args;
   const missing: string[] = [];
 
   // Place of supply for a service to a registered business is the recipient's
@@ -74,7 +91,7 @@ export function computeGst(args: {
   if (!supplier.sacCode?.trim()) missing.push('SAC code');
   if (!isValidGstin(supplier.gstin)) missing.push('supplier GSTIN');
 
-  const taxableValue = round2(managementFee);
+  const taxableValue = round2(rawTaxable);
 
   // No GSTIN means no tax can be charged, and the document is a Bill of
   // Supply. Charging GST without being registered to collect it would be

@@ -4,6 +4,7 @@
  *   node scratch/_live_test_employee_profile.js
  */
 const { Client } = require('pg');
+const { ensurePlacementFor } = require('./_fixtures');
 require('dotenv').config();
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
@@ -118,6 +119,12 @@ async function req(method, path, { token, body, raw } = {}) {
   const branchId = (
     await db.query('SELECT branch_id FROM staff_applicants WHERE id = $1', [target.id])
   ).rows[0].branch_id;
+  // A day belongs to a client, not just to a person, so the attendance this
+  // suite records needs a placement to belong to — a freshly onboarded
+  // candidate has none.
+  const placement = await ensurePlacementFor(db, target.id, "EmpProf");
+  if (placement.seeded) console.log("        (placed the candidate so attendance has a client)");
+
   let incidentId = null;
 
   async function cleanup() {
@@ -145,6 +152,7 @@ async function req(method, path, { token, body, raw } = {}) {
       employeeId,
     ]);
     await db.query('DELETE FROM employees WHERE id = $1', [employeeId]);
+    await placement.teardown();
   }
 
   try {
@@ -155,8 +163,9 @@ async function req(method, path, { token, body, raw } = {}) {
       [target.id],
     );
     if (!profPlacement.rowCount) {
-      console.log('candidate has no confirmed placement — aborting');
-      process.exit(1);
+      throw new Error(
+        'the candidate has no confirmed placement, so attendance has nowhere to belong'
+      );
     }
     const profPlacementId = profPlacement.rows[0].id;
 

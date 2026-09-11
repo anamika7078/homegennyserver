@@ -2,8 +2,10 @@
  * Single source of truth for the statutory calculations documented in
  * "HomeGenny Platform v1.0 — EOR Payroll Rules (Hardcoded)":
  *
- *   GST   — 18%, applied ONLY to the management fee. Never to salary,
- *           employer ESIC, employer PF, or any other component.
+ *   GST   — 18%, applied to the whole consideration charged to the client:
+ *           wages + employer ESIC + employer PF + management fee. It used to
+ *           be charged on the fee alone; see calculateGstOnClientCharge below
+ *           for why that reading was dropped.
  *   ESIC  — Employee 0.75%, Employer 3.25% of gross salary, ONLY when
  *           gross salary <= ₹21,000/month.
  *   Net   — Gross − employee ESIC − employee PF. No other deductions.
@@ -11,7 +13,7 @@
  * This is the baseline the 2026-08-10 audit verified as spec-correct
  * (originally in payroll.service.ts) — payroll.service.ts now delegates to
  * these functions instead of holding its own copy, and commercial.service.ts
- * uses calculateGstOnFee/calculateEsic/calculateNetSalary to fix the same
+ * uses calculateGstOnClientCharge/calculateEsic/calculateNetSalary to fix the same
  * three bugs the audit found there.
  *
  * PF is deliberately NOT fully centralized here beyond calculatePfFlat().
@@ -40,9 +42,22 @@ export function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
-/** GST applies ONLY to the management fee — never to salary or statutory contributions. */
-export function calculateGstOnFee(managementFee: number, gstPct: number = GST_RATE_DEFAULT): number {
-  return round2(managementFee * (gstPct / 100));
+/**
+ * GST on the whole consideration a client is charged — wages, employer ESIC
+ * and PF, and the management fee.
+ *
+ * Manpower supply is taxed on the full contract value. Treating the wages as a
+ * pure-agent reimbursement under Rule 33 needs the client to be contractually
+ * liable to the worker directly, which is not how these placements work: the
+ * worker is HomeGenny's employee and HomeGenny contracts to supply the
+ * service. Charging on the fee alone under-collects, and the difference comes
+ * out of the supplier's pocket, not the client's.
+ */
+export function calculateGstOnClientCharge(
+  taxableValue: number,
+  gstPct: number = GST_RATE_DEFAULT,
+): number {
+  return round2(taxableValue * (gstPct / 100));
 }
 
 export interface EsicResult {
@@ -97,13 +112,3 @@ export function calculateNetSalary(gross: number, esicEmployee: number, pfEmploy
   return round2(gross - esicEmployee - pfEmployee);
 }
 
-/** Client Total = Gross + employer ESIC + employer PF + Management fee + GST(on fee). */
-export function calculateClientTotal(
-  gross: number,
-  esicEmployer: number,
-  pfEmployer: number,
-  managementFee: number,
-  gst: number,
-): number {
-  return round2(gross + esicEmployer + pfEmployer + managementFee + gst);
-}

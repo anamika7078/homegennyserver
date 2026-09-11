@@ -13,6 +13,7 @@
  *   node scratch/_live_test_finance_f13_f14_f15.js
  */
 const { Client } = require('pg');
+const { ensureBillableCustomer, withSupplierRegistered } = require('./_fixtures');
 require('dotenv').config();
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
@@ -71,7 +72,12 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
 (async () => {
   const db = new Client({ connectionString: process.env.DATABASE_URL });
   await db.connect();
-  const made = { attendanceIds: [], payrollIds: [], invoiceId: null, customerId: null, seqBefore: null };
+  const made = {
+    attendanceIds: [], payrollIds: [], invoiceId: null, customerId: null, seqBefore: null,
+    // Set only when this run had to build its own customer and placements,
+    // or lend the supplier a registration it does not really have.
+    fixture: null, restoreSupplier: null,
+  };
 
   try {
     const finance = await login(FINANCE_PHONE);
@@ -107,26 +113,13 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
     check('re-generating does not duplicate the filing', esicAgain.rows[0].n === 1, esicAgain.rows[0]);
 
     // ── set up two staff with the same customer ─────────────────────────────
-    const cands = await db.query(`
-      SELECT p.id AS placement_id, p.staff_id, p.client_id, sa.staff_code, sa.branch_id,
-             fc.customer_name, fc.bill_no_prefix, fc.bill_seq, fc.gstn, fc.state
-      FROM placements p
-      JOIN staff_applicants sa ON sa.id = p.staff_id
-      JOIN finance_customers fc ON fc.id = p.client_id
-      WHERE p.status = 'CONFIRMED'
-        AND p.staff_salary IS NOT NULL AND p.management_fee IS NOT NULL
-        AND p.client_id = (
-          SELECT p2.client_id FROM placements p2
-          WHERE p2.status = 'CONFIRMED' AND p2.staff_salary IS NOT NULL
-          GROUP BY p2.client_id HAVING COUNT(DISTINCT p2.staff_id) >= 2 LIMIT 1
-        )
-      ORDER BY sa.staff_code
-    `);
-    if (cands.rows.length < 2) {
-      console.log('\n  need one customer with two confirmed placements — skipping F-14/F-15');
-      return;
-    }
-    const targets = cands.rows.slice(0, 2);
+    const fx = await ensureBillableCustomer(db, { staffCount: 2, label: 'F15' });
+    made.fixture = fx;
+    if (fx.seeded) console.log('\n  (seeded a fixture customer with two placed staff)');
+    const cust = (await db.query(
+      `SELECT customer_name, bill_no_prefix, bill_seq, gstn, state
+         FROM finance_customers WHERE id = $1`, [fx.customerId])).rows[0];
+    const targets = fx.placements.map((p) => ({ ...p, ...cust }));
     made.customerId = targets[0].client_id;
     made.seqBefore = targets[0].bill_seq;
     console.log(`\nusing ${targets[0].customer_name} with ${targets.length} staff\n`);
@@ -186,14 +179,25 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
     check('and the salary line shows its working',
       (p?.line_items ?? []).some((li) => /Staff Salary \(\d+ of \d+ days\)/.test(li.description)),
       p?.line_items?.slice(0, 1));
-    check('only the management fee is taxable',
-      (p?.line_items ?? []).filter((li) => li.is_taxable).every((li) => /Management Fee/.test(li.description)),
-      (p?.line_items ?? []).filter((li) => li.is_taxable).map((li) => li.description));
+    // GST is charged on the whole consideration now, not on the agency's
+    // margin, so every line an invoice carries is taxable — salary, employer
+    // ESIC and PF, and the fee alike. See gst.util.ts for why the fee-only
+    // reading was dropped.
+    // The tax line itself is not part of its own base, so it is excluded by
+    // staff_name — every line attributed to a person is a charge line.
+    const chargeLines = (p?.line_items ?? []).filter((li) => li.staff_name);
+    check('every charge line is taxable',
+      chargeLines.length > 0 && chargeLines.every((li) => li.is_taxable === true),
+      chargeLines.filter((li) => !li.is_taxable).map((li) => li.description));
+    check('the salary line is taxable too, not just the fee',
+      chargeLines.some((li) => /Staff Salary/.test(li.description) && li.is_taxable),
+      chargeLines.map((li) => [li.description, li.is_taxable]));
 
     const t = p?.totals ?? {};
     const sumParts = money(t.staff_salary + t.employer_esic + t.employer_pf + t.management_fee + t.gst_total);
     check('totals add up to the invoice total', Math.abs(sumParts - money(t.total)) <= 0.02, { sumParts, total: t.total });
-    check('taxable value is the management fee only', money(t.taxable_value) === money(t.management_fee), t);
+    const wholeConsideration = money(t.staff_salary + t.employer_esic + t.employer_pf + t.management_fee);
+    check('taxable value is the whole consideration', money(t.taxable_value) === wholeConsideration, t);
 
     // ── F-14 · tax fields ───────────────────────────────────────────────────
     console.log('\nF-14  Tax fields, and an honest document type');
@@ -210,6 +214,62 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
       check('GST is split into CGST+SGST or IGST',
         (money(t.cgst) + money(t.sgst) > 0) !== (money(t.igst) > 0), t);
     }
+
+
+    // ── F-14 · the tax actually charged, on the whole consideration ─────────
+    // The checks above run against an unregistered supplier, where the answer
+    // is always zero — so they never exercise the arithmetic. Register the
+    // supplier for the length of these checks (restored in cleanup) and look
+    // at the numbers a real tax invoice would carry.
+    console.log('\nF-14  GST on the whole consideration, not the management fee');
+    const setSupplier = async (state) => {
+      // Keep only the first restore — it holds the genuinely original values.
+      const restore = await withSupplierRegistered(db, { state });
+      if (!made.restoreSupplier) made.restoreSupplier = restore;
+    };
+    const previewNow = async () => (await req('GET',
+      `/finance/invoices/consolidated/preview?customerId=${made.customerId}&month=${TEST_MONTH}&year=${TEST_YEAR}`,
+      { token: finance })).body;
+
+    // Supplier in Delhi, customer in Delhi — intra-state, so CGST + SGST.
+    await setSupplier('Delhi');
+    const intra = await previewNow();
+    const ti = intra?.totals ?? {};
+    check('a registered supplier issues a Tax Invoice', intra?.document_type === 'TAX_INVOICE', intra?.document_type);
+    check('nothing is reported missing', (intra?.missing_for_tax_invoice ?? []).length === 0, intra?.missing_for_tax_invoice);
+
+    const base = money(ti.staff_salary + ti.employer_esic + ti.employer_pf + ti.management_fee);
+    check('the taxable value is still the whole consideration', money(ti.taxable_value) === base,
+      { taxable_value: ti.taxable_value, base });
+    check('GST is 18% of the whole consideration', money(ti.gst_total) === money(base * 0.18),
+      { gst_total: ti.gst_total, expected: money(base * 0.18), base });
+    // The number this replaces: 18% of the fee alone. If these ever coincide
+    // the fixture has no salary in it and the check proves nothing.
+    check('and is visibly more than 18% of the fee alone',
+      money(ti.gst_total) > money(ti.management_fee * 0.18),
+      { gst_total: ti.gst_total, fee_only: money(ti.management_fee * 0.18) });
+    check('intra-state splits into CGST + SGST with no IGST',
+      money(ti.cgst) + money(ti.sgst) === money(ti.gst_total) && money(ti.igst) === 0, ti);
+    check('the two halves are equal to the paisa',
+      Math.abs(money(ti.cgst) - money(ti.sgst)) <= 0.01, { cgst: ti.cgst, sgst: ti.sgst });
+    check('the invoice total is the consideration plus its tax',
+      money(ti.total) === money(base + money(ti.gst_total)), { total: ti.total, base, gst: ti.gst_total });
+
+    // Supplier in Haryana, customer in Delhi — inter-state, so IGST.
+    await setSupplier('Haryana');
+    const inter = await previewNow();
+    const te = inter?.totals ?? {};
+    check('inter-state charges IGST and no CGST/SGST',
+      money(te.igst) === money(te.gst_total) && money(te.cgst) === 0 && money(te.sgst) === 0, te);
+    check('inter-state tax is the same total as intra-state',
+      money(te.gst_total) === money(ti.gst_total), { inter: te.gst_total, intra: ti.gst_total });
+    check('the tax line names the tax charged',
+      (inter?.line_items ?? []).some((li) => /IGST @ 18%/.test(li.description)),
+      (inter?.line_items ?? []).map((li) => li.description).slice(-2));
+
+    // Put the supplier back to unregistered for the checks that follow.
+    await made.restoreSupplier();
+    made.restoreSupplier = null;
 
     check('the next number comes from the customer series',
       String(p?.next_invoice_number ?? '').startsWith(targets[0].bill_no_prefix.replace(/\/+$/, '')),
@@ -228,7 +288,7 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
     check('it belongs to no single placement', row?.placement_id === null, row?.placement_id);
     check('it starts as DRAFT', row?.status === 'DRAFT', row?.status);
     check('document type is stored', ['TAX_INVOICE', 'BILL_OF_SUPPLY'].includes(row?.document_type), row?.document_type);
-    check('taxable value is stored', money(row?.taxable_value) === money(t.management_fee), row?.taxable_value);
+    check('taxable value is stored', money(row?.taxable_value) === wholeConsideration, row?.taxable_value);
     check('the invoice number matches what was previewed', row?.invoice_number === p?.next_invoice_number, {
       got: row?.invoice_number, previewed: p?.next_invoice_number,
     });
@@ -312,6 +372,12 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
       if (made.customerId && made.seqBefore !== null) {
         await db.query(`UPDATE finance_customers SET bill_seq = $1 WHERE id = $2`, [made.seqBefore, made.customerId]);
       }
+      // If the run died between registering the supplier and putting it back,
+      // the database would be left claiming a GSTIN HomeGenny does not have.
+      if (made.restoreSupplier) await made.restoreSupplier();
+      // Whatever this run had to invent goes back out; a fixture that was
+      // already in the database is left untouched.
+      if (made.fixture) await made.fixture.teardown();
       await db.query(`DELETE FROM esic_reports WHERE month = 8 AND year = 2026`);
       await db.query(`DELETE FROM pf_reports WHERE month = 8 AND year = 2026`);
       console.log('cleanup done');

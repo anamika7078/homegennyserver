@@ -5,7 +5,10 @@
  *   node scratch/_live_test_hr_pipeline.js
  */
 const { Client } = require('pg');
+const { ensurePlacementFor } = require('./_fixtures');
 require('dotenv').config();
+
+const NL = String.fromCharCode(10);
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
 const HR_PHONE = '9800000008';
@@ -63,8 +66,48 @@ async function req(method, path, { token, body } = {}) {
   return { status: res.status, body: payload, raw: json };
 }
 
+/**
+ * What this run has to undo, tracked outside the run itself.
+ *
+ * Onboarding a candidate creates their employee record, and while that record
+ * exists the candidate no longer appears in pending-onboarding. So a run that
+ * failed halfway used to consume one of the few S5 candidates permanently:
+ * cleanup sat at the end of the happy path, and a thrown assertion jumped
+ * straight past it to the catch at the bottom of the file. After enough failed
+ * runs there was nobody left to onboard, and the suite then failed on its very
+ * first check — which reads like a broken endpoint rather than an empty pool.
+ * Cleanup now runs either way.
+ */
+const state = { db: null, employeeId: null, target: null, DATE: null, GUARD_DATE: null, placement: null };
+
+async function cleanup() {
+  const { db, employeeId, target, DATE, GUARD_DATE, placement } = state;
+  if (!db) return;
+  console.log(NL + 'cleaning up test rows...');
+  try {
+    if (employeeId) {
+      await db.query('DELETE FROM attendance WHERE employee_id = $1', [employeeId]);
+      await db.query(`DELETE FROM audit_logs WHERE entity_id = $1 AND entity_type = 'employee'`, [employeeId]);
+      // pipeline_events is append-only at the database level (a trigger rejects
+      // DELETE), so the EMPLOYEE_ONBOARDED row from this run stays. That is the
+      // intended design, and step [3] proves a repeat run is refused anyway —
+      // so clear the FK link instead, which is what lets the candidate be reused.
+      await db.query('DELETE FROM employees WHERE id = $1', [employeeId]);
+    }
+    if (target && target.id) {
+      await db.query('DELETE FROM staff_daily_attendance WHERE staff_id = $1 AND attendance_date IN ($2, $3)', [target.id, DATE, GUARD_DATE]);
+      await db.query('DELETE FROM shift_logs WHERE staff_id = $1 AND shift_date = $2', [target.id, GUARD_DATE]);
+    }
+    if (placement) await placement.teardown();
+    console.log('done');
+  } catch (e) {
+    console.log(`cleanup problem: ${e.message}`);
+  }
+}
+
 (async () => {
   const db = new Client({ connectionString: process.env.DATABASE_URL });
+  state.db = db;
   await db.connect();
 
   // ── login ────────────────────────────────────────────────────────────────
@@ -98,7 +141,22 @@ async function req(method, path, { token, body } = {}) {
     count: items.length,
   });
   const target = items.find((i) => i.staffCode === 'retest001') || items[0];
+  state.target = target;
   console.log(`      target: ${target?.staffCode} (${target?.fullName})`);
+  if (!target) {
+    console.log([
+      '',
+      '  No S5 candidate is free to onboard — every one of them already has an',
+      '  employee record. That usually means an earlier run failed before it',
+      '  could clean up. Free them with:',
+      '    node scratch/_free_onboarding_candidates.js',
+      '  or seed a new candidate with:',
+      '    node scratch/_seed_staff_s4.js --name <Name> --deploy',
+    ].join(NL));
+    await cleanup();
+    await db.end();
+    process.exit(1);
+  }
 
   const dbBefore = await db.query(
     'SELECT user_id FROM staff_applicants WHERE id = $1',
@@ -153,6 +211,7 @@ async function req(method, path, { token, body } = {}) {
     check('no monthly salary invented where none exists', sal?.employee_salary === 0, sal);
   }
   const employeeId = onboard.body?.employee?.id;
+  state.employeeId = employeeId;
   check('employee created with a generated code', Boolean(onboard.body?.employee?.employeeId), {
     code: onboard.body?.employee?.employeeId,
   });
@@ -226,9 +285,17 @@ async function req(method, path, { token, body } = {}) {
     console.log('      (no non-S5 candidate in this database — skipped)');
   }
 
+  // Attendance only mirrors into staff_daily_attendance against a placement,
+  // and the mirror stays silent rather than throwing when there is none — so
+  // an unplaced candidate makes every assertion below fail as though the
+  // mirror were broken. Place them first.
+  state.placement = await ensurePlacementFor(db, target.id, "HRPipe");
+  if (state.placement.seeded) console.log("      (placed the candidate so attendance can mirror)");
+
   // ── 5. HR marks attendance on the staff member behalf ────────────────────
   console.log('\n[5] POST /attendance/mark (HR marking for a pipeline employee)');
   const DATE = '2026-08-11';
+  state.DATE = DATE;
   // A staff member can work several houses in a day, so a bare "Present" no
   // longer says where — and the day decides whose invoice carries it. Name the
   // house whenever there is a choice; the API refuses rather than guessing.
@@ -294,6 +361,7 @@ async function req(method, path, { token, body } = {}) {
   // ── 7. a live self-check-in is protected ─────────────────────────────────
   console.log('\n[7] HR cannot silently overwrite the staff member own GPS check-in');
   const GUARD_DATE = '2026-08-12';
+  state.GUARD_DATE = GUARD_DATE;
   await db.query(
     `INSERT INTO shift_logs (id, staff_id, shift_date, check_in_at, status, created_at, updated_at)
      VALUES (gen_random_uuid(), $1, $2, now(), 'APPROVED', now(), now())
@@ -382,25 +450,14 @@ async function req(method, path, { token, body } = {}) {
   );
   check('audit_logs has the employee entry', al.rows.length >= 1, al.rows);
 
-  // ── cleanup ──────────────────────────────────────────────────────────────
-  console.log('\ncleaning up test rows...');
-  await db.query('DELETE FROM attendance WHERE employee_id = $1', [employeeId]);
-  await db.query('DELETE FROM staff_daily_attendance WHERE staff_id = $1 AND attendance_date IN ($2, $3)', [
-    target.id, DATE, GUARD_DATE,
-  ]);
-  await db.query('DELETE FROM shift_logs WHERE staff_id = $1 AND shift_date = $2', [target.id, GUARD_DATE]);
-  // pipeline_events is append-only at the database level (a trigger rejects
-  // DELETE), so the EMPLOYEE_ONBOARDED row from this run stays. That is the
-  // intended design, and step [3] proves a repeat run is refused anyway — so
-  // clear the FK link instead, which is what lets the candidate be reused.
-  await db.query(`DELETE FROM audit_logs WHERE entity_id = $1 AND entity_type = 'employee'`, [employeeId]);
-  await db.query('DELETE FROM employees WHERE id = $1', [employeeId]);
-  console.log('done');
+  await cleanup();
 
   console.log(`\n===== ${pass} passed, ${fail} failed =====`);
   await db.end();
   process.exit(fail ? 1 : 0);
-})().catch((e) => {
+})().catch(async (e) => {
   console.error(e);
+  // A failed run must still give its candidate back.
+  await cleanup();
   process.exit(1);
 });

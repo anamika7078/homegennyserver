@@ -137,18 +137,26 @@ export class ConsolidatedInvoiceService {
       salaryTotal += salary; esicTotal += esic; pfTotal += pf; feeTotal += fee;
 
       const base = { staff_id: l.staff_id, staff_name: l.staff_name, placement_id: l.placement_id };
+      // Every line is taxable now. Marking the wage lines exempt was the old
+      // pure-agent reading, and it would leave the document's own tax
+      // breakdown disagreeing with the tax actually charged.
       items.push({
         ...base,
         description: `${l.staff_name} — Staff Salary (${this.workingFor(l, month, year)})`,
-        amount: salary, is_taxable: false, sort_order: order++,
+        amount: salary, is_taxable: true, sort_order: order++,
       });
-      if (esic > 0) items.push({ ...base, description: `${l.staff_name} — Employer ESIC`, amount: esic, is_taxable: false, sort_order: order++ });
-      if (pf > 0) items.push({ ...base, description: `${l.staff_name} — Employer PF`, amount: pf, is_taxable: false, sort_order: order++ });
+      if (esic > 0) items.push({ ...base, description: `${l.staff_name} — Employer ESIC`, amount: esic, is_taxable: true, sort_order: order++ });
+      if (pf > 0) items.push({ ...base, description: `${l.staff_name} — Employer PF`, amount: pf, is_taxable: true, sort_order: order++ });
       items.push({ ...base, description: `${l.staff_name} — Management Fee`, amount: fee, is_taxable: true, sort_order: order++ });
     }
 
+    // The whole consideration is taxable — wages, employer ESIC and PF, and
+    // the fee. Manpower supply is not a pure-agent reimbursement, so charging
+    // on the fee alone under-collects the tax. See computeGst.
+    const taxableValue = round2(salaryTotal + esicTotal + pfTotal + feeTotal);
+
     const gst = computeGst({
-      managementFee: round2(feeTotal),
+      taxableValue,
       gstRatePct: GST_RATE_DEFAULT,
       supplier,
       recipientGstin: cust.gstn,
@@ -159,8 +167,8 @@ export class ConsolidatedInvoiceService {
       items.push({
         staff_id: '', staff_name: '', placement_id: '',
         description: gst.isInterState
-          ? `IGST @ ${GST_RATE_DEFAULT}% on management fee`
-          : `CGST @ ${GST_RATE_DEFAULT / 2}% + SGST @ ${GST_RATE_DEFAULT / 2}% on management fee`,
+          ? `IGST @ ${GST_RATE_DEFAULT}%`
+          : `CGST @ ${GST_RATE_DEFAULT / 2}% + SGST @ ${GST_RATE_DEFAULT / 2}%`,
         amount: gst.totalTax, is_taxable: false, sort_order: order++,
       });
     }

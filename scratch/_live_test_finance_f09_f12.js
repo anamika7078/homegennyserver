@@ -15,6 +15,7 @@
  *   node scratch/_live_test_finance_f09_f12.js
  */
 const { Client } = require('pg');
+const { ensureBillableCustomer } = require('./_fixtures');
 require('dotenv').config();
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
@@ -77,31 +78,29 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
 (async () => {
   const db = new Client({ connectionString: process.env.DATABASE_URL });
   await db.connect();
-  const made = { attendanceIds: [], invoiceId: null, payrollId: null, staffId: null, bankAccount: false };
+  const made = { attendanceIds: [], invoiceId: null, payrollId: null, staffId: null, bankAccount: false, fixture: null };
 
   try {
     const finance = await login(FINANCE_PHONE);
     console.log('logged in as FINANCE\n');
 
-    const cand = await db.query(`
-      SELECT p.id AS placement_id, p.staff_id, p.client_id,
-             sa.staff_code, sa.full_name, sa.branch_id, fc.customer_name
-      FROM placements p
-      JOIN staff_applicants sa ON sa.id = p.staff_id
-      JOIN finance_customers fc ON fc.id = p.client_id
-      WHERE p.status = 'CONFIRMED'
-        AND p.staff_salary IS NOT NULL AND p.management_fee IS NOT NULL
-        -- Both shapes of invoice. Checking only placement_id missed every
-        -- consolidated one (that column is null on them), so a client already
-        -- billed for the period still looked free and the raise below failed.
-        AND NOT EXISTS (SELECT 1 FROM client_invoices ci
-                         WHERE ci.period_month = $1 AND ci.period_year = $2
-                           AND ci.status <> 'CANCELLED'
-                           AND (ci.placement_id = p.id OR ci.client_id = p.client_id))
-      ORDER BY p.created_at DESC LIMIT 1
-    `, [TEST_MONTH, TEST_YEAR]);
-    if (!cand.rows.length) { console.log('no billable placement available'); process.exitCode = 1; return; }
-    const target = cand.rows[0];
+    const fx = await ensureBillableCustomer(db, { staffCount: 1, label: 'F09' });
+    made.fixture = fx;
+    if (fx.seeded) console.log('  (seeded a fixture customer with one placed staff)');
+    const target = fx.placements[0];
+
+    // Both shapes of invoice. Checking only placement_id missed every
+    // consolidated one (that column is null on them), so a client already
+    // billed for the period still looked free and the raise below failed.
+    const billed = await db.query(
+      `SELECT 1 FROM client_invoices ci
+        WHERE ci.period_month = $1 AND ci.period_year = $2
+          AND ci.status <> 'CANCELLED'
+          AND (ci.placement_id = $3 OR ci.client_id = $4)`,
+      [TEST_MONTH, TEST_YEAR, target.placement_id, target.client_id]);
+    check('the client is not already billed for the test period', billed.rows.length === 0, target.client_id);
+    if (billed.rows.length) return;
+
     made.staffId = target.staff_id;
     console.log(`using ${target.staff_code} → ${target.customer_name}\n`);
 
@@ -266,6 +265,9 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
       if (made.attendanceIds.length) {
         await db.query(`DELETE FROM staff_daily_attendance WHERE id = ANY($1::uuid[])`, [made.attendanceIds]);
       }
+      // Whatever this run had to invent goes back out; a fixture that was
+      // already in the database is left untouched.
+      if (made.fixture) await made.fixture.teardown();
       console.log('cleanup done');
     } catch (e) {
       console.log(`cleanup problem: ${e.message}`);

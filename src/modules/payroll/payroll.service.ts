@@ -2,11 +2,10 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 import {
-  calculateGstOnFee,
+  calculateGstOnClientCharge,
   calculateEsic,
   calculatePfFlat,
   calculateNetSalary,
-  calculateClientTotal,
   round2,
   GST_RATE_DEFAULT,
   ESIC_EMPLOYEE_RATE_DEFAULT,
@@ -216,8 +215,12 @@ export class PayrollService {
     const esic = calculateEsic(grossSalary, rates?.employee_esic_pct, rates?.employer_esic_pct);
     const pf = calculatePfFlat(pfBase ?? grossSalary, rates?.employee_pf_pct, rates?.employer_pf_pct, rates?.employer_pf_max);
     const netSalary = calculateNetSalary(grossSalary, esic.employee, pf.employee);
-    const gstOnFee = calculateGstOnFee(managementFee, rates?.gst_pct);
-    const clientTotalCharge = calculateClientTotal(grossSalary, esic.employer, pf.employer, managementFee, gstOnFee);
+    // GST is on the whole consideration, not the fee — see
+    // calculateGstOnClientCharge. `gstOnFee` keeps its name so the field the
+    // apps read does not move under them; what it holds is the full tax.
+    const taxableValue = round2(grossSalary + esic.employer + pf.employer + managementFee);
+    const gstOnFee = calculateGstOnClientCharge(taxableValue, rates?.gst_pct);
+    const clientTotalCharge = round2(taxableValue + gstOnFee);
 
     return {
       grossSalary,
@@ -263,8 +266,9 @@ export class PayrollService {
     const pf = calculatePfFlat(grossSalary);
     const netSalary = calculateNetSalary(grossSalary, esic.employee, pf.employee);
     const managementFee = round2(grossSalary * (managementFeePercent / 100));
-    const gstOnFee = calculateGstOnFee(managementFee);
-    const clientTotalCharge = calculateClientTotal(grossSalary, esic.employer, pf.employer, managementFee, gstOnFee);
+    const taxableValue = round2(grossSalary + esic.employer + pf.employer + managementFee);
+    const gstOnFee = calculateGstOnClientCharge(taxableValue);
+    const clientTotalCharge = round2(taxableValue + gstOnFee);
 
     return {
       grossSalary, esicEmployee: esic.employee, esicEmployer: esic.employer,

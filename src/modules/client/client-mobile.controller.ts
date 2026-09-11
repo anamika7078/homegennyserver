@@ -12,6 +12,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { IncidentsService } from '../incidents/incidents.service';
 import { FinanceInvoiceService } from '../finance/invoice/invoice.service';
 import { CLIENT_VISIBLE_INVOICE_STATUSES } from '../../common/finance/invoice-status';
+import { buildServiceLines, periodRange } from '../../common/finance/service-lines.util';
 
 /**
  * Same series-based required-track logic used in staff-mobile.controller.ts, so a
@@ -588,38 +589,76 @@ export class ClientMobileController {
     // to this customer, so one client can never read another's bill.
     const invoice = await this.resolveOwnInvoice(req, id);
 
-    const items = await this.prisma.$queryRaw<any[]>`
-      SELECT description, amount, is_taxable, staff_name, sac_code
-        FROM invoice_items WHERE invoice_id = ${invoice.id}::uuid
-       ORDER BY sort_order NULLS LAST, created_at`;
+    // What the client is charged for, one line per kind of staff — strength,
+    // duties, the all-in rate. The salary / employer ESIC / employer PF /
+    // management fee split behind it is how HomeGenny builds the rate, not
+    // something the client contracted for, and it used to be sent here in
+    // full. It stays on invoice_items, where Finance and the statutory
+    // filings read it.
+    const billed = await this.prisma.$queryRaw<any[]>`
+      SELECT sa.full_name AS staff_name, sa.series::text AS series,
+             pr.placement_type, pr.shift_days, pr.hours_worked, pr.hourly_rate,
+             p.shift_hours,
+             (SELECT COALESCE(SUM(ii.amount), 0) FROM invoice_items ii
+               WHERE ii.invoice_id = ${invoice.id}::uuid AND ii.staff_id = pr.staff_id) AS amount
+        FROM payroll_records pr
+        JOIN placements p ON p.id = pr.placement_id
+        JOIN staff_applicants sa ON sa.id = pr.staff_id
+       WHERE pr.client_invoice_id = ${invoice.id}::uuid
+       ORDER BY sa.staff_code`;
+
+    const period = periodRange(invoice.periodMonth, invoice.periodYear);
+    const serviceLines = buildServiceLines(
+      billed.map((r) => ({
+        staff_name: r.staff_name,
+        series: r.series,
+        placement_type: r.placement_type,
+        shift_days: Number(r.shift_days ?? 0),
+        hours_worked: r.hours_worked == null ? null : Number(r.hours_worked),
+        hourly_rate: r.hourly_rate == null ? null : Number(r.hourly_rate),
+        shift_hours: r.shift_hours == null ? null : Number(r.shift_hours),
+        amount: Number(r.amount ?? 0),
+      })),
+      period.days,
+    );
 
     const paid = await this.prisma.$queryRaw<{ total: string }[]>`
       SELECT COALESCE(SUM(amount), 0)::text AS total
         FROM invoice_payments WHERE invoice_id = ${invoice.id}::uuid AND status = 'SUCCESS'`;
     const paidTotal = Number(paid[0]?.total ?? 0);
 
+    const cgst = Number((invoice as any).cgstAmount ?? 0);
+    const sgst = Number((invoice as any).sgstAmount ?? 0);
+    const igst = Number((invoice as any).igstAmount ?? 0);
+    const totalAmount = Number(invoice.totalAmount);
+    const taxableValue = Number((invoice as any).taxableValue ?? 0)
+      || Math.round((totalAmount - Number(invoice.gstAmount)) * 100) / 100;
+
     return {
       id: invoice.invoiceNumber,
       invoiceId: invoice.id,
       documentType: invoice.documentType,
       billingMonth: `${invoice.periodMonth}/${invoice.periodYear}`,
+      periodFrom: period.from.toISOString().slice(0, 10),
+      periodTo: period.to.toISOString().slice(0, 10),
       status: invoice.status,
       dueDate: invoice.dueDate,
-      salaryComponent: Number(invoice.staffSalaryComponent),
-      employerEsic: Number(invoice.esicEmployer),
-      employerPf: Number(invoice.pfEmployer),
-      managementFee: Number(invoice.managementFee),
-      gstAmount: Number(invoice.gstAmount),
-      totalAmount: Number(invoice.totalAmount),
-      amountPaid: paidTotal,
-      amountDue: Math.round((Number(invoice.totalAmount) - paidTotal) * 100) / 100,
-      lineItems: items.map((i) => ({
-        description: i.description,
-        staffName: i.staff_name,
-        amount: Number(i.amount),
-        taxable: i.is_taxable,
-        sacCode: i.sac_code,
+      placeOfSupply: (invoice as any).placeOfSupply ?? null,
+      sacCode: (invoice as any).sacCode ?? null,
+      staffCount: billed.length,
+      serviceLines: serviceLines.map((l) => ({
+        strength: l.strength,
+        description: l.description,
+        amount: l.amount,
       })),
+      taxableValue,
+      cgst,
+      sgst,
+      igst,
+      gstAmount: Number(invoice.gstAmount),
+      totalAmount,
+      amountPaid: paidTotal,
+      amountDue: Math.round((totalAmount - paidTotal) * 100) / 100,
     };
   }
 

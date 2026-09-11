@@ -11,6 +11,7 @@
  *   node scratch/_live_test_finance_f1.js
  */
 const { Client } = require('pg');
+const { ensureBillableCustomer } = require('./_fixtures');
 require('dotenv').config();
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
@@ -83,7 +84,7 @@ const round2 = (n) => Math.round(n * 100) / 100;
   // Everything this run creates, torn down in the finally block.
   const made = {
     attendanceIds: [], employeeId: null, invoiceId: null, payrollIds: [],
-    staffId: null, depositId: null,
+    staffId: null, depositId: null, fixture: null,
   };
 
   try {
@@ -180,30 +181,23 @@ const round2 = (n) => Math.round(n * 100) / 100;
     check('passing a deposit id instead of a staff id 404s', unknownStaff.status === 404, unknownStaff.status);
 
     // ── pick a placement to bill ────────────────────────────────────────────
-    const cand = await db.query(`
-      SELECT p.id AS placement_id, p.staff_id, p.client_id, sa.staff_code, sa.full_name,
-             sa.branch_id, fc.customer_name
-      FROM placements p
-      JOIN staff_applicants sa ON sa.id = p.staff_id
-      JOIN finance_customers fc ON fc.id = p.client_id
-      LEFT JOIN employees e ON e.staff_applicant_id = sa.id AND e.deleted_at IS NULL
-      WHERE p.status = 'CONFIRMED'
-        AND p.staff_salary IS NOT NULL AND p.management_fee IS NOT NULL
-        AND e.id IS NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM client_invoices ci
-          WHERE ci.placement_id = p.id AND ci.period_month = $1 AND ci.period_year = $2
-        )
-      ORDER BY p.created_at DESC
-      LIMIT 1
-    `, [TEST_MONTH, TEST_YEAR]);
+    // The placement must not already be invoiced for the test period, and its
+    // staff member must have no employee record yet — F-04 below proves that
+    // billing them creates one, which an existing record would fake.
+    const fx = await ensureBillableCustomer(db, {
+      staffCount: 1, withoutEmployeeRecord: true, label: 'F1',
+    });
+    made.fixture = fx;
+    if (fx.seeded) console.log('\n  (seeded a fixture customer with one placed staff)');
+    const target = fx.placements[0];
 
-    if (!cand.rows.length) {
-      console.log('\n  no billable placement available for the test period — cannot continue');
-      process.exitCode = 1;
-      return;
-    }
-    const target = cand.rows[0];
+    const alreadyBilled = await db.query(
+      `SELECT 1 FROM client_invoices
+        WHERE placement_id = $1 AND period_month = $2 AND period_year = $3`,
+      [target.placement_id, TEST_MONTH, TEST_YEAR]);
+    check('the placement is not already invoiced for the test period',
+      alreadyBilled.rows.length === 0, target.placement_id);
+    if (alreadyBilled.rows.length) return;
     console.log(`\nusing ${target.staff_code} (${target.full_name}) → ${target.customer_name}`);
 
     // ── seed attendance: 20 present days in the test period ─────────────────
@@ -369,6 +363,9 @@ const round2 = (n) => Math.round(n * 100) / 100;
       await db.query(`DELETE FROM deposits WHERE staff_id IN
                         (SELECT id FROM staff_applicants WHERE staff_code LIKE 'F1DEP%')`);
       await db.query(`DELETE FROM staff_applicants WHERE staff_code LIKE 'F1DEP%'`);
+      // Whatever this run had to invent goes back out; a fixture that was
+      // already in the database is left untouched.
+      if (made.fixture) await made.fixture.teardown();
       console.log('cleanup done');
     } catch (e) {
       console.log(`cleanup problem: ${e.message}`);

@@ -1,5 +1,8 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import {
+  buildWageRegister, EARNING_COMPONENTS, DEDUCTION_COMPONENTS, type WageConfigLike,
+} from '../../common/finance/wage-register.util';
 import PDFDocument = require('pdfkit');
 
 /**
@@ -382,121 +385,224 @@ export class EmployeePayslipService {
       );
     }
 
-    const buffer = await this.buildPdf(employee, slip);
+    const context = await this.registerContext(employee, slip);
+    const buffer = await this.buildPdf(employee, slip, context);
     const period = `${String(slip.periodMonth).padStart(2, '0')}-${slip.periodYear}`;
     return { buffer, filename: `payslip-${employee.employeeId}-${period}.pdf` };
   }
 
-  private buildPdf(employee: any, slip: UnifiedPayslip): Promise<Buffer> {
+  /**
+   * The wage terms and posting details a register has to show alongside the
+   * figures: which unit the person was posted at, what was agreed for the
+   * placement, and the account the money goes to.
+   *
+   * Only a field payroll has a placement behind it. An HR or enterprise
+   * payroll is an office employee with no client posting, so the unit is
+   * HomeGenny itself and the wage has no client-side breakup to read.
+   */
+  private async registerContext(employee: any, slip: UnifiedPayslip) {
+    const placement = employee.staffApplicantId
+      ? await this.prisma.placement.findFirst({
+          where: { staffId: employee.staffApplicantId, status: { in: ['CONFIRMED', 'TRIAL'] } },
+          orderBy: { createdAt: 'desc' },
+        })
+      : null;
+
+    const client = placement
+      ? await this.prisma.financeCustomer.findUnique({
+          where: { id: placement.clientId },
+          select: { customerName: true, unitCode: true, address: true },
+        })
+      : null;
+
+    const bank = employee.staffApplicantId
+      ? await this.prisma.$queryRaw<{ account_number: string; ifsc: string }[]>`
+          SELECT account_number, ifsc FROM staff_bank_accounts
+           WHERE staff_id = ${employee.staffApplicantId}::uuid
+           ORDER BY created_at DESC LIMIT 1`
+      : [];
+
+    const meta = (placement?.metadata ?? {}) as { wage_config?: WageConfigLike };
+    const daysInMonth = new Date(slip.periodYear, slip.periodMonth, 0).getDate();
+
+    const register = buildWageRegister({
+      config: meta.wage_config ?? null,
+      monthlyWage: Number(placement?.staffSalary ?? 0),
+      daysWorked: slip.presentDays ?? 0,
+      daysInMonth,
+      esicEmployee: Number(slip.deductionBreakdown?.esic ?? 0),
+      pfEmployee: Number(slip.deductionBreakdown?.pf ?? 0),
+    });
+
+    // The account number is stored whole but shown to its last four here, the
+    // same as everywhere else it is displayed. A register needs to identify
+    // the account, not reproduce it.
+    const acct = bank[0]?.account_number ?? null;
+    return {
+      register,
+      unitCode: client?.unitCode ?? null,
+      unitName: client?.customerName ?? null,
+      unitAddress: client?.address ?? null,
+      accountMasked: acct ? `XXXXXX${acct.slice(-4)}` : null,
+      ifsc: bank[0]?.ifsc ?? null,
+    };
+  }
+
+  /**
+   * The slip as a wage register.
+   *
+   * Laid out the way the statutory registers are, because it stands in for all
+   * of them at once: the paying scale on one row, what the days worked
+   * actually earned on the row beneath it, deductions under that, and the net
+   * with a place to sign. The previous layout listed a gross and two
+   * deductions, which is a summary — nothing on it could be checked against
+   * an entitlement, and it named no unit, no account and no period boundaries.
+   */
+  private buildPdf(
+    employee: any,
+    slip: UnifiedPayslip,
+    ctx: Awaited<ReturnType<EmployeePayslipService['registerContext']>>,
+  ): Promise<Buffer> {
     return new Promise((resolve, reject) => {
-      const doc = new PDFDocument({ size: 'A4', margin: 50 });
+      // Landscape: the register is a wide table and portrait forces the
+      // component columns into an unreadable width.
+      const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 32 });
       const chunks: Buffer[] = [];
       doc.on('data', (c: Buffer) => chunks.push(c));
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
-      const monthName = new Date(slip.periodYear, slip.periodMonth - 1).toLocaleString('en-IN', {
-        month: 'long',
-      });
-
-      doc.fontSize(18).text('HomeGenny', { align: 'center' });
-      doc
-        .fontSize(10)
-        .fillColor('#555')
-        .text(employee.branch?.name ?? 'HomeGenny', { align: 'center' });
-      doc.moveDown(0.6);
-      doc
-        .fontSize(13)
-        .fillColor('#000')
-        .text(`Salary Slip — ${monthName} ${slip.periodYear}`, { align: 'center' });
-      doc.moveDown(0.3);
-      doc
-        .fontSize(8)
-        .fillColor('#777')
-        .text(`${slip.sourceLabel}${slip.payslipNumber ? ` · ${slip.payslipNumber}` : ''}`, {
-          align: 'center',
-        });
-      doc.fillColor('#000').moveDown(1);
-
+      const { register: reg } = ctx;
       const left = doc.page.margins.left;
       const right = doc.page.width - doc.page.margins.right;
-      const line = () => {
-        doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#ccc').stroke();
-        doc.moveDown(0.5);
+      const width = right - left;
+      const monthName = new Date(slip.periodYear, slip.periodMonth - 1)
+        .toLocaleString('en-IN', { month: 'long' });
+
+      const rule = (thickness = 1, colour = '#000') => {
+        doc.moveTo(left, doc.y).lineTo(right, doc.y).lineWidth(thickness).strokeColor(colour).stroke();
+        doc.moveDown(0.4);
+      };
+      /** One row of the component grid, laid out on a shared column geometry. */
+      const gridRow = (label: string, values: string[], opts: { bold?: boolean } = {}) => {
+        const labelWidth = 110;
+        const cell = (width - labelWidth) / values.length;
+        const y = doc.y;
+        doc.font(opts.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7.5).fillColor('#000');
+        doc.text(label, left, y, { width: labelWidth });
+        values.forEach((v, i) => {
+          doc.text(v, left + labelWidth + i * cell, y, { width: cell - 4, align: 'right' });
+        });
+        doc.y = y + 12;
       };
 
-      line();
-      const details: [string, string][] = [
-        ['Employee', employee.fullName],
-        ['Employee ID', employee.employeeId],
-        ['Designation', employee.designation ?? '-'],
-        ['Department', employee.department ?? '-'],
-        ['Category', employee.category?.name ?? '-'],
-        ['Date of joining', employee.joiningDate?.toISOString?.().slice(0, 10) ?? '-'],
-        ['Days paid', slip.presentDays !== null ? String(slip.presentDays) : '-'],
-      ];
-      doc.fontSize(9);
-      for (const [label, value] of details) {
-        doc.fillColor('#666').text(label, left, doc.y, { continued: true, width: 200 });
-        doc.fillColor('#000').text(String(value), { align: 'left' });
-      }
-      doc.moveDown(0.5);
-      line();
+      // ── the statutory heading ────────────────────────────────────────────
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#000').text(
+        `${(employee.branch?.name ?? 'HomeGenny').toUpperCase()} : IN LIEU OF MUSTER ROLL FORM XVI, ` +
+          'REGISTER OF WAGES FORM XVII, WAGES SLIP FORM XIX',
+        left, doc.y, { width },
+      );
+      doc.font('Helvetica').fontSize(7.5).text(
+        'LEAVE WITH WAGES FORM F SEE RULE 8 S & C ACT',
+        left, doc.y, { width: width * 0.45, continued: false },
+      );
+      const headY = doc.y - 9;
+      doc.font('Helvetica-Bold').text(`For the Month of  ${monthName}-${slip.periodYear}`,
+        left + width * 0.45, headY, { width: width * 0.35 });
+      doc.font('Helvetica').fontSize(7).fillColor('#444').text(
+        slip.payslipNumber ?? slip.sourceLabel, left + width * 0.8, headY, { width: width * 0.2, align: 'right' });
+      doc.fillColor('#000').moveDown(0.4);
+      rule(1.2);
 
-      doc.moveDown(0.3).fontSize(11).fillColor('#000').text('Earnings');
-      doc.fontSize(9);
-      // A month worked across several houses is paid once, so the gross is a
-      // sum. Show what it is a sum of, or the figure has to be taken on trust.
-      if (slip.clientBreakdown?.length) {
+      // ── who, where, and on what terms ────────────────────────────────────
+      // `labelW` is explicit because the labels are not the same length —
+      // "DAYS WORKED :" wrapped onto a second line at a fixed 52pt and pushed
+      // the row below it out of alignment.
+      const pair = (label: string, value: string, x: number, y: number, w: number, labelW = 52) => {
+        doc.font('Helvetica-Bold').fontSize(7).fillColor('#000')
+          .text(label, x, y, { width: labelW, lineBreak: false });
+        doc.font('Helvetica').fontSize(7.5)
+          .text(value || '—', x + labelW + 2, y, { width: w - labelW - 2, lineBreak: false });
+      };
+      const col = width / 4;
+      let y = doc.y;
+      pair('CODE NO :', employee.employeeId ?? '—', left, y, col);
+      pair('NAME :', employee.fullName ?? '—', left + col, y, col);
+      pair('ESI No.', '—', left + col * 2, y, col);
+      pair('PF No.', '—', left + col * 3, y, col);
+      y += 12;
+      pair('DESGN. :', employee.designation ?? '—', left, y, col);
+      pair('UNIT :', ctx.unitCode ? `${ctx.unitCode} — ${ctx.unitName}` : (ctx.unitName ?? 'HomeGenny'),
+        left + col, y, col * 2);
+      pair('UAN No.', '—', left + col * 3, y, col);
+      y += 12;
+      pair('DAYS WORKED :', `${reg.daysWorked.toFixed(2)} of ${reg.daysInMonth}`, left, y, col, 66);
+      pair('NFH :', reg.earned.nfh.toFixed(2), left + col, y, col * 0.5);
+      pair('DOJ :', employee.joiningDate?.toISOString?.().slice(0, 10) ?? '—', left + col * 1.5, y, col * 0.8);
+      pair('A/C No.', ctx.accountMasked ?? '—', left + col * 3, y, col);
+      doc.y = y + 14;
+      rule(0.5, '#666');
+
+      // ── the wage grid ────────────────────────────────────────────────────
+      const earnLabels: string[] = [...EARNING_COMPONENTS.map((c) => c.label), 'TOTAL'];
+      gridRow('', earnLabels, { bold: true });
+      doc.moveDown(0.1);
+      gridRow('PAYING SCALE',
+        [...EARNING_COMPONENTS.map((c) => inr(reg.scale[c.key])), inr(reg.scaleTotal)]);
+      gridRow('WAGE EARNED',
+        [...EARNING_COMPONENTS.map((c) => inr(reg.earned[c.key])), inr(reg.earnedTotal)], { bold: true });
+      doc.moveDown(0.5);
+
+      const dedLabels: string[] = [...DEDUCTION_COMPONENTS.map((c) => c.label), 'TOTAL DEDN'];
+      gridRow('', dedLabels, { bold: true });
+      doc.moveDown(0.1);
+      gridRow('DEDUCTIONS',
+        [...DEDUCTION_COMPONENTS.map((c) => inr(reg.deductions[c.key])), inr(reg.deductionTotal)]);
+      doc.moveDown(0.6);
+      rule(0.5, '#666');
+
+      // ── net, and somewhere to sign ───────────────────────────────────────
+      y = doc.y;
+      doc.font('Helvetica-Bold').fontSize(9).fillColor('#000')
+        .text('NET SALARY PAYABLE', left, y, { width: width * 0.6 });
+      doc.fontSize(11).text(inr(reg.netPayable), left + width * 0.6, y - 2,
+        { width: width * 0.4, align: 'right' });
+      doc.y = y + 18;
+      rule(1.2);
+
+      doc.font('Helvetica').fontSize(7).fillColor('#666')
+        .text(`Payment status: ${slip.status}`, left, doc.y, { width: width * 0.5, continued: false });
+      doc.fontSize(7).text('SIGNATURE', left + width * 0.75, doc.y - 9,
+        { width: width * 0.25, align: 'right' });
+      doc.moveDown(1);
+
+      // A month worked across several houses is paid once. The register shows
+      // one net figure, so say what it is a sum of or it cannot be checked.
+      if (slip.clientBreakdown?.length && slip.clientBreakdown.length > 1) {
+        doc.fontSize(7).fillColor('#000').font('Helvetica-Bold')
+          .text('Earned across', left, doc.y, { width });
+        doc.font('Helvetica').fillColor('#444');
         for (const b of slip.clientBreakdown) {
-          doc
-            .fillColor('#666')
-            .text(`${b.clientName} · ${b.worked}`, left, doc.y, { continued: true, width: 320 });
-          doc.fillColor('#000').text(`INR ${inr(b.grossSalary)}`);
+          doc.text(`${b.clientName} · ${b.worked} · INR ${inr(b.grossSalary)}`, left, doc.y, { width });
         }
-        doc.moveDown(0.2);
+        doc.moveDown(0.4);
       }
-      doc.fillColor('#666').text('Gross salary', left, doc.y, { continued: true, width: 320 });
-      doc.fillColor('#000').text(`INR ${inr(slip.grossSalary)}`);
-      doc.moveDown(0.5);
 
-      doc.fontSize(11).text('Deductions');
-      doc.fontSize(9);
-      const deductions = Object.entries(slip.deductionBreakdown).filter(([, v]) => v > 0);
-      if (deductions.length === 0) {
-        doc.fillColor('#666').text('None', left, doc.y);
-      } else {
-        for (const [key, value] of deductions) {
-          const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());
-          doc.fillColor('#666').text(label, left, doc.y, { continued: true, width: 320 });
-          doc.fillColor('#000').text(`INR ${inr(value)}`);
-        }
+      // Say what the register is still missing rather than printing a dash and
+      // letting it pass an inspection it would not survive.
+      const gaps: string[] = ['ESI number', 'PF number', 'UAN'];
+      if (reg.undifferentiated) {
+        gaps.push('an agreed wage breakup (the whole wage is shown as basic)');
       }
-      doc.moveDown(0.3);
-      doc.fillColor('#666').text('Total deductions', left, doc.y, { continued: true, width: 320 });
-      doc.fillColor('#000').text(`INR ${inr(slip.totalDeductions)}`);
-      doc.moveDown(0.5);
-      line();
+      doc.fontSize(6.5).fillColor('#92400e').text(
+        `Not yet on file: ${gaps.join(', ')}. Add these before this register is filed.`,
+        left, doc.y, { width },
+      );
 
-      doc.fontSize(12).fillColor('#000').text('Net payable', left, doc.y, {
-        continued: true,
-        width: 320,
-      });
-      doc.fontSize(12).text(`INR ${inr(slip.netSalary)}`);
-      doc.moveDown(0.4);
-      doc.fontSize(9).fillColor('#666').text(`Payment status: ${slip.status}`, left, doc.y);
-      doc.moveDown(1.5);
-
-      doc
-        .fontSize(7)
-        .fillColor('#999')
-        .text(
-          'Computer-generated payslip — valid without signature. ' +
-            `Generated ${new Date().toISOString().slice(0, 10)}.`,
-          left,
-          doc.y,
-          { align: 'center', width: right - left },
-        );
+      doc.moveDown(0.3).fontSize(6.5).fillColor('#999').text(
+        `Computer-generated wage register — valid without signature. Generated ${new Date().toISOString().slice(0, 10)}.`,
+        left, doc.y, { width, align: 'center' },
+      );
 
       doc.end();
     });

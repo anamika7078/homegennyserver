@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
-import { calculateGstOnFee, calculateEsic, calculateNetSalary } from '../../../common/finance/statutory-calc.util';
+import { calculateGstOnClientCharge, calculateEsic, calculateNetSalary } from '../../../common/finance/statutory-calc.util';
 import { WageConfigDto, CalculationItemDto, CreateCalculationDto, CreateQuotationDto } from './dto/commercial.dto';
 
 export { WageConfigDto, CalculationItemDto, CreateCalculationDto, CreateQuotationDto };
@@ -266,12 +266,15 @@ export class CommercialService {
     const monthlyCost = monthlyCostPerResource * (noOfResources || 1);
     const dailyRate = monthlyCostPerResource / 30.45;
     const hourlyRate = dailyRate / (workingHours || 8);
-    // GST applies ONLY to the management fee — CRITICAL FIX (2026-08-10 audit
-    // §D1): this used to be `monthlyCost * (gstPct/100)`, taxing the entire
-    // cost including staff salary, employer ESIC/PF, bonus, leave, etc.
-    // Confirmed against real stored data: a ₹12,069.70 fee was carrying
-    // ₹42,213.55 of GST instead of the correct ₹2,172.55.
-    const gst = calculateGstOnFee(managementFee, gstPct);
+    // GST on the whole consideration — wages, employer ESIC/PF, bonus, leave,
+    // management fee and training — because manpower supply is taxed on the
+    // full contract value, not on the agency’s margin. The 2026-08-10 audit
+    // (§D1) had narrowed this to the management fee on a pure-agent reading
+    // of Rule 33; that reading does not hold here (the worker is HomeGenny’s
+    // own employee), and it left the quotation under-quoting GST against the
+    // invoice the client is actually issued. Both sides now use the same base,
+    // so what is quoted is what is billed.
+    const gst = calculateGstOnClientCharge(monthlyCost, gstPct);
     const grandTotal = monthlyCost + gst;
 
     // ── Employee Salary ──
