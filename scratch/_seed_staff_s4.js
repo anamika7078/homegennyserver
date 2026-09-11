@@ -85,8 +85,11 @@ async function clean(c) {
   await c.query('BEGIN');
   await c.query('DROP TRIGGER IF EXISTS prevent_update_delete_pipeline_events ON pipeline_events');
   await c.query('DROP TRIGGER IF EXISTS check_pipeline_events_append_only ON pipeline_events');
+  // `assessments` is in here because the driver's practical test now writes a
+  // row, and its staff_id FK is RESTRICT — without this, cleaning up a seeded
+  // driver fails and leaves the candidate stuck.
   for (const t of ['agreements', 'video_certifications', 'verification_tracks',
-    'deposits', 'scenario_logs', 'pipeline_events']) {
+    'deposits', 'scenario_logs', 'assessments', 'pipeline_events']) {
     await c.query(`DELETE FROM ${t} WHERE staff_id IN ${sel}`).catch(() => {});
   }
   await c.query(`DELETE FROM staff_applicants WHERE mobile = $1`, [MOBILE]);
@@ -227,6 +230,41 @@ async function main() {
         );
       }
       console.log(`              licence + eChallan CLEAR`);
+
+      // Pillar 2 — the road test. The deployment gate reads it out of
+      // skill_scores->>'assessmentType', not a column, so it has to be written
+      // in that shape or a driver is blocked at S5 with everything else clear.
+      // Some databases still carry the older shape of this table alongside the
+      // new columns, and its `candidate_id` is NOT NULL — so fill whichever
+      // of the two exist rather than assuming one.
+      const legacy = await c.query(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_name = 'assessments'
+            AND column_name IN ('candidate_id', 'assessment_type', 'score', 'series')`,
+      );
+      const hasCol = new Set(legacy.rows.map((r) => r.column_name));
+      const extraCols = [...hasCol].join(', ');
+      const extraVals = [...hasCol]
+        .map((col) => ({
+          candidate_id: `$1`,
+          assessment_type: `'DRIVER_PRACTICAL'`,
+          score: `82`,
+          series: `'DR'`,
+        })[col])
+        .join(', ');
+
+      await c.query(
+        `INSERT INTO assessments
+           (id, staff_id, assessor_id, attempt_number, skill_scores, result, status,
+            overreach_flags, remarks, approved_at, created_at
+            ${extraCols ? ', ' + extraCols : ''})
+         VALUES (gen_random_uuid(), $1, NULL, 1,
+                 '{"assessmentType":"DRIVER_PRACTICAL","score":82}'::jsonb,
+                 'PASS', 'COMPLETED', '{}'::jsonb, 'Seeded fixture', now(), now()
+                 ${extraVals ? ', ' + extraVals : ''})`,
+        [staffId],
+      );
+      console.log(`              practical driving test PASSED`);
     }
 
     // ── S2 → S2.5 → S3, each through the FSM ─────────────────────────────
