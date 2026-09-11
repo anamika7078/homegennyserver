@@ -102,12 +102,43 @@ async function clean(c) {
   await c.query('COMMIT');
 }
 
-async function main() {
-  const url = process.env.DATABASE_URL;
-  if (!/^(localhost|127\.0\.0\.1)$/.test(new URL(url).hostname)) {
-    console.error('\n  This seeds test data. Refusing to run against anything but localhost.\n');
+/**
+ * Where this is allowed to write.
+ *
+ * The rule used to be "localhost only", which was right in spirit and wrong in
+ * practice: inside a docker-compose stack the database is reached as
+ * `postgres`, so the dev server's own container was refused along with the
+ * managed databases this is actually meant to protect.
+ *
+ * Managed hosts are refused outright and no flag overrides that — seeding test
+ * staff into real billing would be unrecoverable. Anything else non-local
+ * needs --allow-remote, so it stays a deliberate act rather than an accident.
+ */
+const MANAGED_HOSTS = /render\.com|amazonaws\.com|azure|googleapis|neon\.tech|supabase|planetscale/i;
+
+function assertWritable(url) {
+  const host = new URL(url).hostname;
+  const isLocal = /^(localhost|127\.0\.0\.1)$/.test(host);
+
+  if (MANAGED_HOSTS.test(host)) {
+    console.error(`\n  ${host} is a managed database. This seeds test staff — refusing, and no flag changes that.\n`);
     process.exit(1);
   }
+  if (isLocal) return;
+
+  if (!process.argv.includes('--allow-remote')) {
+    console.error(
+      `\n  Target is ${host}, not localhost.\n` +
+      `  If that is deliberate — a docker-compose stack, say — pass --allow-remote.\n`,
+    );
+    process.exit(1);
+  }
+  console.log(`  ** writing to ${host} (--allow-remote) **\n`);
+}
+
+async function main() {
+  const url = process.env.DATABASE_URL;
+  assertWritable(url);
   const c = new Client({ connectionString: url });
   await c.connect();
 
