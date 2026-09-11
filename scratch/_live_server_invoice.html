@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Bill of Supply SHARM-01/202609/0002</title>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;max-width:820px;margin:32px auto;
+       padding:32px;color:#0f172a;font-size:13px;line-height:1.5}
+  h1{margin:0;font-size:24px;letter-spacing:-.01em}
+  .doc{margin:2px 0 0;font-size:15px;font-weight:600;color:#334155;
+       text-transform:uppercase;letter-spacing:.06em}
+  .rule{height:2px;background:#0f172a;margin:16px 0 20px}
+  .parties{display:flex;gap:32px;margin-bottom:20px}
+  .parties>div{flex:1}
+  .h{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;margin-bottom:4px}
+  .name{font-weight:700;font-size:14px}
+  .meta{margin:0 0 20px;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden}
+  .meta div{display:flex;justify-content:space-between;padding:6px 12px;border-bottom:1px solid #f1f5f9}
+  .meta div:last-child{border-bottom:0}
+  .meta span{color:#64748b}
+  table.items{width:100%;border-collapse:collapse;margin-bottom:16px}
+  table.items th{background:#0f172a;color:#fff;font-size:10px;text-transform:uppercase;
+                 letter-spacing:.06em;padding:8px;text-align:left}
+  table.items td{padding:8px;border-bottom:1px solid #e2e8f0}
+  .r{text-align:right;font-variant-numeric:tabular-nums}
+  .c{text-align:center}
+  tr.svc td{padding:10px 8px;text-align:center;background:#f8fafc;border-bottom:1px solid #e2e8f0;font-weight:600}
+  tr.svc .range{display:inline-block;margin-top:4px;font-weight:400;color:#475569}
+  .totals{margin-left:auto;width:400px}
+  .totals .base{color:#64748b;font-weight:400;width:110px}
+  .totals table{width:100%;border-collapse:collapse}
+  .totals td{padding:5px 8px}
+  .totals tr.sum td{border-top:1px solid #cbd5e1;font-weight:600}
+  .totals tr.grand td{border-top:2px solid #0f172a;font-size:15px;font-weight:700;padding-top:8px}
+  .words{clear:both;margin:18px 0;padding:10px 12px;background:#f8fafc;border-left:3px solid #0f172a}
+  .notice{margin:16px 0;padding:10px 12px;background:#fffbeb;border-left:3px solid #d97706;color:#78350f}
+  .bank{margin-top:20px;padding:10px 12px;border:1px solid #e2e8f0;border-radius:6px}
+  .foot{margin-top:28px;padding-top:12px;border-top:1px solid #e2e8f0;
+        display:flex;justify-content:space-between;color:#94a3b8;font-size:11px}
+</style></head>
+<body>
+  <h1>HomeGenny</h1>
+  <p class="doc">Bill of Supply</p>
+  <div class="rule"></div>
+
+  <div class="parties">
+    <div>
+      <div class="h">Supplier</div>
+      <div class="name">HomeGenny</div>
+      
+      <div>GSTIN: —</div>
+      
+      <div>State: —</div>
+    </div>
+    <div>
+      <div class="h">Billed to</div>
+      <div class="name">Sharma Nivas</div>
+      <div>D-9, Rohini Sector 7</div>
+      <div>GSTIN: —</div>
+      <div>PAN: AAACS9012P</div>
+      <div>State: Delhi</div>
+    </div>
+  </div>
+
+  <div class="meta">
+    <div><span>Invoice no.</span><strong>SHARM-01/202609/0002</strong></div>
+    <div><span>Date</span><strong>5/10/2026</strong></div>
+    <div><span>Period</span><strong>09/2026</strong></div>
+    <div><span>Place of supply</span><strong>Delhi</strong></div>
+    <div><span>Staff strength</span><strong>1</strong></div>
+    <div><span>Staff billed</span><strong>Pooja</strong></div>
+    <div><span>Status</span><strong>DRAFT</strong></div>
+  </div>
+
+  <div class="notice"><strong>This is a Bill of Supply, not a Tax Invoice.</strong>
+           No GST has been charged, because this is not on file yet:
+           supplier GSTIN, supplier state, SAC code. Add it in Finance settings and invoices
+           raised afterwards will carry tax.</div>
+
+  <table class="items">
+    <thead><tr><th style="width:36px">S.No.</th><th style="width:66px" class="c">Strength</th>
+      <th>Description of Service</th>
+      <th style="width:80px" class="c">SAC</th><th style="width:120px" class="r">Amount (₹)</th></tr></thead>
+    <tr class="svc"><td colspan="5">
+      Service charges for domestic staff services rendered at your premises<br>
+      <span class="range">From <strong>01/09/2026</strong> To <strong>30/09/2026</strong></span>
+    </td></tr>
+    <tbody>
+        <tr>
+          <td class="c">1</td>
+          <td class="c">1.00</td>
+          <td>Maid — 7.00 duties at Rs.22,745.01/-p.m for 8hrs [22,745.01 × 7.00 / 30]</td>
+          <td class="c">—</td>
+          <td class="r">5,307.17</td>
+        </tr></tbody>
+  </table>
+
+  <div class="totals"><table>
+    <tr class="sum"><td>Amount</td><td class="r base"></td><td class="r">466.67</td></tr>
+    
+    <tr class="grand"><td>Total</td><td class="r base"></td><td class="r">₹5,307.17</td></tr>
+  </table></div>
+
+  <div class="words">
+    <div class="h">Total invoice value (in words)</div>
+    <strong>RUPEES FIVE THOUSAND THREE HUNDRED SEVEN AND PAISE SEVENTEEN ONLY</strong>
+  </div>
+
+  
+
+  <div class="foot">
+    <span>Generated 11/9/2026, 4:19:41 pm</span>
+    <span>For HomeGenny</span>
+  </div>
+</body></html>

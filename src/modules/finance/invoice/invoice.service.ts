@@ -406,9 +406,11 @@ export class FinanceInvoiceService {
     const sgst = Number(row.sgst_amount ?? 0);
     const igst = Number(row.igst_amount ?? 0);
     const totalTax = Number(row.gst_amount ?? 0);
-    // A document raised before the tax columns existed has none of them, so
-    // fall back to the total less the tax rather than printing a blank.
-    const taxable = Number(row.taxable_value ?? 0)
+    // What the tax was charged on, as recorded at the time. An invoice raised
+    // under the old rule stored the management fee alone here, so this is not
+    // always the sum of the lines below — and the tax rows have to keep
+    // naming the base that was actually used, whatever that was.
+    const taxedOn = Number(row.taxable_value ?? 0)
       || Math.round((Number(inv.total_amount) - totalTax) * 100) / 100;
     const sac = row.sac_code ?? supplier.sacCode;
     const isTaxInvoice = row.document_type === 'TAX_INVOICE';
@@ -432,13 +434,21 @@ export class FinanceInvoiceService {
           <td class="r">${fmt(li.amount)}</td>
         </tr>`).join('');
 
+    // The subtotal has to be the lines printed above it, or the document
+    // contradicts itself. A legacy invoice stored only the management fee as
+    // its taxable value, so taking that figure here printed "Amount 466.67"
+    // above a total of 5,307.17 — the tax rows still name the base the tax was
+    // charged on, which for such an invoice is genuinely the smaller number.
+    const lineTotal = (service ?? charges).reduce((t, li) => t + Number(li.amount ?? 0), 0);
+    const subtotal = Math.round(lineTotal * 100) / 100;
+
     const period = periodRange(inv.period_month, inv.period_year);
     const asDate = (d: Date) => d.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
     // Each tax line states the value it was charged on as well as the tax, so
     // the rate can be checked against the base without doing the sum.
     const taxLine = (label: string, amount: number) =>
-      `<tr><td>${label}</td><td class="r base">${fmt(taxable)}</td><td class="r">${fmt(amount)}</td></tr>`;
+      `<tr><td>${label}</td><td class="r base">${fmt(taxedOn)}</td><td class="r">${fmt(amount)}</td></tr>`;
     const taxRows = isPayslip ? '' : igst > 0
       ? taxLine('18% IGST', igst)
       : (cgst > 0 || sgst > 0)
@@ -553,7 +563,7 @@ export class FinanceInvoiceService {
   </table>
 
   <div class="totals"><table>
-    <tr class="sum"><td>Amount</td><td class="r base"></td><td class="r">${fmt(taxable)}</td></tr>
+    <tr class="sum"><td>Amount</td><td class="r base"></td><td class="r">${fmt(subtotal)}</td></tr>
     ${taxRows}
     <tr class="grand"><td>Total</td><td class="r base"></td><td class="r">₹${fmt(inv.total_amount)}</td></tr>
   </table></div>
