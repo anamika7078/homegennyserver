@@ -430,8 +430,10 @@ export class EmployeePayslipService {
       monthlyWage: Number(placement?.staffSalary ?? 0),
       daysWorked: slip.presentDays ?? 0,
       daysInMonth,
-      esicEmployee: Number(slip.deductionBreakdown?.esic ?? 0),
-      pfEmployee: Number(slip.deductionBreakdown?.pf ?? 0),
+      // The register records what payroll paid and deducted — it never prices
+      // a wage of its own. See wage-register.util.ts.
+      grossPaid: slip.grossSalary,
+      deductionsPaid: slip.deductionBreakdown,
     });
 
     // The account number is stored whole but shown to its last four here, the
@@ -598,6 +600,15 @@ export class EmployeePayslipService {
         `Not yet on file: ${gaps.join(', ')}. Add these before this register is filed.`,
         left, doc.y, { width },
       );
+      // Terms the wage form carries but payroll never applied. They are named
+      // here instead of priced into the columns, because putting them there
+      // would record a payment or a deduction that did not happen.
+      if (reg.configuredNotPaid.length) {
+        doc.fontSize(6.5).fillColor('#92400e').text(
+          `On the placement's wage terms but not applied by payroll: ${reg.configuredNotPaid.join(', ')}.`,
+          left, doc.y, { width },
+        );
+      }
 
       doc.moveDown(0.3).fontSize(6.5).fillColor('#999').text(
         `Computer-generated wage register — valid without signature. Generated ${new Date().toISOString().slice(0, 10)}.`,
