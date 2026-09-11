@@ -45,4 +45,5 @@ scratch/_removed_*.json
 # Documents the demo script renders so a format can be looked at. They are
 # output, not source — regenerate with scratch/_demo_invoice.js.
 scratch/_demo_invoice*.html
+scratch/_live_server_invoice.html
 scratch/_demo_payslip*.pdf
