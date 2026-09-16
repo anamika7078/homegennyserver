@@ -21,7 +21,11 @@ const USERS = [
 async function main() {
   const client = new Client({
     connectionString: DB_URL,
-    ssl: DB_URL.includes('localhost') ? false : { rejectUnauthorized: false },
+    // Only managed/remote databases speak SSL. The old check keyed on
+    // "localhost", so running inside the compose network (host `postgres`)
+    // asked for SSL and failed with "The server does not support SSL
+    // connections". Same rule the other scratch scripts use.
+    ssl: /render\.com|dpg-|sslmode=require/i.test(DB_URL) ? { rejectUnauthorized: false } : false,
   });
   await client.connect();
   console.log('[OK] Connected to database');
