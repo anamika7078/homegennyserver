@@ -45,10 +45,37 @@ export default registerAs('app', () => ({
     password: process.env.REDIS_PASSWORD,
   },
 
+  // Password-reset / first-login OTP.
+  //
+  // There is no SMS provider yet, so this is a fixed code rather than anything
+  // sent to the user — anyone who knows a registered phone number can complete
+  // /auth/forgot-password → /auth/reset-password with it. That is a deliberate,
+  // temporary decision, made explicit here so it is greppable and so switching
+  // it off is one environment variable rather than a code change. The reset
+  // endpoints are rate-limited and every use is logged at warn level.
+  //
+  // Set AUTH_MOCK_OTP=off to disable the fixed code entirely (the reset flow
+  // then rejects every OTP until a real provider is wired in — see
+  // notifications.service.sendEmail, which already works and only needs
+  // SMTP_PASS).
+  otp: {
+    mock: (process.env.AUTH_MOCK_OTP ?? '123456').trim(),
+    mockEnabled:
+      (process.env.AUTH_MOCK_OTP ?? '123456').trim() !== 'off' &&
+      (process.env.AUTH_MOCK_OTP ?? '123456').trim() !== '',
+  },
+
   // JWT
   jwt: {
     secret: process.env.JWT_SECRET,
-    expiresIn: process.env.JWT_EXPIRES_IN || '15m',
+    // 30 minutes rather than 15. Expiry is not what ends a session here —
+    // JwtStrategy checks user_sessions on every single request, so a logout,
+    // a deactivation or a revoked session takes effect on the next call
+    // regardless of how long the token had left. The short window bought no
+    // security, and cost a /auth/refresh round trip four times an hour for
+    // every open tab. ADMIN tokens are unaffected: they are signed with an
+    // explicit 8h expiry and still hit the absolute 8-hour session wall.
+    expiresIn: process.env.JWT_EXPIRES_IN || '30m',
     refreshSecret: process.env.JWT_REFRESH_SECRET,
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   },

@@ -3,6 +3,7 @@ import { ValidationPipe, VersioningType, Logger, RequestMethod } from '@nestjs/c
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { IoAdapter } from '@nestjs/platform-socket.io';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
@@ -10,7 +11,7 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: ['log', 'warn', 'error', 'debug'],
     // Keeps the exact bytes of each request body on `req.rawBody`. The
     // Razorpay webhook signs the raw payload, so re-serialising the parsed
@@ -18,6 +19,15 @@ async function bootstrap() {
     // fail to verify. See F-08 in docs/FINANCE_MODULE_AUDIT.md.
     rawBody: true,
   });
+
+  // nginx terminates TLS and proxies to this process, so without this every
+  // request appears to come from the proxy's own address. Two things went
+  // wrong because of that: the 5-per-minute login throttle was ONE bucket
+  // shared by every user of the site (five sign-ins anywhere locked everyone
+  // else out for the rest of the minute), and every row in login_audit
+  // recorded the proxy's IP instead of the client's. Trusting one hop makes
+  // Express read the client address from X-Forwarded-For, which nginx sets.
+  app.set('trust proxy', 1);
 
   const configService = app.get(ConfigService);
   const port    = configService.get<number>('app.port', 3001);

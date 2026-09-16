@@ -47,6 +47,7 @@
     "@nestjs/throttler": "^6.5.0",
     "@nestjs/typeorm": "^10.0.2",
     "@nestjs/websockets": "^10.3.0",
+    "@node-rs/bcrypt": "^1.10.9",
     "@prisma/client": "^5.22.0",
     "axios": "^1.6.8",
     "bcryptjs": "^2.4.3",

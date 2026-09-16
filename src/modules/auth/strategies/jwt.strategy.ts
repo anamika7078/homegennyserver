@@ -53,23 +53,30 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     // ── Live revocation check — every previously-issued JWT is only as good
     // as the account/session it was issued for right now, not at issue time.
     // Without this, deactivating a user or calling logout/logout-all had no
-    // effect until the 15-minute access token naturally expired.
-    const user = await this.prisma.user.findUnique({
-      where:  { id: payload.sub },
-      select: { isActive: true, activeSessionId: true },
-    });
-    if (!user) {
-      throw new UnauthorizedException('Account no longer exists');
-    }
-    if (!user.isActive) {
-      throw new UnauthorizedException('Account has been deactivated');
-    }
-    // Single-active-session enforcement: a new login (or logout/logout-all,
-    // which clears active_session_id to NULL) changes this value, so any
-    // token minted for the previous session — including one already handed
-    // out — stops validating on its very next request.
-    if (payload.sid !== user.activeSessionId) {
+    // effect until the access token naturally expired.
+    //
+    // This reads user_sessions rather than the old single
+    // users.active_session_id column, so an account can hold several live
+    // sessions at once (phone and web, or two people on a shared demo login)
+    // and logging out of one leaves the others alone. One query: the account's
+    // status comes back through the relation.
+    if (!payload.sid) {
       throw new UnauthorizedException('Session is no longer active — please log in again');
+    }
+    const session = await this.prisma.userSession.findFirst({
+      where: {
+        id:        payload.sid,
+        userId:    payload.sub,
+        revokedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      select: { id: true, user: { select: { isActive: true } } },
+    });
+    if (!session) {
+      throw new UnauthorizedException('Session is no longer active — please log in again');
+    }
+    if (!session.user.isActive) {
+      throw new UnauthorizedException('Account has been deactivated');
     }
 
     return {

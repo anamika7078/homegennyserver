@@ -11,7 +11,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { MonitoringService } from '../monitoring/monitoring.service';
 import { VideoCertService } from '../video-cert/video-cert.service';
 import { ApprovalStatus, Prisma } from '@prisma/client';
-import * as bcrypt from 'bcryptjs';
+import { hashPassword } from '../../common/utils/password.util';
 import { assertStrongPassword } from '../../common/utils/password.util';
 import { UserProvisioningService } from '../auth/user-provisioning.service';
 
@@ -50,6 +50,13 @@ export class AdminService {
   }
 
   async logout(userId: string) {
+    // Revoke the session rows as well as the legacy columns — since auth moved
+    // to user_sessions, clearing users.active_session_id alone leaves every
+    // device signed in.
+    await this.prisma.userSession.updateMany({
+      where: { userId, revokedAt: null },
+      data:  { revokedAt: new Date() },
+    });
     await this.prisma.user.update({
       where: { id: userId },
       data: {
@@ -233,7 +240,7 @@ export class AdminService {
 
     if (updateData.password && String(updateData.password).trim() !== '') {
       assertStrongPassword(String(updateData.password));
-      updateData.passwordHash = await bcrypt.hash(String(updateData.password), 12);
+      updateData.passwordHash = await hashPassword(String(updateData.password));
     }
     delete updateData.password;
 
@@ -301,8 +308,8 @@ export class AdminService {
 
     if (approval.actionType === 'CREATE_USER') {
       const hash = payload.password
-        ? await bcrypt.hash(String(payload.password), 12)
-        : await bcrypt.hash('HomeGenny@2024', 12);
+        ? await hashPassword(String(payload.password))
+        : await hashPassword('HomeGenny@2024');
 
       await this.prisma.user.create({
         data: {

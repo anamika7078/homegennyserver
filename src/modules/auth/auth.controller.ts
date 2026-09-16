@@ -11,6 +11,17 @@ import { AnyAuthenticatedRole } from './decorators/roles.decorator';
 /** 5 attempts/min per IP on public, unauthenticated auth endpoints (register/login) */
 const AUTH_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
 
+/**
+ * 3 per 15 minutes per IP on the password-reset chain.
+ *
+ * These three endpoints had no rate limit at all, which mattered more than it
+ * looks: the OTP is a fixed code while there is no SMS provider, so an
+ * unlimited reset endpoint is an unlimited account-takeover endpoint for
+ * anyone who knows a phone number — and demo phone numbers are printed on the
+ * login page. Three attempts is ample for a real person who mistypes.
+ */
+const PASSWORD_RESET_THROTTLE = { default: { limit: 3, ttl: 900_000 } };
+
 const LOGIN_RESPONSE_SCHEMA = {
   type: 'object',
   properties: {
@@ -165,12 +176,18 @@ export class AuthController {
     @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> },
   ) {
     const loginTarget = body.phone || body.email || body.identifier || '';
+    const meta = this.clientMeta(req);
+    // Cheap check first: a locked-out account never reaches the password hash,
+    // so a grinder cannot use this endpoint to burn CPU either.
+    this.authService.assertAttemptsRemaining(loginTarget, meta.ip);
     try {
       const user = await this.authService.validateUser(loginTarget, body.password);
-      return this.authService.login(user, { ...this.clientMeta(req), totp: body.totp });
+      const result = await this.authService.login(user, { ...meta, totp: body.totp });
+      this.authService.clearFailedAttempts(loginTarget, meta.ip);
+      return result;
     } catch (e) {
       await this.authService.recordFailedLogin(loginTarget, {
-        ...this.clientMeta(req),
+        ...meta,
         failReason: 'INVALID_CREDENTIALS',
       });
       throw e;
@@ -179,6 +196,8 @@ export class AuthController {
 
   @Post('forgot-password')
   @Public()
+  @UseGuards(ThrottlerGuard)
+  @Throttle(PASSWORD_RESET_THROTTLE)
   @ApiTags(...TAG_SHARED)
   @ApiOperation({
     summary: 'Send password-reset OTP',
@@ -198,6 +217,8 @@ export class AuthController {
 
   @Post('verify-otp')
   @Public()
+  @UseGuards(ThrottlerGuard)
+  @Throttle(PASSWORD_RESET_THROTTLE)
   @ApiTags(...TAG_SHARED)
   @ApiOperation({
     summary: 'Verify password-reset OTP',
@@ -220,6 +241,8 @@ export class AuthController {
 
   @Post('reset-password')
   @Public()
+  @UseGuards(ThrottlerGuard)
+  @Throttle(PASSWORD_RESET_THROTTLE)
   @ApiTags(...TAG_WEB_ONLY)
   @ApiOperation({
     summary: 'Reset password with a verified OTP (forgot-password flow)',
@@ -274,7 +297,6 @@ export class AuthController {
 
   @Post('2fa/setup')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
   @AnyAuthenticatedRole()
   @ApiTags(...TAG_WEB_ONLY)
   @ApiOperation({ summary: 'Generate a TOTP secret for 2FA enrollment (authenticated, any role)' })
@@ -285,7 +307,6 @@ export class AuthController {
 
   @Post('2fa/confirm')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
   @AnyAuthenticatedRole()
   @ApiTags(...TAG_WEB_ONLY)
   @ApiOperation({ summary: 'Confirm 2FA enrollment with a code from the authenticator app' })
@@ -297,7 +318,6 @@ export class AuthController {
 
   @Post('logout-all')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
   @AnyAuthenticatedRole()
   @ApiTags(...TAG_WEB_ONLY)
   @ApiOperation({ summary: 'Invalidate refresh tokens on all devices for the current user' })
@@ -308,6 +328,8 @@ export class AuthController {
 
   @Post('refresh')
   @Public()
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @ApiTags(...TAG_SHARED)
   @ApiOperation({
     summary: 'Refresh the access token',
@@ -331,7 +353,6 @@ export class AuthController {
 
   @Post('change-password')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
   @AnyAuthenticatedRole()
   @ApiTags(...TAG_MOBILE_ONLY)
   @ApiOperation({
@@ -364,20 +385,27 @@ export class AuthController {
   }
 
   @Post('logout')
+  @Public()
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
-  @AnyAuthenticatedRole()
   @ApiTags(...TAG_SHARED)
-  @ApiOperation({ summary: 'Logout the current session' })
+  @ApiOperation({
+    summary: 'Logout the current session',
+    description:
+      'Ends the session belonging to the supplied access token. Deliberately NOT behind JwtAuthGuard: an ' +
+      'expired access token must still be able to sign out, otherwise the session row survives in the ' +
+      'database and the refresh token keeps working while the user believes they have signed out. The token ' +
+      'signature is still verified — only its expiry is ignored. Always answers 200, so a client can clear ' +
+      'its local state without waiting on this call.',
+  })
   @ApiResponse({ status: 200, schema: { type: 'object', properties: { success: { type: 'boolean' } } } })
-  async logout(@Request() req: any) {
-    await this.authService.logout(req.user.id);
-    return { success: true };
+  async logout(@Req() req: { headers?: Record<string, string | string[] | undefined> }) {
+    const header = req.headers?.['authorization'];
+    const raw = typeof header === 'string' ? header.replace(/^Bearer\s+/i, '').trim() : undefined;
+    return this.authService.logoutFromToken(raw);
   }
 
   @Get('me')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
   @AnyAuthenticatedRole()
   @ApiTags(...TAG_WEB_ONLY)
   @ApiOperation({

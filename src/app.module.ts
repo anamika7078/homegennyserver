@@ -104,7 +104,12 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
         url: config.get<string>('database.url'),
         autoLoadEntities: true,
         synchronize: config.get<boolean>('database.synchronize'),
-        logging: config.get('app.env') === 'development',
+        // Driven by DB_LOGGING, not NODE_ENV. The dev server runs with
+        // NODE_ENV=development, so this used to print every single SQL
+        // statement it ran — thousands of lines of console I/O on the request
+        // path, which is part of why a cost-12 bcrypt compare was taking
+        // seconds there instead of milliseconds.
+        logging: config.get<boolean>('database.logging') ?? false,
         ssl: config.get('app.env') === 'production' ? { rejectUnauthorized: false } : false,
       }),
     }),

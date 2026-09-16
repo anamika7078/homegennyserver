@@ -1,5 +1,5 @@
 import { Injectable, Logger, ConflictException } from '@nestjs/common';
-import * as bcrypt from 'bcryptjs';
+import { hashPassword } from '../../common/utils/password.util';
 import { PrismaService } from '../../prisma/prisma.service';
 
 /**
@@ -8,9 +8,6 @@ import { PrismaService } from '../../prisma/prisma.service';
  * `mustChangePassword` so the app can force a change after first login.
  */
 export const DEFAULT_PASSWORD = 'HomeGenny@2024';
-
-/** Matches the bcrypt cost used everywhere else in this codebase for user passwords. */
-const PASSWORD_BCRYPT_ROUNDS = 12;
 
 interface CreateUserRowParams {
   phone: string;
@@ -57,10 +54,7 @@ export class UserProvisioningService {
   /** Creates the `users` row only. Callers link it to a business record afterward. */
   async createUserRow(params: CreateUserRowParams) {
     const usedDefaultPassword = !params.password;
-    const passwordHash = await bcrypt.hash(
-      params.password || DEFAULT_PASSWORD,
-      PASSWORD_BCRYPT_ROUNDS,
-    );
+    const passwordHash = await hashPassword(params.password || DEFAULT_PASSWORD);
     return this.prisma.user.create({
       data: {
         role: params.role,

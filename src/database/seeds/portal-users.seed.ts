@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client';
-import * as bcrypt from 'bcryptjs';
+import { hashPassword } from '../../common/utils/password.util';
 import {
   PORTAL_ADMIN_PHONE,
   PORTAL_ADMIN_TOTP_SECRET,
@@ -64,7 +64,7 @@ export async function seedPortalUsers(
     return { seeded: 0, password, phones: [] };
   }
 
-  const hash = await bcrypt.hash(password, 12);
+  const hash = await hashPassword(password);
 
   await prisma.branch.upsert({
     where: { id: PORTAL_BRANCH_ID },

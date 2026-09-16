@@ -2,7 +2,7 @@
  * Seeds all portal login users (phone + bcrypt password).
  * Run: npm run seed:run
  */
-import * as bcrypt from 'bcryptjs';
+import { hashPassword } from '../../common/utils/password.util';
 import { Client } from 'pg';
 import { randomUUID } from 'crypto';
 import { loadSeedEnv } from './load-env';
@@ -112,7 +112,7 @@ async function seedUsers(): Promise<void> {
   try {
     await ensureRoles(dbUrl);
     const branchId = await ensureBranch(client);
-    const hash = await bcrypt.hash(PASSWORD, 12);
+    const hash = await hashPassword(PASSWORD);
 
     console.log(`[SEED] Password for all users: ${PASSWORD}\n`);
 
