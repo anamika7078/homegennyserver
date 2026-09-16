@@ -9,7 +9,7 @@ async function main() {
 
   const login = await axios.post(`${BASE}/auth/login`, {
     phone: '9800000003',
-    password: 'HomeGenny@2024',
+    password: 'hg',
   });
   const token =
     login.data?.data?.access_token ?? login.data?.access_token;

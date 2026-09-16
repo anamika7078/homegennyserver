@@ -20,7 +20,7 @@ require('dotenv').config();
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
 const FINANCE_PHONE = '9800000004';
-const PASSWORDS = ['HomeGenny@2024', 'Admin@123', 'Password@123'];
+const PASSWORDS = ['hg', 'HomeGenny@2024', 'Admin@123', 'Password@123'];
 
 // A period far enough back that real billing will never sit in it. This used
 // to be the current month, so the suite fought whatever invoice the office had

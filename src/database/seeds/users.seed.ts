@@ -8,7 +8,7 @@ import { randomUUID } from 'crypto';
 import { loadSeedEnv } from './load-env';
 
 const BRANCH_ID = '00000000-0000-0000-0000-000000000001';
-const PASSWORD = process.env.SEED_PASSWORD ?? 'HomeGenny@2024';
+const PASSWORD = process.env.SEED_PASSWORD ?? 'hg';
 
 const USERS = [
   { phone: '9800000001', role: 'BM', fullName: 'Amit Gupta', email: 'bm@homegenny.com' },

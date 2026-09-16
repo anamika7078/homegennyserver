@@ -17,7 +17,7 @@ const { Client } = require('pg');
 require('dotenv').config();
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
-const PASSWORDS = ['HomeGenny@2024', 'Admin@123', 'Password@123'];
+const PASSWORDS = ['hg', 'HomeGenny@2024', 'Admin@123', 'Password@123'];
 
 let pass = 0, fail = 0;
 function check(label, ok, detail) {

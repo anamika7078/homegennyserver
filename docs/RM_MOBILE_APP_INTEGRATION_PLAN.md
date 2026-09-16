@@ -62,7 +62,7 @@ lib/features/rm/
 
 - Base URL: `https://homegennyserver-po5u.onrender.com/api/v1` (see
   `docs/MOBILE_API_REFERENCE.md` for the full picture — Auth/Staff/Client APIs, demo accounts,
-  gotchas). RM demo login: phone `9800000002`, password `HomeGenny@2024`.
+  gotchas). RM demo login: phone `9800000002`, password `hg`.
 - Every response is `{ success, data, timestamp }` — `BaseRemoteDataSource` already unwraps this.
 - `must_change_password` / mock-OTP `123456` flow is identical to Client/Staff — already built in
   the app, nothing new needed here.

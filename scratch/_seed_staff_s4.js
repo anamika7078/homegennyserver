@@ -24,7 +24,7 @@ require('dotenv').config();
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
 const RM_PHONE = '9800000002';
-const PASSWORDS = ['HomeGenny@2024', 'Admin@123', 'Password@123'];
+const PASSWORDS = ['hg', 'hg', 'Admin@123', 'Password@123'];
 
 const arg = (flag, fallback) => {
   const i = process.argv.indexOf(flag);
@@ -385,7 +385,7 @@ async function main() {
     console.log(`  stage            : ${stage.rows[0].s}   (S1–S4 poore)`);
     console.log(`  pipeline events  : ${events.rows[0].n}  (application ne khud likhe)`);
     console.log(`  S5 ka darwaza    : ${blockers.length ? 'BAND — ' + blockers.join('; ') : 'KHULA — deploy ho sakti hai'}`);
-    console.log(`  login            : ${MOBILE} / HomeGenny@2024  (pehli baar par password badalna hoga)\n`);
+    console.log(`  login            : ${MOBILE} / hg  (pehli baar par password badalna hoga)\n`);
   } catch (err) {
     console.error(`\n  ${err.message}\n`);
     process.exitCode = 1;

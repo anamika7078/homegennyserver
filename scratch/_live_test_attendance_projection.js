@@ -15,7 +15,7 @@ require('dotenv').config();
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
 const HR_PHONE = '9800000008';
-const HR_PASSWORD = 'HomeGenny@2024';
+const HR_PASSWORD = process.env.SEED_PASSWORD || 'hg';
 // Running payroll is a FINANCE action, so section [3] needs its own token.
 const FINANCE_PHONE = '9800000004';
 

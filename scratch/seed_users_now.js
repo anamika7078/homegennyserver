@@ -3,7 +3,7 @@ const bcrypt = require('bcryptjs');
 const { Client } = require('pg');
 
 const BRANCH_ID = '00000000-0000-0000-0000-000000000001';
-const PASSWORD = 'HomeGenny@2024';
+const PASSWORD = process.env.SEED_PASSWORD || 'hg';
 const rawUrl = process.env.DATABASE_URL || 'postgresql://postgres:hunesh@localhost:5432/homegenny';
 const DB_URL = rawUrl.replace(/\?schema=public/, '');
 

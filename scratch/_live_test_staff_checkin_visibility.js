@@ -13,7 +13,7 @@ const bcrypt = require('bcryptjs');
 require('dotenv').config();
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
-const HR = { phone: '9800000008', password: 'HomeGenny@2024' };
+const HR = { phone: '9800000008', password: 'hg' };
 const STAFF_PASSWORD = 'StaffTest@2026';
 
 let pass = 0;

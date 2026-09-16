@@ -34,7 +34,7 @@ async function ensurePortalAdmin2fa(prisma) {
 
   const step1 = await axios.post(`${BASE}/auth/login`, {
     phone: PORTAL_ADMIN_PHONE,
-    password: 'HomeGenny@2024',
+    password: 'hg',
   });
   console.log('step1:', JSON.stringify(step1.data.data));
 
@@ -43,7 +43,7 @@ async function ensurePortalAdmin2fa(prisma) {
 
   const step2 = await axios.post(`${BASE}/auth/login`, {
     phone: PORTAL_ADMIN_PHONE,
-    password: 'HomeGenny@2024',
+    password: 'hg',
     totp: code,
   });
   console.log('step2 token:', Boolean(step2.data.data?.access_token));

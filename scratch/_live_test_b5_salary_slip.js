@@ -21,7 +21,7 @@ const HR_PHONE = '9800000008';
 // Running payroll is Finance's; reading the slip is HR's. The point of the
 // test is that they see one slip for what Finance ran as several rows.
 const FINANCE_PHONE = '9800000004';
-const PASSWORDS = ['HomeGenny@2024', 'Admin@123', 'Password@123'];
+const PASSWORDS = ['hg', 'HomeGenny@2024', 'Admin@123', 'Password@123'];
 
 const TEST_MONTH = 4;
 const TEST_YEAR = 2026;

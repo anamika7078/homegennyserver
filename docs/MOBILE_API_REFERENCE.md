@@ -73,9 +73,9 @@ against production.
 
 | Role | Phone | Password | Notes |
 |---|---|---|---|
-| Client | `9100000091` | `HomeGenny@2024` | "Mobile Demo Client" — has a real FinanceCustomer + active Placement + attendance history |
-| RM | `9800000002` | `HomeGenny@2024` | "RM Demo Account" — manages the pipeline, approves shifts |
-| Staff | `9911100001` | `HomeGenny@2024` | staff_code `staff001`, MAID series — deployed on the demo client's placement above |
+| Client | `9100000091` | `hg` | "Mobile Demo Client" — has a real FinanceCustomer + active Placement + attendance history |
+| RM | `9800000002` | `hg` | "RM Demo Account" — manages the pipeline, approves shifts |
+| Staff | `9911100001` | `hg` | staff_code `staff001`, MAID series — deployed on the demo client's placement above |
 
 These three accounts are linked to each other (same placement chain), so testing one role's screen
 against another's data will show consistent, real results — **on local only**.

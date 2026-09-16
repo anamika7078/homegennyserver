@@ -44,9 +44,9 @@ are here to produce.
 
 | Role | Phone | Password |
 |---|---|---|
-| Finance | 9800000004 | `HomeGenny@2024` |
-| HR | 9800000008 | `HomeGenny@2024` |
-| RM | 9800000002 | `HomeGenny@2024` |
+| Finance | 9800000004 | `hg` |
+| HR | 9800000008 | `hg` |
+| RM | 9800000002 | `hg` |
 
 ### Start it
 

@@ -13,7 +13,7 @@ const SECRET = process.argv[3] || 'NWHPF4QHDOOAYTAIU562EDNS3O4HLG6C';
 
   const login = await axios.post(`${BASE}/auth/login`, {
     phone: '9800000003',
-    password: 'HomeGenny@2024',
+    password: 'hg',
     totp: code,
   });
   console.log('login OK:', JSON.stringify(login.data).slice(0, 300));

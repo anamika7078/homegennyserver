@@ -4,7 +4,7 @@ async function testLogin() {
   const url = 'https://homegennyserver-po5u.onrender.com/api/v1/auth/login';
   const payload = {
     phone: '9800000001',
-    password: 'HomeGenny@2024'
+    password: 'hg'
   };
   
   try {

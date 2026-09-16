@@ -22,7 +22,7 @@ const { Client } = require('pg');
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
 const FINANCE_PHONE = '9800000004';
 const HR_PHONE = '9800000008';
-const PASSWORDS = ['HomeGenny@2024', 'Admin@123', 'Password@123'];
+const PASSWORDS = ['hg', 'HomeGenny@2024', 'Admin@123', 'Password@123'];
 const MANAGED_HOST = /render\.com|amazonaws|azure|googleapis|neon\.tech|supabase|planetscale/i;
 
 /** Which demo to build — each is a separate client with its own staff. */

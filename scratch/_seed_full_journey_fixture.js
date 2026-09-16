@@ -86,8 +86,8 @@ async function main() {
        RETURNING id`,
       [
         branch.id, `${TAG} Test Household`, CLIENT_PHONE, CLIENT_EMAIL,
-        // Same bcrypt hash the seeded portal users carry (HomeGenny@2024).
-        '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewKyDoUJTGWvV8Vy',
+        // Same bcrypt hash the seeded portal users carry (hg).
+        '$2a$12$GNCsoXlSXQ0n081jFPU3QuQUqZ6e8hqR4yKImlfH/mzUgNJBj9rl2',
       ],
     )).rows[0];
 
@@ -297,8 +297,8 @@ async function main() {
     console.log(`  you are here to test. Steps are in docs/TEST_FIXTURE_WALKTHROUGH.md\n`);
     console.log(`  Client login  ${CLIENT_PHONE}  ·  ${CLIENT_EMAIL}`);
     console.log(`  Staff login   ${STAFF_MOBILE}`);
-    console.log(`  Finance       9800000004 / HomeGenny@2024`);
-    console.log(`  HR            9800000008 / HomeGenny@2024\n`);
+    console.log(`  Finance       9800000004 / hg`);
+    console.log(`  HR            9800000008 / hg\n`);
   } catch (err) {
     await c.query('ROLLBACK').catch(() => {});
     console.error('\nRolled back — nothing was created.');

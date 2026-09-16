@@ -12,7 +12,7 @@ const NL = String.fromCharCode(10);
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
 const HR_PHONE = '9800000008';
-const PASSWORDS = ['HomeGenny@2024', 'Admin@123', 'Password@123', 'hr@1234'];
+const PASSWORDS = ['hg', 'HomeGenny@2024', 'Admin@123', 'Password@123', 'hr@1234'];
 
 let pass = 0;
 let fail = 0;

@@ -14,7 +14,7 @@ allowed to trigger it. Written for wiring the RM side of the mobile app against 
 - **Base URL**: `https://homegennyserver-po5u.onrender.com/api/v1`
 - **Auth**: `Authorization: Bearer <jwt>` from `POST /auth/login`
 - **Response envelope**: `{ success, data, timestamp }`
-- **RM demo login**: `9800000002` / `HomeGenny@2024`
+- **RM demo login**: `9800000002` / `hg`
 
 ## Roles at a glance
 

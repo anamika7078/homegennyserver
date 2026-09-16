@@ -47,7 +47,7 @@ function assertSafeTarget(connectionString) {
  * trap left lying in the database for the next suite to trip over. It did
  * exactly that. Fully formed, or not created at all.
  */
-const FIXTURE_PASSWORD = 'HomeGenny@2024';
+const FIXTURE_PASSWORD = process.env.SEED_PASSWORD || 'hg';
 
 async function createCustomer(db, label = 'Fixture') {
   assertSafeTarget(db.connectionParameters?.connectionString || process.env.DATABASE_URL || '');

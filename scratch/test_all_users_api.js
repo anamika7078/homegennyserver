@@ -6,7 +6,7 @@ const axios = require('axios');
 
 const BASE = (process.argv[2] || 'https://homegennyserver-po5u.onrender.com').replace(/\/$/, '');
 const API = `${BASE}/api/v1`;
-const PASSWORD = 'HomeGenny@2024';
+const PASSWORD = process.env.SEED_PASSWORD || 'hg';
 
 const USERS = [
   {

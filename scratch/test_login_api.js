@@ -2,7 +2,7 @@ const http = require('http');
 
 const data = JSON.stringify({
   phone: '9800000003',
-  password: 'HomeGenny@2024'
+  password: 'hg'
 });
 
 const req = http.request('http://localhost:3001/api/v1/auth/login', {

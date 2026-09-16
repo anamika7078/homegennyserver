@@ -26,14 +26,14 @@ client.connect()
     for (const user of res.rows) {
       let pwdMatches = false;
       if (user.password_hash) {
-        pwdMatches = await bcrypt.compare('HomeGenny@2024', user.password_hash);
+        pwdMatches = await bcrypt.compare('hg', user.password_hash);
       }
       console.log(`Phone: ${user.phone}`);
       console.log(`  Name:   ${user.full_name}`);
       console.log(`  Role:   ${user.role}`);
       console.log(`  Active: ${user.is_active}`);
       console.log(`  Hash:   ${user.password_hash}`);
-      console.log(`  Password 'HomeGenny@2024' matches: ${pwdMatches}`);
+      console.log(`  Password 'hg' matches: ${pwdMatches}`);
       console.log('--------------------------------------------------');
     }
     

@@ -20,7 +20,7 @@ async function main() {
     let match = false;
     if (u.passwordHash) {
       try {
-        match = await bcrypt.compare('HomeGenny@2024', u.passwordHash);
+        match = await bcrypt.compare('hg', u.passwordHash);
       } catch (e) {
         match = false;
       }

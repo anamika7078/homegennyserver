@@ -24,7 +24,7 @@ require('dotenv').config();
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
 const FINANCE_PHONE = '9800000004';
 const HR_PHONE = '9800000008';
-const PASSWORDS = ['HomeGenny@2024', 'Admin@123', 'Password@123'];
+const PASSWORDS = ['hg', 'HomeGenny@2024', 'Admin@123', 'Password@123'];
 
 // Far enough back that no real billing lives here. 2/2026 and 3/2026 and
 // 4/2026 belong to the unit-code, F1 and F09 suites.

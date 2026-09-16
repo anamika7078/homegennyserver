@@ -57,7 +57,7 @@ export async function seedPortalUsers(
   prisma: PrismaLike,
   options?: { password?: string; force?: boolean },
 ): Promise<PortalSeedResult> {
-  const password = options?.password ?? process.env.SEED_PASSWORD ?? 'HomeGenny@2024';
+  const password = options?.password ?? process.env.SEED_PASSWORD ?? 'hg';
   const existing = await countPortalUsers(prisma);
 
   if (!options?.force && existing >= PORTAL_USERS.length) {

@@ -7,7 +7,7 @@ loadSeedEnv();
 
 const prisma = new PrismaClient();
 const BRANCH_ID = '00000000-0000-0000-0000-000000000001';
-const PASSWORD = process.env.SEED_PASSWORD ?? 'HomeGenny@2024';
+const PASSWORD = process.env.SEED_PASSWORD ?? 'hg';
 
 const SCENARIO_SEEDS = [
   { code: 'SC-01', series: StaffSeries.SKILLED_CARE, title: 'Standard SC onboarding', severity: 'LOW' },

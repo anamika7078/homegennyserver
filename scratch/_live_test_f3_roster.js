@@ -18,7 +18,7 @@ require('dotenv').config();
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
 const HR_PHONE = '9800000008';
-const PASSWORDS = ['HomeGenny@2024', 'Admin@123', 'Password@123'];
+const PASSWORDS = ['hg', 'HomeGenny@2024', 'Admin@123', 'Password@123'];
 
 const TEST_DATE = '2026-02-11';
 const HOURLY_RATE = 250;

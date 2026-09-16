@@ -26,7 +26,7 @@ const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
 //   TEST_CLIENT_PHONE=9000555003 TEST_CLIENT_PASSWORD=... node scratch/_live_test_client_complaints.js
 //
 // Without it, sections [1]-[5] and [8] are skipped and the RM/BM half still runs.
-const STAFF_PASSWORD = process.env.SEED_PASSWORD || 'HomeGenny@2024';
+const STAFF_PASSWORD = process.env.SEED_PASSWORD || 'hg';
 const CLIENT_PHONE = process.env.TEST_CLIENT_PHONE || null;
 const CLIENT_PASSWORD = process.env.TEST_CLIENT_PASSWORD || null;
 
