@@ -7,7 +7,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   ParseUUIDPipe,
 } from '@nestjs/common';
 import { OvertimeService } from './overtime.service';
@@ -20,7 +19,6 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 @ApiTags('Overtime')
 @ApiBearerAuth()
 @Controller({ path: 'overtime', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class OvertimeController {
   constructor(private readonly service: OvertimeService) {}
 

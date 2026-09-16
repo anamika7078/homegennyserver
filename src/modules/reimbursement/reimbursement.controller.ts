@@ -7,7 +7,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   ParseUUIDPipe,
 } from '@nestjs/common';
 import { ReimbursementService } from './reimbursement.service';
@@ -20,7 +19,6 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 @ApiTags('Reimbursements')
 @ApiBearerAuth()
 @Controller({ path: 'reimbursement', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class ReimbursementController {
   constructor(private readonly service: ReimbursementService) {}
 

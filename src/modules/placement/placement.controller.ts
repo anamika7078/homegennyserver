@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Param, Body, Query, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Body, Query, Req } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -49,7 +49,6 @@ const WAGE_CONFIG_SCHEMA = {
 // "Mobile App RM APIs" alongside their own "Placements" tag for that reason.
 @ApiTags('Placements', 'Mobile App RM APIs')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN)
 @Controller({ path: 'placements', version: '1' })
 export class PlacementController {

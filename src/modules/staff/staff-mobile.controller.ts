@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Put, Body, Param, UseGuards, Req, Res, Query,
+  Controller, Get, Post, Put, Body, Param, Req, Res, Query,
   BadRequestException, ForbiddenException,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiQuery } from '@nestjs/swagger';
@@ -78,7 +78,6 @@ function isPvClear(seriesShort: string, pvStatus: string): boolean {
 
 @ApiTags('Staff Mobile App', 'Mobile App RM APIs', 'Mobile App Staff APIs')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.STAFF, UserRole.RM, UserRole.BM, UserRole.ADMIN)
 @Controller({ path: 'staff', version: '1' })
 export class StaffMobileController {

@@ -8,8 +8,7 @@ import {
   Put,
   Query,
   Req,
-  UseGuards,
-} from '@nestjs/common';
+  } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -25,7 +24,6 @@ const TERMINAL_OUTCOMES = ['ENROLLED', 'CONDITIONAL', 'DEFERRED', 'DENIED', 'ABA
 
 @ApiTags('RM Operations', 'Mobile App RM APIs')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN)
 @Controller({ path: 'rm', version: '1' })
 export class RmController {

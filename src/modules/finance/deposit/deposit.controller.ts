@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Param, Body, Query, Req, UseGuards, DefaultValuePipe } from '@nestjs/common';
+import { Controller, Get, Post, Param, Body, Query, Req, DefaultValuePipe } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guards/roles.guard';
@@ -7,7 +7,6 @@ import { DepositService } from './deposit.service';
 
 @ApiTags('Finance — Deposits')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.RM, UserRole.BM, UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/deposits', version: '1' })
 export class DepositController {

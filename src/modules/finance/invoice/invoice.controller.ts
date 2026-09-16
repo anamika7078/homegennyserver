@@ -1,6 +1,5 @@
 import {
-  Controller, Get, Post, Param, Query, Body, Req, UseGuards,
-  DefaultValuePipe, ParseIntPipe, Res,
+  Controller, Get, Post, Param, Query, Body, Req, DefaultValuePipe, ParseIntPipe, Res,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
@@ -16,7 +15,6 @@ import { ConsolidatedInvoiceService } from './consolidated-invoice.service';
 // authz-only.) Staff has no access.
 @ApiTags('Finance — Invoices')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.RM, UserRole.BM, UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/invoices', version: '1' })
 export class FinanceInvoiceController {

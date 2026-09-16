@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, Query, UseGuards, Req } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, Req } from '@nestjs/common';
 import { AgreementsService } from './agreements.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -9,7 +9,6 @@ import { SendEsignOtpDto } from './dto/send-esign-otp.dto';
 @ApiTags('Agreements')
 @ApiBearerAuth()
 @Controller({ path: 'agreements', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class AgreementsController {
   constructor(private readonly agreementsService: AgreementsService) {}
 

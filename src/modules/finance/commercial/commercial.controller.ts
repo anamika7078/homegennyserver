@@ -6,7 +6,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   Req,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
@@ -17,7 +16,6 @@ import { CommercialService, WageConfigDto, CreateCalculationDto, CreateQuotation
 
 @ApiTags('Finance — Commercial')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/commercial', version: '1' })
 export class CommercialController {

@@ -7,7 +7,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   ParseUUIDPipe,
 } from '@nestjs/common';
 import { SalaryStructureService } from './salary-structure.service';
@@ -20,7 +19,6 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 @ApiTags('Salary Structure')
 @ApiBearerAuth()
 @Controller({ path: 'salary-structure', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class SalaryStructureController {
   constructor(private readonly service: SalaryStructureService) {}
 

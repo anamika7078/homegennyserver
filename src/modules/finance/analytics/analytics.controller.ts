@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guards/roles.guard';
@@ -8,7 +8,6 @@ import { FinanceAnalyticsService } from './analytics.service';
 // Spec: Reports & Analytics — RM=R, BM=Y, Finance=Y, Admin=Y, Staff/Client=no access.
 @ApiTags('Finance — Analytics')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.RM, UserRole.BM, UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/analytics', version: '1' })
 export class FinanceAnalyticsController {

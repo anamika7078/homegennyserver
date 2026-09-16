@@ -7,7 +7,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   ParseUUIDPipe,
 } from '@nestjs/common';
 import { LoanService } from './loan.service';
@@ -20,7 +19,6 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 @ApiTags('Loans and Salary Advances')
 @ApiBearerAuth()
 @Controller({ path: 'loan', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class LoanController {
   constructor(private readonly service: LoanService) {}
 

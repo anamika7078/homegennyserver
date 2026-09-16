@@ -7,7 +7,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   UseInterceptors,
   Req,
 } from '@nestjs/common';
@@ -21,7 +20,6 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 @ApiTags('Admin')
 @ApiBearerAuth()
 @Controller({ path: 'admin', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.ADMIN)
 @UseInterceptors(AdminAuditInterceptor)
 export class AdminController {

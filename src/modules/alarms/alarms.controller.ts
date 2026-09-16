@@ -6,7 +6,6 @@ import {
   Patch,
   Param,
   Query,
-  UseGuards,
   Req,
 } from '@nestjs/common';
 import { AlarmsService } from './alarms.service';
@@ -20,7 +19,6 @@ import { AlarmActionDto } from './dto/alarm-action.dto';
 @ApiTags('Alarms & Issues')
 @ApiBearerAuth()
 @Controller({ path: 'alarms', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class AlarmsController {
   constructor(private readonly alarmsService: AlarmsService) {}
 

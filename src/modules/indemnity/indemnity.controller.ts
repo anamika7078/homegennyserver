@@ -1,4 +1,4 @@
-import { BadRequestException, Controller, Get, Post, Param, Body, Query, UseGuards, Request } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Post, Param, Body, Query, Request } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -11,7 +11,6 @@ interface AuthedRequest { user: { id: string; role: string; phone: string } }
 
 @ApiTags('Client Indemnity')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller({ path: 'indemnity', version: '1' })
 export class IndemnityController {
   constructor(

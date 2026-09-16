@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Param, Body, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Post, Param, Body, Request } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -11,7 +11,6 @@ interface AuthedRequest { user: { id: string; role: string } }
 // Admin has audit visibility. No documented Staff/Client/Finance access.
 @ApiTags('Right to Refuse')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller({ path: 'right-to-refuse', version: '1' })
 export class RightToRefuseController {
   constructor(private readonly service: RightToRefuseService) {}

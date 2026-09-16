@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, UseGuards, Request } from '@nestjs/common';
+import { Controller, Post, Get, Body, Request } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -26,7 +26,6 @@ interface CheckRestrictedBody {
 // Admin=full, Staff/Client/Finance=no access.
 @ApiTags('Restricted List')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller({ path: 'restricted-list', version: '1' })
 export class RestrictedListController {
   constructor(private readonly service: RestrictedListService) { }

@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Param, Body, UseGuards, Request, Version } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Body, Request, Version } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -11,7 +11,6 @@ import { PipelineFsmService, StageTransitionInput } from './pipeline-fsm.service
 // drove S1_INTAKE -> S5_DEPLOY unopposed before this fix.
 @ApiTags('Pipeline')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.RM, UserRole.ADMIN)
 @Controller({ path: 'pipeline', version: '1' })
 export class PipelineController {

@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Put, Body, Param, Query, UseGuards, BadRequestException,
+  Controller, Get, Post, Put, Body, Param, Query, BadRequestException,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
@@ -13,7 +13,6 @@ import { UserProvisioningService } from '../../auth/user-provisioning.service';
 // AuthService directly). RM/BM/Finance/Admin per Client Invoicing matrix row.
 @ApiTags('Finance — Customers')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.RM, UserRole.BM, UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/customers', version: '1' })
 export class FinanceCustomerController {

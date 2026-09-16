@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Param, Query, Body, Req, UseGuards, DefaultValuePipe } from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, Body, Req, DefaultValuePipe } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guards/roles.guard';
@@ -7,7 +7,6 @@ import { ExitSettlementService, type ExitReason } from './exit-settlement.servic
 
 @ApiTags('Finance — Exit Settlements')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.FINANCE, UserRole.ADMIN, UserRole.BM)
 @Controller({ path: 'finance/exit-settlements', version: '1' })
 export class ExitSettlementController {

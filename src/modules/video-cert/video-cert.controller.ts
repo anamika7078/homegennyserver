@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Param, Body, UseGuards, UseInterceptors, UploadedFile, Query, Res, Request, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Body, UseInterceptors, UploadedFile, Query, Res, Request, BadRequestException } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import type { Response } from 'express';
@@ -20,7 +20,6 @@ interface AuthedRequest { user: { id: string; role: string; phone: string } }
 // despite the spec above saying "RM reviews/signs-off". Not fixed in this pass — flagging for later.
 @ApiTags('Video Certification', 'Mobile App RM APIs')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller({ path: 'video-cert', version: '1' })
 export class VideoCertController {
   constructor(private readonly service: VideoCertService) { }
@@ -195,7 +194,6 @@ export class VideoCertController {
   }
 
   @Patch('never-delete/:certId')
-  @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN)
   @ApiOperation({ summary: '[Admin] Override never_delete flag on a video certification (Pillar 5 fraud lock)' })
   @ApiBody({ schema: { type: 'object', required: ['neverDelete'], properties: { neverDelete: { type: 'boolean' } } } })

@@ -1,6 +1,5 @@
 import {
-  Controller, Get, Post, Param, Query, Body, Req, UseGuards,
-  ParseIntPipe, DefaultValuePipe, Res,
+  Controller, Get, Post, Param, Query, Body, Req, ParseIntPipe, DefaultValuePipe, Res,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
@@ -13,7 +12,6 @@ import { FinancePayrollService } from './payroll.service';
 // Confirmed live in the audit: GET /finance/payroll returned 200 for STAFF and CLIENT.
 @ApiTags('Finance — Payroll')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.RM, UserRole.BM, UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/payroll', version: '1' })
 export class FinancePayrollController {

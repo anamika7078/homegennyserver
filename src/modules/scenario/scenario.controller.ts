@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -9,7 +9,6 @@ import { EvaluateScenarioDto } from './dto/evaluate-scenario.dto';
 @ApiTags('Scenario Engine')
 @ApiBearerAuth()
 @Controller({ path: 'scenarios', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class ScenarioController {
   constructor(private readonly scenarios: ScenarioService) {}
 

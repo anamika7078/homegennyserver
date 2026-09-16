@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Query, Body, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Query, Body, Req } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guards/roles.guard';
@@ -7,7 +7,6 @@ import { StatutoryTaxService } from './statutory-tax.service';
 
 @ApiTags('Finance — Tax Rules')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/tax', version: '1' })
 export class TaxController {

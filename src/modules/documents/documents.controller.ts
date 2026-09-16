@@ -4,7 +4,6 @@ import {
   Post,
   Delete,
   Param,
-  UseGuards,
   UseInterceptors,
   UploadedFile,
   Body,
@@ -21,7 +20,6 @@ import { Response } from 'express';
 @ApiTags('Employee Documents')
 @ApiBearerAuth()
 @Controller({ path: 'documents', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class DocumentsController {
   constructor(private readonly service: DocumentsService) {}
 

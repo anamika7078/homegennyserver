@@ -10,7 +10,6 @@ import {
   Query,
   Req,
   Res,
-  UseGuards,
   BadRequestException,
 } from '@nestjs/common';
 import { EmployeesService } from './employees.service';
@@ -30,7 +29,6 @@ import { UserProvisioningService } from '../auth/user-provisioning.service';
 @ApiTags('Employees')
 @ApiBearerAuth()
 @Controller({ path: 'employees', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class EmployeesController {
   constructor(
     private readonly service: EmployeesService,

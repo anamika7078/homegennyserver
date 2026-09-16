@@ -7,7 +7,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   ParseUUIDPipe,
 } from '@nestjs/common';
 import { BonusService } from './bonus.service';
@@ -20,7 +19,6 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 @ApiTags('Bonus')
 @ApiBearerAuth()
 @Controller({ path: 'bonus', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class BonusController {
   constructor(private readonly service: BonusService) {}
 

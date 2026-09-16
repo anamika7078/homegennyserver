@@ -6,7 +6,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   ParseUUIDPipe,
   Req,
 } from '@nestjs/common';
@@ -25,7 +24,6 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 @ApiTags('Enterprise Payroll & Processing')
 @ApiBearerAuth()
 @Controller({ path: 'enterprise-payroll', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class EnterprisePayrollController {
   constructor(private readonly service: EnterprisePayrollService) {}
 

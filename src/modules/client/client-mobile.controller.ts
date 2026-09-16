@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Param, Query, Body, Res, UseGuards, UseInterceptors, Req,
+  Controller, Get, Post, Param, Query, Body, Res, UseInterceptors, Req,
   UploadedFiles, BadRequestException,
 } from '@nestjs/common';
 import { AnyFilesInterceptor } from '@nestjs/platform-express';
@@ -51,7 +51,6 @@ const CLIENT_INCIDENT_TYPES = [
 
 @ApiTags('Client Mobile App', 'Mobile App Client APIs')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.CLIENT, UserRole.RM, UserRole.BM, UserRole.ADMIN)
 @Controller({ path: 'client', version: '1' })
 export class ClientMobileController {

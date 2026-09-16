@@ -1,4 +1,4 @@
-import { BadRequestException, Controller, Get, Post, Patch, Param, Body, Query, UseGuards, Request } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Post, Patch, Param, Body, Query, Request } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -14,7 +14,6 @@ interface AuthedRequest { user: { id: string; role: string; phone: string } }
 // SOWs, Admin has full access. Staff/Finance have no documented access.
 @ApiTags('Scope of Work')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller({ path: 'sow', version: '1' })
 export class SowController {
   constructor(

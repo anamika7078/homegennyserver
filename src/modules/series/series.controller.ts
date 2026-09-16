@@ -1,4 +1,4 @@
-import { Body, Controller, Param, Post, UseGuards, Req } from '@nestjs/common';
+import { Body, Controller, Param, Post, Req } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -8,7 +8,6 @@ import { SeriesService } from './series.service';
 @ApiTags('Staff Series (SC/UC/DR)')
 @ApiBearerAuth()
 @Controller({ path: 'series', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class SeriesController {
   constructor(private readonly series: SeriesService) {}
 

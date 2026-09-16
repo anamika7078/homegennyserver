@@ -1,4 +1,4 @@
-import { Controller, Post, Param, Body, UseGuards, BadRequestException } from '@nestjs/common';
+import { Controller, Post, Param, Body, BadRequestException } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -8,7 +8,6 @@ import { QueuePayrollBatchDto } from './dto/queue-payroll-batch.dto';
 
 @ApiTags('Payroll')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller({ path: 'payroll', version: '1' })
 export class PayrollController {
   constructor(private readonly service: PayrollService) {}

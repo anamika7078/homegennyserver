@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Request } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { AnyAuthenticatedRole } from './decorators/roles.decorator';
@@ -11,7 +11,6 @@ export class UserController {
 
   @Get('profile')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
   @AnyAuthenticatedRole()
   @ApiTags('User Profile', 'Mobile App Auth APIs')
   @ApiOperation({

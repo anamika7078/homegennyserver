@@ -6,7 +6,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   Req,
   BadRequestException,
   ParseIntPipe,
@@ -23,7 +22,6 @@ import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger'
 @ApiTags('Employee Attendance')
 @ApiBearerAuth()
 @Controller({ path: 'attendance', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class AttendanceController {
   constructor(
     private readonly service: AttendanceService,

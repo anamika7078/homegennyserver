@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Req, UseGuards, Delete } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Req, Delete } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -8,7 +8,6 @@ import { AuthUser } from '../../common/guards/branch-scope.util';
 
 @ApiTags('Training')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN, UserRole.TRAINER)
 @Controller({ path: 'training', version: '1' })
 export class TrainingController {

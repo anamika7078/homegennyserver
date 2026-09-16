@@ -1,11 +1,10 @@
-import { Controller, Get, Post, Body, UseGuards, Req, Put, Param } from '@nestjs/common';
+import { Controller, Get, Post, Body, Req, Put, Param } from '@nestjs/common';
 import { TrainerService } from './trainer.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 
 @Controller({ path: 'trainer', version: '1' })
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.TRAINER, UserRole.ADMIN) // Admin can also access trainer APIs
 export class TrainerController {
   constructor(private readonly trainerService: TrainerService) {}
