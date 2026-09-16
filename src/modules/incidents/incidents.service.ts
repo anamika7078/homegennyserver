@@ -23,13 +23,48 @@ export class IncidentsService {
     }
   }
 
+  /**
+   * Which RM owns this incident — i.e. whose inbox it has to land in.
+   *
+   * Placement.rmId is the natural answer but it is very often NULL (every
+   * placement in the dev database has it unset), and listForRm()/GET
+   * /rm/incidents filter on Incident.rmId. So a client complaint was written
+   * with rmId = null and then belonged to nobody: the client got a ticket
+   * number, the row existed, and no RM inbox ever showed it. Confirmed live
+   * before this fix — the assigned RM's inbox did not contain the row.
+   *
+   * StaffApplicant.assignedRmId is the fallback, and is the field that is
+   * actually populated (7/7 staff in the same database), because it is set at
+   * intake and carried through the whole pipeline.
+   */
+  private async resolveOwningRm(staffId: string | null | undefined, placementRmId?: string | null): Promise<string | null> {
+    if (placementRmId) return placementRmId;
+    if (!staffId) return null;
+    const staff = await this.prisma.staffApplicant.findUnique({
+      where: { id: staffId },
+      select: { assignedRmId: true },
+    });
+    return staff?.assignedRmId ?? null;
+  }
+
   async fileByClient(
     dto: { staffId: string; type: IncidentType; title: string; description?: string; evidenceUrls?: string[] },
     clientId: string,
     actorUserId: string,
   ) {
     await this.assertClientDeployedStaff(clientId, dto.staffId);
-    const placement = await this.prisma.placement.findFirst({ where: { clientId, staffId: dto.staffId } });
+    // Prefer a live placement over a closed one — a client with both an ended
+    // and a current engagement should have the complaint attached to the
+    // current one.
+    const placement =
+      (await this.prisma.placement.findFirst({
+        where: { clientId, staffId: dto.staffId, status: { in: ['TRIAL', 'CONFIRMED'] } },
+        orderBy: { createdAt: 'desc' },
+      })) ??
+      (await this.prisma.placement.findFirst({
+        where: { clientId, staffId: dto.staffId },
+        orderBy: { createdAt: 'desc' },
+      }));
 
     const incident = await this.prisma.incident.create({
       data: {
@@ -37,7 +72,7 @@ export class IncidentsService {
         clientId,
         placementId: placement?.id,
         branchId: placement?.branchId,
-        rmId: placement?.rmId,
+        rmId: await this.resolveOwningRm(dto.staffId, placement?.rmId),
         type: dto.type,
         title: dto.title,
         description: dto.description,
@@ -53,25 +88,62 @@ export class IncidentsService {
   }
 
   async findOne(id: string) {
-    const incident = await this.prisma.incident.findUnique({ where: { id }, include: { comments: { orderBy: { createdAt: 'asc' } } } });
+    const incident = await this.prisma.incident.findUnique({
+      where: { id },
+      include: {
+        comments: { orderBy: { createdAt: 'asc' } },
+        staff: { select: { id: true, staffCode: true, fullName: true, series: true, pipelineStage: true } },
+      },
+    });
     if (!incident) throw new NotFoundException(`Incident ${id} not found`);
     return incident;
   }
 
+  /**
+   * Every list returns the same shape, including the staff member's name/code
+   * and a comment count — a list row that shows only a title and a status is
+   * not enough for anyone to triage from, and the clients were each having to
+   * make a second request per row to get it.
+   */
+  private readonly listShape = {
+    orderBy: { createdAt: 'desc' } as const,
+    include: {
+      staff: { select: { id: true, staffCode: true, fullName: true, series: true } },
+      _count: { select: { comments: true } },
+    },
+  };
+
   async listForClient(clientId: string) {
-    return this.prisma.incident.findMany({ where: { clientId }, orderBy: { createdAt: 'desc' } });
+    return this.prisma.incident.findMany({ where: { clientId }, ...this.listShape });
   }
 
-  async listForRm(rmId: string) {
-    return this.prisma.incident.findMany({ where: { rmId }, orderBy: { createdAt: 'desc' } });
+  async listForRm(rmId: string, status?: string) {
+    return this.prisma.incident.findMany({
+      where: { rmId, ...(status ? { status: status as never } : {}) },
+      ...this.listShape,
+    });
   }
 
-  async listEscalated() {
-    return this.prisma.incident.findMany({ where: { status: 'ESCALATED' }, orderBy: { createdAt: 'desc' } });
+  /**
+   * BM's queue is everything a BM can actually act on: ESCALATED (they handle
+   * escalations) and RESOLVED (they are the only role that can close one).
+   *
+   * This used to return ESCALATED only, which made `close` unreachable in
+   * practice — the one role allowed to close a RESOLVED incident could not see
+   * a single RESOLVED incident in its own list.
+   */
+  async listForBm(status?: string) {
+    return this.prisma.incident.findMany({
+      where: status ? { status: status as never } : { status: { in: ['ESCALATED', 'RESOLVED'] } },
+      ...this.listShape,
+    });
   }
 
-  async listAll() {
-    return this.prisma.incident.findMany({ orderBy: { createdAt: 'desc' } });
+  async listAll(status?: string) {
+    return this.prisma.incident.findMany({
+      where: status ? { status: status as never } : {},
+      ...this.listShape,
+    });
   }
 
   async addComment(incidentId: string, actorId: string, body: string) {
@@ -106,16 +178,57 @@ export class IncidentsService {
     return this.transition(id, ['OPEN'], 'INVESTIGATING', actorId);
   }
 
-  resolve(id: string, actorId: string, resolution: string) {
-    return this.transition(id, ['OPEN', 'INVESTIGATING', 'ESCALATED'], 'RESOLVED', actorId, { resolution, resolvedAt: new Date() });
+  async resolve(id: string, actorId: string, resolution: string) {
+    if (!resolution || !String(resolution).trim()) {
+      // A resolved incident with no resolution text is the same problem as a
+      // silent 200: it reads as handled and records nothing about how.
+      throw new BadRequestException('A resolution note is required to resolve an incident.');
+    }
+    const updated = await this.transition(
+      id, ['OPEN', 'INVESTIGATING', 'ESCALATED'], 'RESOLVED', actorId,
+      { resolution, resolvedAt: new Date() },
+    );
+    await this.closeEscalationLogs(id);
+    return updated;
   }
 
-  escalate(id: string, actorId: string) {
-    return this.transition(id, ['OPEN', 'INVESTIGATING'], 'ESCALATED', actorId);
+  /**
+   * Escalating flipped Incident.status and nothing else — but the BM dashboard
+   * and the 24-hour follow-up cron both read `escalation_logs`, which only the
+   * scenario engine ever wrote to. So an escalated complaint showed up in no BM
+   * KPI and generated no reminder; it just sat in the list. The log row is
+   * written here so escalation means the same thing whichever way it was
+   * raised, and resolving/closing takes it back out of the open queue.
+   */
+  async escalate(id: string, actorId: string) {
+    const updated = await this.transition(id, ['OPEN', 'INVESTIGATING'], 'ESCALATED', actorId);
+    await this.prisma.escalationLog.create({
+      data: {
+        staffId: updated.staffId,
+        clientId: updated.clientId,
+        severity: updated.legalHold ? 'CRITICAL' : 'HIGH',
+        title: `Incident escalated: ${updated.title}`,
+        description: updated.description ?? `Incident ${updated.type} escalated to BM`,
+        status: 'OPEN',
+        assignedTo: updated.rmId,
+        metadata: { incident_id: updated.id, incident_type: updated.type, escalated_by: actorId },
+      },
+    }).catch(() => undefined);
+    return updated;
   }
 
-  close(id: string, actorId: string) {
-    return this.transition(id, ['RESOLVED'], 'CLOSED', actorId);
+  /** Close out any open escalation_logs row raised from this incident. */
+  private async closeEscalationLogs(incidentId: string) {
+    await this.prisma.escalationLog.updateMany({
+      where: { status: 'OPEN', metadata: { path: ['incident_id'], equals: incidentId } },
+      data: { status: 'RESOLVED', resolvedAt: new Date() },
+    }).catch(() => undefined);
+  }
+
+  async close(id: string, actorId: string) {
+    const updated = await this.transition(id, ['RESOLVED'], 'CLOSED', actorId);
+    await this.closeEscalationLogs(id);
+    return updated;
   }
 
   async setLegalHold(id: string, actorId: string, hold: boolean) {

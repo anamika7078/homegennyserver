@@ -399,29 +399,57 @@ export class RmService {
       },
       orderBy: { createdAt: 'desc' },
       take: 100,
-      include: { staff: { select: { staffCode: true, fullName: true } } },
+      include: {
+        staff: { select: { id: true, staffCode: true, fullName: true, series: true } },
+        _count: { select: { comments: true } },
+      },
     });
   }
 
   async createIncident(user: AuthUser, body: Record<string, unknown>) {
     const staffId = body.staff_id ? String(body.staff_id) : undefined;
+    let staff: { assignedRmId: string | null; branchId: string | null } | null = null;
     if (staffId) {
-      const staff = await this.prisma.staffApplicant.findUnique({ where: { id: staffId } });
+      staff = await this.prisma.staffApplicant.findUnique({
+        where: { id: staffId },
+        select: { assignedRmId: true, branchId: true },
+      });
       if (!staff) throw new NotFoundException('Staff not found');
       if (user.role === UserRole.RM && staff.assignedRmId !== user.id) {
         throw new ForbiddenException('Not assigned to this staff member');
       }
     }
+
+    // Fill in the client/placement the staff member is currently deployed on,
+    // so an RM-raised incident carries the same context a client-filed one
+    // does — without it the incident cannot be traced back to an engagement.
+    let placement: { id: string; clientId: string | null; branchId: string | null; rmId: string | null } | null = null;
+    if (staffId && !body.placement_id) {
+      placement = await this.prisma.placement.findFirst({
+        where: { staffId, status: { in: ['TRIAL', 'CONFIRMED'] } },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, clientId: true, branchId: true, rmId: true },
+      });
+    }
+
+    // rmId is who has to act on this, NOT who typed it in. It was `user.id`,
+    // so a BM or Admin raising an incident put it in their own inbox and the
+    // staff member's actual RM — the person who has to work it — never saw it.
+    const owningRmId =
+      (staffId ? staff?.assignedRmId : null) ??
+      placement?.rmId ??
+      (user.role === UserRole.RM ? user.id : null);
+
     return this.prisma.incident.create({
       data: {
         staffId,
         type: body.type as never,
         title: String(body.title),
         description: body.description ? String(body.description) : undefined,
-        rmId: user.id,
-        branchId: user.branchId ?? undefined,
-        clientId: body.client_id ? String(body.client_id) : undefined,
-        placementId: body.placement_id ? String(body.placement_id) : undefined,
+        rmId: owningRmId ?? undefined,
+        branchId: staff?.branchId ?? placement?.branchId ?? user.branchId ?? undefined,
+        clientId: body.client_id ? String(body.client_id) : (placement?.clientId ?? undefined),
+        placementId: body.placement_id ? String(body.placement_id) : (placement?.id ?? undefined),
         evidenceUrls: (body.evidence_urls as string[]) ?? [],
       },
     });

@@ -1,0 +1,11 @@
+-- Additive: give incidents.updated_at a database-level default.
+--
+-- Prisma's @updatedAt is ORM-only. The column is NOT NULL with no default, so
+-- every raw-SQL INSERT into incidents fails with
+--   null value in column "updated_at" ... violates not-null constraint
+-- even though created_at (which has CURRENT_TIMESTAMP) is fine. Migration and
+-- backfill scripts that touch this table hit it; a live suite hit it here.
+--
+-- Nothing is dropped and no existing row changes — this only supplies a value
+-- for inserts that omit the column. Prisma keeps writing it explicitly.
+ALTER TABLE incidents ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP;

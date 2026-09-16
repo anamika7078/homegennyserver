@@ -1,6 +1,6 @@
 import {
   Controller, Get, Post, Param, Query, Body, Res, UseGuards, UseInterceptors, Req,
-  BadRequestException,
+  UploadedFiles, BadRequestException,
 } from '@nestjs/common';
 import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiConsumes, ApiQuery } from '@nestjs/swagger';
@@ -89,11 +89,23 @@ export class ClientMobileController {
     };
   }
 
+  /**
+   * The client's current engagement. A live placement wins over a closed one —
+   * this used to take the most recent row of any status, so a client with an
+   * ended placement and a current one could have a complaint filed against the
+   * staff member who already left.
+   */
   private async resolveActivePlacement(customerId: string) {
-    return this.prisma.placement.findFirst({
-      where: { clientId: customerId },
-      orderBy: { createdAt: 'desc' },
-    });
+    return (
+      (await this.prisma.placement.findFirst({
+        where: { clientId: customerId, status: { in: ['TRIAL', 'CONFIRMED'] } },
+        orderBy: { createdAt: 'desc' },
+      })) ??
+      (await this.prisma.placement.findFirst({
+        where: { clientId: customerId },
+        orderBy: { createdAt: 'desc' },
+      }))
+    );
   }
 
   @Get('dashboard')
@@ -338,8 +350,10 @@ export class ClientMobileController {
       'Multipart form — matches the Flutter app\'s exact ClientRemoteDataSource.raiseComplaint() shape: ' +
       'subject + description (+ optional images[]). staff_id/type/title are optional overrides for direct ' +
       'API testing — staff_id defaults to your active placement\'s staff, title defaults to subject, ' +
-      'type defaults to CLIENT_COMPLAINT. Uploaded images are accepted but not yet persisted (no storage ' +
-      'wired here — evidenceUrls stays empty for file uploads; pass evidence_urls as plain string URLs instead).',
+      'type defaults to CLIENT_COMPLAINT. ' +
+      'images[] is OPTIONAL and is accepted but NOT persisted — no file storage is wired to this ' +
+      'endpoint, so uploaded files are discarded and the response says so in `imagesStored`. ' +
+      'Use evidence_urls (plain string URLs) for evidence that has to survive.',
   })
   @ApiBody({
     schema: {
@@ -348,7 +362,12 @@ export class ClientMobileController {
       properties: {
         subject: { type: 'string', example: 'Staff arrived 2 hours late without notice' },
         description: { type: 'string' },
-        images: { type: 'array', items: { type: 'string', format: 'binary' } },
+        images: {
+          type: 'array',
+          items: { type: 'string', format: 'binary' },
+          nullable: true,
+          description: 'Optional. Accepted but NOT stored yet — see `imagesStored` in the response.',
+        },
         staff_id: { type: 'string', description: 'Optional — defaults to your active placement\'s staff' },
         type: { type: 'string', enum: CLIENT_INCIDENT_TYPES as unknown as string[], example: 'CLIENT_COMPLAINT', description: 'Optional — defaults to CLIENT_COMPLAINT' },
         title: { type: 'string', description: 'Optional — defaults to subject' },
@@ -356,7 +375,7 @@ export class ClientMobileController {
       },
     },
   })
-  async raiseComplaint(@Req() req: any, @Body() body: any) {
+  async raiseComplaint(@Req() req: any, @UploadedFiles() files: any[] = [], @Body() body: any) {
     const customer = await this.resolveCustomer(req.user.id);
     if (!customer) throw new BadRequestException('No customer account linked to this login');
 
@@ -373,7 +392,22 @@ export class ClientMobileController {
       customer.id,
       req.user.id,
     );
-    return { success: true, ticketNumber: incident.id, status: incident.status, message: 'Complaint submitted to RM and Branch Manager.' };
+
+    // Say out loud that uploaded files were dropped. The app lets the user
+    // attach photos and there is no storage behind this endpoint; a plain
+    // success response made that look like it had worked.
+    const imagesReceived = files?.length ?? 0;
+    return {
+      success: true,
+      ticketNumber: incident.id,
+      status: incident.status,
+      imagesReceived,
+      imagesStored: 0,
+      ...(imagesReceived > 0
+        ? { warning: 'Image uploads are not stored yet — send evidence_urls for evidence that must persist.' }
+        : {}),
+      message: 'Complaint submitted to RM and Branch Manager.',
+    };
   }
 
   @Post('replacements')
