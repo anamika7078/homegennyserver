@@ -19,7 +19,13 @@ FROM node:20-alpine AS development
 RUN apk add --no-cache openssl
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+# The npm cache survives between builds, so a retry (or the next rebuild) does
+# not download every package again. The retry settings are for the dev VPS:
+# under Hostinger's CPU cap one tarball timing out used to fail the whole
+# 15-minute install.
+RUN --mount=type=cache,target=/root/.npm \
+    npm install --no-audit --no-fund \
+      --fetch-retries=6 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000
 COPY . .
 EXPOSE 3001
 CMD ["npm", "run", "start:dev"]
