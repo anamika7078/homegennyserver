@@ -154,6 +154,7 @@ model StaffApplicant {
   medicationLogs         MedicationLog[]
 
   pipelineEvents         PipelineEvent[]
+  stageHolds             StageHold[]
 
   scenarioLogs           ScenarioLog[]
   shiftLogs              ShiftLog[]
@@ -207,6 +208,35 @@ model PipelineEvent {
   @@index([staffId])
   @@index([occurredAt(sort: Desc)])
   @@map("pipeline_events")
+}
+
+/// A pipeline stage's work that's either on HOLD (still pending — see `kind`
+/// above) or marked COMPLETE (done outside the system). Not a stage or a
+/// status, a tag on one the staff has reached. Either kind lets the staff
+/// past that stage's exit gate; only HOLD blocks placement, and only HOLD is
+/// re-checked when released. Created by scratch/_stage_holds_migration.js and
+/// scratch/_stage_overrides_kind_migration.js, which also add a partial
+/// unique index (one open override per staff and stage) Prisma can't express
+/// — PipelineFsmService.placeOverride() enforces the same rule itself.
+model StageHold {
+  id           String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  staffId      String         @map("staff_id") @db.Uuid
+  stage        PipelineStage
+  /// HOLD (default) = this stage's work is still pending, temporary, blocks
+  /// placement. COMPLETE = the work already happened outside the system
+  /// (migrated/pre-vetted staff), permanent, does not block placement.
+  kind         String         @default("HOLD") @db.VarChar(10)
+  reason       String         @db.VarChar(40)
+  notes        String?
+  heldBy       String?        @map("held_by") @db.Uuid
+  heldAt       DateTime       @default(now()) @map("held_at") @db.Timestamptz(6)
+  releasedBy   String?        @map("released_by") @db.Uuid
+  releasedAt   DateTime?      @map("released_at") @db.Timestamptz(6)
+  releaseNotes String?        @map("release_notes")
+  staff        StaffApplicant @relation(fields: [staffId], references: [id])
+
+  @@index([staffId], map: "stage_holds_staff_id_idx")
+  @@map("stage_holds")
 }
 
 model ScenarioDefinition {

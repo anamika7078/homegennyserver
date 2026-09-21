@@ -3,10 +3,11 @@
  * creating the two kinds of placement, and letting one person hold several.
  *
  * The API used to refuse any second active placement, which made a maid working
- * more than one house impossible to represent. It now refuses only a second
- * placement *with the same client*, and a placement declares how it is paid:
- * PERMANENT on a monthly salary, TEMPORARY on an hourly rate that can differ
- * from house to house.
+ * more than one house impossible to represent. It now allows several hourly
+ * placements at once (never two with the same client), and a placement declares
+ * how it is paid: PERMANENT on a monthly salary, TEMPORARY on an hourly rate that
+ * can differ from house to house. A permanent placement is always the only one
+ * (decided 2026-09-21).
  *
  * Creates its own staff and clients, then removes them.
  *
@@ -106,46 +107,54 @@ async function main() {
       made.customerIds.push(c.rows[0].id);
     }
 
-    // ── a permanent placement ─────────────────────────────────────────────
-    const perm = await req('POST', '/placements', {
-      token,
-      body: {
-        staff_id: made.staffId, client_id: made.customerIds[0],
-        placement_type: 'PERMANENT', staff_salary: 20000, management_fee: 3000, shift_hours: 12,
-      },
-    });
-    check('a permanent placement is created', perm.status === 200 || perm.status === 201,
-      { status: perm.status, body: perm.body });
-    if (perm.body?.id) made.placementIds.push(perm.body.id);
-    check('it comes back as PERMANENT', perm.body?.placement_type === 'PERMANENT',
-      perm.body?.placement_type);
-    check('its shift is kept', Number(perm.body?.shift_hours) === 12, perm.body?.shift_hours);
-
-    // ── the same person, a different house, paid by the hour ──────────────
+    // ── one person, two houses, both paid by the hour ─────────────────────
+    const exitBody = { exit_date: new Date().toISOString().slice(0, 10), exit_scenario_code: 'MUTUAL' };
     const hourly = await req('POST', '/placements', {
       token,
       body: {
-        staff_id: made.staffId, client_id: made.customerIds[1],
+        staff_id: made.staffId, client_id: made.customerIds[0],
         placement_type: 'TEMPORARY', hourly_rate: 220, hourly_fee: 35,
       },
     });
-    check('the same person can be placed at a second house',
-      hourly.status === 200 || hourly.status === 201, { status: hourly.status, body: hourly.body });
+    check('an hourly placement is created', hourly.status === 200 || hourly.status === 201,
+      { status: hourly.status, body: hourly.body });
     if (hourly.body?.id) made.placementIds.push(hourly.body.id);
-    check('the second one is TEMPORARY', hourly.body?.placement_type === 'TEMPORARY',
+    check('it comes back as TEMPORARY', hourly.body?.placement_type === 'TEMPORARY',
       hourly.body?.placement_type);
     check('with its own hourly rate', Number(hourly.body?.hourly_rate) === 220,
       hourly.body?.hourly_rate);
+
+    const hourly2 = await req('POST', '/placements', {
+      token,
+      body: {
+        staff_id: made.staffId, client_id: made.customerIds[1],
+        placement_type: 'TEMPORARY', hourly_rate: 180, hourly_fee: 30,
+      },
+    });
+    check('the same person can be placed hourly at a second house',
+      hourly2.status === 200 || hourly2.status === 201, { status: hourly2.status, body: hourly2.body });
+    if (hourly2.body?.id) made.placementIds.push(hourly2.body.id);
 
     // ── but not twice at the same house ───────────────────────────────────
     const dupe = await req('POST', '/placements', {
       token,
       body: {
         staff_id: made.staffId, client_id: made.customerIds[0],
-        placement_type: 'PERMANENT', staff_salary: 20000, management_fee: 3000,
+        placement_type: 'TEMPORARY', hourly_rate: 200, hourly_fee: 30,
       },
     });
     check('a second placement at the same house is refused', dupe.status === 400, dupe.status);
+
+    // ── a permanent placement is the staff's only one (decided 2026-09-21) ─
+    const permWhileHourly = await req('POST', '/placements', {
+      token,
+      body: {
+        staff_id: made.staffId, client_id: made.customerIds[2],
+        placement_type: 'PERMANENT', staff_salary: 20000, management_fee: 3000, shift_hours: 12,
+      },
+    });
+    check('a permanent placement is refused while hourly ones are active', permWhileHourly.status === 400,
+      permWhileHourly.status);
 
     // ── an hour with no price cannot be billed ────────────────────────────
     const noRate = await req('POST', '/placements', {
@@ -168,15 +177,43 @@ async function main() {
     });
     check('an unknown placement type is refused', badType.status === 400, badType.status);
 
-    // ── the list reports both, with their terms ───────────────────────────
+    // ── once the hourly work ends, a permanent placement can start ─────────
+    for (const id of [hourly.body?.id, hourly2.body?.id].filter(Boolean)) {
+      await req('POST', `/placements/${id}/exit`, { token, body: exitBody });
+    }
+    const perm = await req('POST', '/placements', {
+      token,
+      body: {
+        staff_id: made.staffId, client_id: made.customerIds[2],
+        placement_type: 'PERMANENT', staff_salary: 20000, management_fee: 3000, shift_hours: 12,
+      },
+    });
+    check('a permanent placement is created', perm.status === 200 || perm.status === 201,
+      { status: perm.status, body: perm.body });
+    if (perm.body?.id) made.placementIds.push(perm.body.id);
+    check('it comes back as PERMANENT', perm.body?.placement_type === 'PERMANENT',
+      perm.body?.placement_type);
+    check('its shift is kept', Number(perm.body?.shift_hours) === 12, perm.body?.shift_hours);
+
+    const hourlyWhilePerm = await req('POST', '/placements', {
+      token,
+      body: {
+        staff_id: made.staffId, client_id: made.customerIds[0],
+        placement_type: 'TEMPORARY', hourly_rate: 220, hourly_fee: 35,
+      },
+    });
+    check('no other placement, not even hourly, while a permanent one is active',
+      hourlyWhilePerm.status === 400, hourlyWhilePerm.status);
+
+    // ── the list reports all three, with their terms ──────────────────────
     const list = await req('GET', `/placements?staff_id=${made.staffId}&limit=50`, { token });
     const mine = (list.body?.items ?? []).filter((p) => p.staff_id === made.staffId);
-    check('both placements are listed', mine.length === 2, mine.length);
+    check('all three placements are listed', mine.length === 3, mine.length);
     check('the list says which kind each is',
       new Set(mine.map((p) => p.placement_type)).size === 2,
       mine.map((p) => p.placement_type));
     check('and carries the hourly rate through',
-      Number(mine.find((p) => p.placement_type === 'TEMPORARY')?.hourly_rate) === 220,
+      mine.some((p) => p.placement_type === 'TEMPORARY' && Number(p.hourly_rate) === 220),
       mine.map((p) => p.hourly_rate));
   } finally {
     try {

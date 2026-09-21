@@ -10,7 +10,7 @@ import { Prisma, PipelineStage, UserRole, StaffAttendanceStatus, TerminalOutcome
 import { PrismaService } from '../../prisma/prisma.service';
 import { PipelineFsmService, PipelineStage as FsmStage } from '../pipeline/pipeline-fsm.service';
 import { AuthUser, resolveStaffScope, assertStaffAccess } from '../../common/guards/branch-scope.util';
-import { toStaffDto, parseCreateStaffBody, mapSeriesFromShort } from '../../common/mappers/staff.mapper';
+import { toStaffDto, parseCreateStaffBody, mapSeriesFromShort, mapSeriesToShort } from '../../common/mappers/staff.mapper';
 import { StaffService } from '../staff/staff.service';
 import { PayrollService } from '../payroll/payroll.service';
 import { UserProvisioningService } from '../auth/user-provisioning.service';
@@ -42,6 +42,9 @@ const KANBAN_STAGES: PipelineStage[] = [
   'DEFERRED',
   'TERMINAL',
 ];
+
+/** A HOLD open this long is flagged `overdue` on /rm/holds — surfaced, not acted on. */
+const HOLD_OVERDUE_DAYS = 7;
 
 @Injectable()
 export class RmService {
@@ -229,6 +232,7 @@ export class RmService {
       include: {
         assignedRm: { select: { id: true, fullName: true } },
         deposits: { orderBy: { createdAt: 'desc' }, take: 1 },
+        stageHolds: { where: { releasedAt: null }, orderBy: { heldAt: 'asc' } },
       },
     });
 
@@ -269,20 +273,6 @@ export class RmService {
       payload,
       terminalOutcome: terminalOutcome as TerminalOutcome | undefined,
     });
-
-    if (toStage === 'DEFERRED' && payload?.deferred_reason) {
-      const timeoutAt = new Date();
-      timeoutAt.setDate(timeoutAt.getDate() + 90);
-      await this.prisma.deferredRecord.create({
-        data: {
-          staffId,
-          reason: payload.deferred_reason as never,
-          resumeStage: staff.pipelineStage,
-          timeoutAt,
-          notes: payload.notes ? String(payload.notes) : undefined,
-        },
-      });
-    }
 
     const updated = await this.prisma.staffApplicant.findUnique({ where: { id: staffId } });
     this.events.emit('realtime.broadcast', {
@@ -561,6 +551,9 @@ export class RmService {
     const scope = resolveStaffScope(user, {});
     return this.prisma.deferredRecord.findMany({
       where: {
+        // Only the deferral in progress — a staff deferred twice has an older,
+        // already-resumed record too, and listed it twice.
+        resumeAt: null,
         staff: {
           pipelineStage: 'DEFERRED',
           deletedAt: null,
@@ -583,20 +576,135 @@ export class RmService {
     });
   }
 
-  async resumeDeferred(user: AuthUser, staffId: string, toStage: string) {
+  private async staffForAction(user: AuthUser, staffId: string) {
+    const staff = await this.prisma.staffApplicant.findFirst({ where: { id: staffId, deletedAt: null } });
+    if (!staff) throw new NotFoundException(`Staff ${staffId} not found`);
+    if (user.role === UserRole.RM && staff.assignedRmId !== user.id) {
+      throw new ForbiddenException('Not assigned to this staff member');
+    }
+    if (user.role === UserRole.BM && user.branchId && staff.branchId !== user.branchId) {
+      throw new ForbiddenException('Staff is not in your branch');
+    }
+    return staff;
+  }
+
+  async placeHold(
+    user: AuthUser,
+    staffId: string,
+    body: { reason?: string; stage?: string; notes?: string },
+  ) {
+    await this.staffForAction(user, staffId);
+    const hold = await this.fsm.placeHold({
+      staffId,
+      actorId: user.id,
+      reason: String(body.reason ?? ''),
+      stage: body.stage,
+      notes: body.notes,
+    });
+    this.events.emit('realtime.broadcast', {
+      channel: 'pipeline',
+      event: 'pipeline.stage_changed',
+      data: { staffId, hold: 'placed', stage: hold.stage },
+    });
+    return hold;
+  }
+
+  /**
+   * Marks a stage complete for a staff whose work there already happened
+   * outside the system (a migrated or previously-vetted staff member) — no
+   * re-check, and unlike a hold it doesn't block placement.
+   */
+  async markComplete(
+    user: AuthUser,
+    staffId: string,
+    body: { reason?: string; stage?: string; notes?: string },
+  ) {
+    await this.staffForAction(user, staffId);
+    const row = await this.fsm.markComplete({
+      staffId,
+      actorId: user.id,
+      reason: String(body.reason ?? ''),
+      stage: body.stage,
+      notes: body.notes,
+    });
+    this.events.emit('realtime.broadcast', {
+      channel: 'pipeline',
+      event: 'pipeline.stage_changed',
+      data: { staffId, hold: 'completed', stage: row.stage },
+    });
+    return row;
+  }
+
+  async releaseHold(user: AuthUser, holdId: string, notes?: string) {
+    const hold = await this.prisma.stageHold.findUnique({ where: { id: holdId } });
+    if (!hold) throw new NotFoundException(`Hold ${holdId} not found`);
+    await this.staffForAction(user, hold.staffId);
+    const released = await this.fsm.releaseHold({ holdId, actorId: user.id, notes });
+    this.events.emit('realtime.broadcast', {
+      channel: 'pipeline',
+      event: 'pipeline.stage_changed',
+      data: { staffId: hold.staffId, hold: 'released', stage: hold.stage },
+    });
+    return released;
+  }
+
+  /**
+   * Open holds and completes, oldest first — each with the staff it belongs
+   * to. A HOLD past 7 days is flagged `overdue`, purely to surface it to the
+   * RM/BM — nothing auto-happens to the staff or the hold itself, unlike the
+   * 90-day deferred timeout.
+   */
+  async listHolds(user: AuthUser) {
+    const scope = resolveStaffScope(user, {});
+    const rows = await this.prisma.stageHold.findMany({
+      where: {
+        releasedAt: null,
+        staff: {
+          deletedAt: null,
+          ...(scope.rmId ? { assignedRmId: scope.rmId } : {}),
+          ...(scope.branchId ? { branchId: scope.branchId } : {}),
+        },
+      },
+      orderBy: { heldAt: 'asc' },
+      take: 200,
+      include: {
+        staff: { select: { id: true, staffCode: true, fullName: true, series: true, pipelineStage: true } },
+      },
+    });
+    const overdueMs = HOLD_OVERDUE_DAYS * 86_400_000;
+    return rows.map((h) => ({
+      id: h.id,
+      staff_id: h.staffId,
+      stage: h.stage,
+      kind: h.kind,
+      reason: h.reason,
+      notes: h.notes,
+      held_at: h.heldAt,
+      overdue: h.kind === 'HOLD' && Date.now() - h.heldAt.getTime() > overdueMs,
+      staff_code: h.staff.staffCode,
+      staff_name: h.staff.fullName,
+      series: mapSeriesToShort(h.staff.series),
+      current_stage: h.staff.pipelineStage,
+    }));
+  }
+
+  /**
+   * Resumes to `toStage`, or to the stage the staff was deferred from when none
+   * is given. The FSM closes the open record and refuses a stage past that one.
+   * A staff deferred before records were written reliably has none — they can
+   * still be resumed, to whatever stage the FSM allows.
+   */
+  async resumeDeferred(user: AuthUser, staffId: string, toStage?: string) {
     const record = await this.prisma.deferredRecord.findFirst({
-      where: { staffId },
+      where: { staffId, resumeAt: null },
       orderBy: { deferredAt: 'desc' },
     });
-    if (!record) throw new BadRequestException('No deferred record found');
-    await this.advanceStage(user, staffId, toStage, 'DEFERRED_RESUME', {
-      deferred_record_id: record.id,
+    const target = toStage || record?.resumeStage;
+    if (!target) throw new BadRequestException('to_stage is required — this staff has no recorded stage to resume to');
+    await this.advanceStage(user, staffId, target, 'DEFERRED_RESUME', {
+      ...(record ? { deferred_record_id: record.id } : {}),
     });
-    await this.prisma.deferredRecord.update({
-      where: { id: record.id },
-      data: { resumeAt: new Date() },
-    });
-    return { success: true };
+    return { success: true, to_stage: target };
   }
 
   async listUpgrades(user: AuthUser) {

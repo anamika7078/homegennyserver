@@ -85,6 +85,11 @@ export class StaffService {
         // and false and nothing has ever written them, so the staff detail
         // screen showed "₹0 Pending" for everyone. Same root cause as F-05.
         deposits: { orderBy: { createdAt: 'desc' }, take: 1 },
+        // Open holds on this staff — toStaffDto() maps this to `open_holds`.
+        // Without it, the staff detail screen (Agreements/S4 in particular)
+        // had no way to show a held stage, or let the RM bypass a blocked
+        // deployment gate by placing one.
+        stageHolds: { where: { releasedAt: null }, orderBy: { heldAt: 'asc' } },
       },
     });
     if (row) {

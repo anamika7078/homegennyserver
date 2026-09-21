@@ -1,7 +1,7 @@
 import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
-import { TerminalOutcome } from '@prisma/client';
+import { TerminalOutcome, DeferredReason } from '@prisma/client';
 import * as crypto from 'crypto';
 import { mapSeriesToShort, mapSeriesFromShort } from '../../common/mappers/staff.mapper';
 
@@ -47,9 +47,62 @@ const VALID_TRANSITIONS: Record<PipelineStage, PipelineStage[]> = {
   [PipelineStage.S3_TRAIN]: [PipelineStage.S4_AGREEMENTS, PipelineStage.TERMINAL, PipelineStage.DEFERRED],
   [PipelineStage.S4_AGREEMENTS]: [PipelineStage.S5_DEPLOY, PipelineStage.TERMINAL],
   [PipelineStage.S5_DEPLOY]: [PipelineStage.TERMINAL],
-  [PipelineStage.DEFERRED]: [PipelineStage.S2_VERIFY, PipelineStage.S3_TRAIN, PipelineStage.TERMINAL],
+  // A resume may land on any of these, but never past the stage the staff was
+  // deferred from — advanceStage() checks that against the open deferred record.
+  [PipelineStage.DEFERRED]: [PipelineStage.S2_VERIFY, PipelineStage.S2_5_ASSESS, PipelineStage.S3_TRAIN, PipelineStage.TERMINAL],
   [PipelineStage.TERMINAL]: [],
 };
+
+/** Stages a deferral can resume to, earliest first. */
+const RESUMABLE_ORDER: PipelineStage[] = [PipelineStage.S2_VERIFY, PipelineStage.S2_5_ASSESS, PipelineStage.S3_TRAIN];
+
+/** An open deferral turns TERMINAL (outcome DEFERRED) after this many days — see the cron. */
+export const DEFERRED_TIMEOUT_DAYS = 90;
+
+/** The working stages, in order. A hold can sit on any of them the staff has reached. */
+const STAGE_ORDER: PipelineStage[] = [
+  PipelineStage.S1_INTAKE,
+  PipelineStage.S2_VERIFY,
+  PipelineStage.S2_5_ASSESS,
+  PipelineStage.S3_TRAIN,
+  PipelineStage.S4_AGREEMENTS,
+  PipelineStage.S5_DEPLOY,
+];
+
+export const HOLD_REASONS = [
+  'PV_PENDING',
+  'DOCUMENT_PENDING',
+  'MEDICAL_PENDING',
+  'ASSESSMENT_PENDING',
+  'TRAINING_PENDING',
+  'AGREEMENT_PENDING',
+  'CLIENT_PENDING',
+  'OTHER',
+] as const;
+
+/** Why a stage was marked done outside the system, rather than actually worked through here. */
+export const COMPLETE_REASONS = [
+  'ALREADY_VERIFIED_EXTERNALLY',
+  'MIGRATED_STAFF',
+  'RM_CONFIRMED_MANUALLY',
+  'OTHER',
+] as const;
+
+export type OverrideKind = 'HOLD' | 'COMPLETE';
+
+export interface StageHoldRow {
+  id: string;
+  staff_id: string;
+  stage: PipelineStage;
+  kind: OverrideKind;
+  reason: string;
+  notes: string | null;
+  held_by: string | null;
+  held_at: Date;
+  released_by: string | null;
+  released_at: Date | null;
+  release_notes: string | null;
+}
 
 export interface StageTransitionInput {
   staffId: string;
@@ -62,6 +115,9 @@ export interface StageTransitionInput {
 }
 
 const VALID_TERMINAL_OUTCOMES = new Set(Object.values(TerminalOutcome));
+const VALID_DEFERRED_REASONS = new Set<string>(Object.values(DeferredReason));
+/** Successful ends — reports.service counts TERMINAL/ENROLLED as a placement — so active placements stay. */
+const OUTCOMES_KEEPING_PLACEMENTS = new Set<string>([TerminalOutcome.ENROLLED, TerminalOutcome.CONDITIONAL]);
 
 /** Video prompt counts per series — mirrors video-cert.service.ts's VIDEO_PROMPTS keys. */
 const REQUIRED_VIDEO_PROMPTS: Record<string, number> = { MAID: 9, SC: 10, UC: 10, DR: 12 };
@@ -195,13 +251,53 @@ export class PipelineFsmService {
     seriesShort: string,
     pvStatus: string,
   ): Promise<{ eligible: boolean; blockers: string[]; flags: Record<string, any> }> {
-    const blockers: string[] = [];
+    const { raw, flags } = await this.computeDeploymentBlockers(manager, staffId, seriesShort, pvStatus);
+    const overriddenStages = await this.getOverriddenStages(manager, staffId);
+    // A blocker tagged with the stage that owns it doesn't block deploy while
+    // that stage has an open override (HOLD or COMPLETE) — HOLD tracks the
+    // work as pending there instead, and releasing it re-runs exactly this
+    // check; COMPLETE says the work already happened outside the system and
+    // is permanent. An untagged blocker (nothing here today — every blocker
+    // is owned by S2_VERIFY, S2_5_ASSESS, S3_TRAIN, or S4_AGREEMENTS) would
+    // always block, since S5 itself can't be overridden before it's reached.
+    const blockers = raw.filter((b) => !(b.homeStage && overriddenStages.has(b.homeStage))).map((b) => b.message);
+    return { eligible: blockers.length === 0, blockers, flags };
+  }
+
+  /** stage → currently open (HOLD or COMPLETE) override, for whichever staff `staffId` is. */
+  private async getOverriddenStages(
+    manager: { query: (sql: string, params?: any[]) => Promise<any[]> },
+    staffId: string,
+  ): Promise<Set<PipelineStage>> {
+    const rows = await manager.query(
+      `SELECT stage FROM stage_holds WHERE staff_id = $1 AND released_at IS NULL`,
+      [staffId],
+    );
+    return new Set(rows.map((r) => r.stage as PipelineStage));
+  }
+
+  /**
+   * The raw pass/fail facts checkDeploymentEligibility is built from, each
+   * tagged with the earlier stage that owns it (or untagged, if none does).
+   * Shared with releaseHold(), which needs only the blockers belonging to the
+   * one stage being released — not the whole S5 gate, which would otherwise
+   * make releasing the Agreements hold wait on the video certification too.
+   */
+  private async computeDeploymentBlockers(
+    manager: { query: (sql: string, params?: any[]) => Promise<any[]> },
+    staffId: string,
+    seriesShort: string,
+    pvStatus: string,
+  ): Promise<{ raw: { message: string; homeStage?: PipelineStage }[]; flags: Record<string, any> }> {
+    const raw: { message: string; homeStage?: PipelineStage }[] = [];
     const flags: Record<string, any> = {};
 
     // Aadhaar eKYC — required for every series (verification.service.ts's
     // REQUIRED_BY_SERIES). Was hardcoded `aadhaar_verified: true` here, so a
     // staff could reach S5_DEPLOY whether or not RM ever actually verified
     // Aadhaar — the VerificationTrack row was recorded but never read back.
+    // Owned by S2_VERIFY, same as everything else this checks — that's the
+    // whole point of the stage.
     const aadhaarRows = await manager.query(
       `SELECT status FROM verification_tracks WHERE staff_id = $1 AND track_type = 'AADHAAR_EKYC'`,
       [staffId],
@@ -209,7 +305,7 @@ export class PipelineFsmService {
     const aadhaarStatus = aadhaarRows[0]?.status;
     flags.aadhaar_verified = aadhaarStatus === 'CLEAR';
     if (aadhaarStatus !== 'CLEAR') {
-      blockers.push(`Aadhaar eKYC not verified — status=${aadhaarStatus ?? 'NOT_STARTED'}`);
+      raw.push({ message: `Aadhaar eKYC not verified — status=${aadhaarStatus ?? 'NOT_STARTED'}`, homeStage: PipelineStage.S2_VERIFY });
     }
 
     // Pillar 4 — Police Verification. Maid has a documented exception:
@@ -217,17 +313,22 @@ export class PipelineFsmService {
     if (seriesShort === 'MAID') {
       flags.pv_pending = pvStatus === 'NOT_INITIATED' || pvStatus === 'IN_PROGRESS';
       flags.pv_failed = pvStatus === 'ADVERSE';
-      if (flags.pv_failed) blockers.push(`Police verification failed (Pillar 4) — pv_status=${pvStatus}`);
+      if (flags.pv_failed) raw.push({ message: `Police verification failed (Pillar 4) — pv_status=${pvStatus}`, homeStage: PipelineStage.S2_VERIFY });
     } else {
       flags.pv_pending = pvStatus !== 'CLEAR';
       flags.pv_failed = pvStatus === 'ADVERSE';
       if (pvStatus !== 'CLEAR') {
-        blockers.push(`Police verification not CLEAR (Pillar 4) — pv_status=${pvStatus}, ${seriesShort} requires CLEAR before deployment`);
+        raw.push({
+          message: `Police verification not CLEAR (Pillar 4) — pv_status=${pvStatus}, ${seriesShort} requires CLEAR before deployment`,
+          homeStage: PipelineStage.S2_VERIFY,
+        });
       }
     }
 
     // Pillar 5 — Video Certification: every required prompt must have an
     // RM-approved submission (Pillar 5 doc: "RM: reviews and signs off").
+    // Owned by S3_TRAIN — video prompts are recorded during/after training,
+    // so a hold or complete on S3_TRAIN covers this too.
     const requiredPrompts = REQUIRED_VIDEO_PROMPTS[seriesShort] ?? 0;
     const videoRows = await manager.query(
       `SELECT COUNT(DISTINCT prompt_key)::int AS cnt FROM video_certifications WHERE staff_id = $1 AND review_status = 'APPROVED'`,
@@ -236,17 +337,20 @@ export class PipelineFsmService {
     const approvedPrompts = videoRows[0]?.cnt ?? 0;
     flags.video_cert_complete = approvedPrompts >= requiredPrompts;
     if (!flags.video_cert_complete) {
-      blockers.push(`Video certification incomplete (Pillar 5) — ${approvedPrompts}/${requiredPrompts} prompts RM-approved`);
+      raw.push({
+        message: `Video certification incomplete (Pillar 5) — ${approvedPrompts}/${requiredPrompts} prompts RM-approved`,
+        homeStage: PipelineStage.S3_TRAIN,
+      });
     }
 
-    // Agreement requirement (all series).
+    // Agreement requirement (all series) — owned by S4_AGREEMENTS.
     const agreementRows = await manager.query(
       `SELECT COUNT(*)::int AS cnt FROM agreements WHERE staff_id = $1 AND status = 'SIGNED'`,
       [staffId],
     );
     const agreementSigned = (agreementRows[0]?.cnt ?? 0) > 0;
     flags.agreement_rejected = !agreementSigned;
-    if (!agreementSigned) blockers.push('No signed agreement on file');
+    if (!agreementSigned) raw.push({ message: 'No signed agreement on file', homeStage: PipelineStage.S4_AGREEMENTS });
 
     // Pillar 3 — Medical/Sobriety, required for SC/UC/DR (not MAID).
     if (seriesShort === 'SC' || seriesShort === 'UC' || seriesShort === 'DR') {
@@ -257,11 +361,12 @@ export class PipelineFsmService {
       const medStatus = medRows[0]?.status;
       flags.medical_failed = medStatus === 'FAILED';
       if (medStatus !== 'CLEAR') {
-        blockers.push(`Medical/sobriety not CLEAR (Pillar 3) — status=${medStatus ?? 'NOT_SUBMITTED'}`);
+        raw.push({ message: `Medical/sobriety not CLEAR (Pillar 3) — status=${medStatus ?? 'NOT_SUBMITTED'}`, homeStage: PipelineStage.S2_VERIFY });
       }
     }
 
-    // DR-specific: Pillar 1 (Licence), eChallan, Pillar 2 (practical test).
+    // DR-specific: Pillar 1 (Licence), eChallan — both S2_VERIFY tracks —
+    // and Pillar 2 (practical test), which S2_5_ASSESS owns.
     if (seriesShort === 'DR') {
       const dlRows = await manager.query(
         `SELECT status FROM verification_tracks WHERE staff_id = $1 AND track_type = 'SARATHI_API'`,
@@ -271,7 +376,7 @@ export class PipelineFsmService {
       flags.dl_expired = dlStatus === 'EXPIRED';
       flags.dl_suspended = dlStatus === 'FAILED';
       if (dlStatus !== 'CLEAR') {
-        blockers.push(`Driving licence not verified CLEAR (Pillar 1) — status=${dlStatus ?? 'NOT_CHECKED'}`);
+        raw.push({ message: `Driving licence not verified CLEAR (Pillar 1) — status=${dlStatus ?? 'NOT_CHECKED'}`, homeStage: PipelineStage.S2_VERIFY });
       }
 
       const echallanRows = await manager.query(
@@ -279,11 +384,14 @@ export class PipelineFsmService {
         [staffId],
       );
       if (!echallanRows.length) {
-        blockers.push('eChallan not checked');
+        raw.push({ message: 'eChallan not checked', homeStage: PipelineStage.S2_VERIFY });
       } else {
         flags.challan_count = echallanRows[0].result?.count ?? null;
         if (echallanRows[0].status === 'FAILED') {
-          blockers.push(`eChallan check shows severe violation count (>=3, DR-07) — count=${flags.challan_count}`);
+          raw.push({
+            message: `eChallan check shows severe violation count (>=3, DR-07) — count=${flags.challan_count}`,
+            homeStage: PipelineStage.S2_VERIFY,
+          });
         }
       }
 
@@ -292,10 +400,10 @@ export class PipelineFsmService {
         [staffId],
       );
       flags.practical_passed = practicalRows.length > 0;
-      if (!flags.practical_passed) blockers.push('Practical driving test not passed (Pillar 2)');
+      if (!flags.practical_passed) raw.push({ message: 'Practical driving test not passed (Pillar 2)', homeStage: PipelineStage.S2_5_ASSESS });
     }
 
-    return { eligible: blockers.length === 0, blockers, flags };
+    return { raw, flags };
   }
 
   /**
@@ -441,6 +549,60 @@ export class PipelineFsmService {
             `terminalOutcome is required when moving to TERMINAL — one of: ${Array.from(VALID_TERMINAL_OUTCOMES).join(', ')}`,
           );
         }
+
+        // A staff leaving (any outcome but a successful one) can't leave active
+        // placements behind — they'd keep billing a client for someone who has
+        // gone. Each has to be exited first: the exit date and reason set the
+        // exit settlement, so they're the RM's call, not something to default.
+        // ENROLLED/CONDITIONAL close the pipeline on a success; the placements
+        // carry on.
+        if (!OUTCOMES_KEEPING_PLACEMENTS.has(input.terminalOutcome)) {
+          const live = await manager.query(
+            `SELECT p.status, COALESCE(fc.customer_name, 'unknown client') AS client
+             FROM placements p LEFT JOIN finance_customers fc ON fc.id = p.client_id
+             WHERE p.staff_id = $1 AND p.status IN ('TRIAL', 'CONFIRMED')`,
+            [staffId],
+          );
+          if (live.length) {
+            throw new BadRequestException(
+              `Exit this staff's active placement(s) before moving them to TERMINAL (${input.terminalOutcome}): ` +
+                live.map((p: { client: string; status: string }) => `${p.client} (${p.status})`).join(', '),
+            );
+          }
+        }
+      }
+
+      // ── DEFERRED needs a reason, and the record is written here, in the same
+      // transaction as the stage change. It used to be written afterwards and
+      // only when a reason happened to be sent — a deferral without one left
+      // the staff in DEFERRED with no record: invisible on the deferred list,
+      // impossible to resume, and never reached by the 90-day timeout. ───────
+      const deferredReason = payload?.deferred_reason != null ? String(payload.deferred_reason) : undefined;
+      if (toStage === PipelineStage.DEFERRED && (!deferredReason || !VALID_DEFERRED_REASONS.has(deferredReason))) {
+        throw new BadRequestException(
+          `deferred_reason is required when moving to DEFERRED — one of: ${Array.from(VALID_DEFERRED_REASONS).join(', ')}`,
+        );
+      }
+
+      // ── Leaving DEFERRED: never resume past the stage the staff left from,
+      // or a deferral becomes a way to skip assessment or training. ──────────
+      if (current === PipelineStage.DEFERRED) {
+        const open = await manager.query(
+          `SELECT id, resume_stage FROM deferred_records
+           WHERE staff_id = $1 AND resume_at IS NULL ORDER BY deferred_at DESC LIMIT 1`,
+          [staffId],
+        );
+        const resumeStage: PipelineStage | undefined = open[0]?.resume_stage;
+        const limit = resumeStage ? RESUMABLE_ORDER.indexOf(resumeStage) : -1;
+        if (toStage !== PipelineStage.TERMINAL && limit >= 0 && RESUMABLE_ORDER.indexOf(toStage) > limit) {
+          throw new BadRequestException(
+            `Cannot resume to ${toStage} — this staff was deferred from ${resumeStage}. Resume to ${RESUMABLE_ORDER.slice(0, limit + 1).join(' or ')}.`,
+          );
+        }
+        await manager.query(
+          `UPDATE deferred_records SET resume_at = NOW() WHERE staff_id = $1 AND resume_at IS NULL`,
+          [staffId],
+        );
       }
 
       // ── S2_VERIFY exit gate — Aadhaar/PV/medical/DL/eChallan must actually
@@ -449,7 +611,17 @@ export class PipelineFsmService {
       // but that was client-side only — nothing server-side backed it, so a
       // stale app build or a raw API call could skip straight through S2 with
       // nothing verified. ────────────────────────────────────────────────────
+      // An open override (HOLD or COMPLETE) on this stage lets the staff past
+      // its exit gate — HOLD because the gate isn't dropped, just deferred to
+      // release(); COMPLETE because the work is done, just not recorded here.
+      const overrideRows = await manager.query(
+        `SELECT 1 FROM stage_holds WHERE staff_id = $1 AND stage = $2::pipeline_stage AND released_at IS NULL LIMIT 1`,
+        [staffId, current],
+      );
+      const currentOverridden = overrideRows.length > 0;
+
       if (
+        !currentOverridden &&
         current === PipelineStage.S2_VERIFY &&
         (toStage === PipelineStage.S2_5_ASSESS || toStage === PipelineStage.S3_TRAIN)
       ) {
@@ -464,6 +636,10 @@ export class PipelineFsmService {
       }
 
       // ── S5_DEPLOY business/liability gates (Phase 3 critical fix) ──────────
+      // Always runs, whether or not the FROM stage (S4_AGREEMENTS here) is on
+      // hold — checkDeploymentEligibility does its own per-blocker hold check
+      // now, so a hold on S2_VERIFY still lets Aadhaar/PV through even though
+      // S4_AGREEMENTS, the stage actually being left, isn't what's held.
       let scenarioCode: string | undefined;
       if (toStage === PipelineStage.S5_DEPLOY) {
         const { eligible, blockers, flags } = await this.checkDeploymentEligibility(
@@ -509,6 +685,23 @@ export class PipelineFsmService {
         );
       }
 
+      // A formal exit closes whatever was still pending.
+      if (toStage === PipelineStage.TERMINAL) {
+        await manager.query(
+          `UPDATE stage_holds SET released_at = NOW(), released_by = $2, release_notes = 'Closed — staff moved to TERMINAL'
+           WHERE staff_id = $1 AND released_at IS NULL`,
+          [staffId, actorId],
+        );
+      }
+
+      if (toStage === PipelineStage.DEFERRED) {
+        await manager.query(
+          `INSERT INTO deferred_records (id, staff_id, reason, resume_stage, timeout_at, notes)
+           VALUES (gen_random_uuid(), $1, $2::deferred_reason, $3::pipeline_stage, NOW() + ($4 || ' days')::interval, $5)`,
+          [staffId, deferredReason, current, String(DEFERRED_TIMEOUT_DAYS), payload?.notes ? String(payload.notes) : null],
+        );
+      }
+
       // Append event (id must be supplied explicitly — Prisma @default(uuid()) is ORM-only, not a DB-level default)
       await manager.query(
         `INSERT INTO pipeline_events (id, staff_id, event_type, from_stage, to_stage, actor_id, scenario_code, reason_code, payload)
@@ -516,8 +709,167 @@ export class PipelineFsmService {
         [staffId, current, toStage, actorId, scenarioCode ?? null, reasonCode || null, JSON.stringify(payload || {})]
       );
 
-      this.logger.log(`[FSM] ${staffId}: ${current} → ${toStage} by ${actorId}${scenarioCode ? ` (scenario ${scenarioCode})` : ''}`);
+      this.logger.log(`[FSM] ${staffId}: ${current} → ${toStage} by ${actorId}${scenarioCode ? ` (scenario ${scenarioCode})` : ''}${currentOverridden ? ` (${current} has an open override — its exit gate deferred to release)` : ''}`);
       return { scenarioCode };
+    });
+  }
+
+  /**
+   * Puts a stage on HOLD (work still pending, temporary, blocks placement) or
+   * marks it COMPLETE (work already happened outside the system, permanent,
+   * doesn't block placement). Either way the staff may move on past it.
+   * Defaults to the staff's current stage; an earlier stage they've already
+   * passed can be overridden too. Only working stages (S1–S5), one open
+   * override each — placing one where another is already open is refused.
+   */
+  async placeOverride(input: {
+    staffId: string;
+    actorId: string;
+    kind: OverrideKind;
+    reason: string;
+    stage?: string;
+    notes?: string;
+  }): Promise<StageHoldRow> {
+    const { staffId, actorId, kind } = input;
+    const reason = String(input.reason ?? '').toUpperCase();
+    const validReasons = kind === 'COMPLETE' ? COMPLETE_REASONS : HOLD_REASONS;
+    if (!(validReasons as readonly string[]).includes(reason)) {
+      throw new BadRequestException(`reason is required — one of: ${validReasons.join(', ')}`);
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      const staff = await manager.query(
+        `SELECT pipeline_stage FROM staff_applicants WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
+        [staffId],
+      );
+      if (!staff.length) throw new BadRequestException(`Staff ${staffId} not found`);
+      const current: PipelineStage = staff[0].pipeline_stage;
+      const currentIdx = STAGE_ORDER.indexOf(current);
+      if (currentIdx < 0) {
+        throw new BadRequestException(`A ${current} staff can't have a stage held or completed — only stages S1 to S5 can.`);
+      }
+
+      const stage = (input.stage ? String(input.stage) : current) as PipelineStage;
+      const stageIdx = STAGE_ORDER.indexOf(stage);
+      if (stageIdx < 0 || stageIdx > currentIdx) {
+        throw new BadRequestException(
+          `Can't override ${stage} — only a stage the staff has reached (${STAGE_ORDER.slice(0, currentIdx + 1).join(', ')}).`,
+        );
+      }
+
+      // Checked here and not only by the partial unique index, which Prisma
+      // can't declare and a schema push could therefore drop.
+      const open = await manager.query(
+        `SELECT id, kind FROM stage_holds WHERE staff_id = $1 AND stage = $2::pipeline_stage AND released_at IS NULL`,
+        [staffId, stage],
+      );
+      if (open.length) {
+        throw new BadRequestException(`${stage} already has an open ${open[0].kind === 'COMPLETE' ? 'complete' : 'hold'} (${open[0].id}).`);
+      }
+
+      const [row] = await manager.query(
+        `INSERT INTO stage_holds (id, staff_id, stage, kind, reason, notes, held_by)
+         VALUES (gen_random_uuid(), $1, $2::pipeline_stage, $3, $4, $5, $6)
+         RETURNING *`,
+        [staffId, stage, kind, reason, input.notes ? String(input.notes) : null, actorId],
+      );
+      await manager.query(
+        `INSERT INTO pipeline_events (id, staff_id, event_type, from_stage, to_stage, actor_id, reason_code, payload, notes)
+         VALUES (gen_random_uuid(), $1, $2, $3, $3, $4, $5, $6, $7)`,
+        [
+          staffId,
+          kind === 'COMPLETE' ? 'STAGE_COMPLETED' : 'HOLD_PLACED',
+          stage,
+          actorId,
+          reason,
+          JSON.stringify({ hold_id: row.id, kind }),
+          input.notes ? String(input.notes) : null,
+        ],
+      );
+      this.logger.log(`[FSM] ${staffId}: ${stage} ${kind === 'COMPLETE' ? 'marked complete' : 'on hold'} (${reason}) by ${actorId}`);
+      return row as StageHoldRow;
+    });
+  }
+
+  /** Puts a stage on hold. Thin wrapper over placeOverride(kind: 'HOLD'). */
+  placeHold(input: { staffId: string; actorId: string; reason: string; stage?: string; notes?: string }) {
+    return this.placeOverride({ ...input, kind: 'HOLD' });
+  }
+
+  /** Marks a stage complete. Thin wrapper over placeOverride(kind: 'COMPLETE'). */
+  markComplete(input: { staffId: string; actorId: string; reason: string; stage?: string; notes?: string }) {
+    return this.placeOverride({ ...input, kind: 'COMPLETE' });
+  }
+
+  /**
+   * Releases a HOLD, or reverts a COMPLETE. For a HOLD: if the staff has
+   * already moved past the held stage, its exit gate was skipped on the way
+   * out — so it's checked now, and the hold stays until it passes. A staff
+   * still at the held stage meets that gate when they advance, as usual. A
+   * COMPLETE is always reverted unconditionally — it was the RM's word that
+   * the work happened, not a gate result, so there's nothing to re-check;
+   * afterward, the real gate applies again next time it's evaluated.
+   */
+  async releaseHold(input: { holdId: string; actorId: string; notes?: string }): Promise<StageHoldRow> {
+    const { holdId, actorId } = input;
+    return this.dataSource.transaction(async (manager) => {
+      const holds = await manager.query(`SELECT * FROM stage_holds WHERE id = $1 FOR UPDATE`, [holdId]);
+      if (!holds.length) throw new BadRequestException(`Hold ${holdId} not found`);
+      const hold = holds[0] as StageHoldRow;
+      if (hold.released_at) {
+        throw new BadRequestException(`${hold.kind === 'COMPLETE' ? 'Already reverted' : 'Already released'} (${holdId}).`);
+      }
+
+      if (hold.kind === 'HOLD') {
+        const staff = await manager.query(
+          `SELECT pipeline_stage, series, pv_status FROM staff_applicants WHERE id = $1`,
+          [hold.staff_id],
+        );
+        const current: PipelineStage = staff[0].pipeline_stage;
+        if (current !== hold.stage) {
+          const seriesShort = mapSeriesToShort(mapSeriesFromShort(String(staff[0].series)));
+          // Only what belongs to the stage being released — not the whole S5
+          // gate, which would otherwise make releasing the Agreements hold
+          // wait on the video certification too.
+          const blockers =
+            hold.stage === PipelineStage.S2_VERIFY
+              ? (await this.checkIdentityVerification(manager, hold.staff_id, seriesShort, staff[0].pv_status)).blockers
+              : [PipelineStage.S4_AGREEMENTS, PipelineStage.S2_5_ASSESS, PipelineStage.S3_TRAIN].includes(hold.stage)
+                ? (await this.computeDeploymentBlockers(manager, hold.staff_id, seriesShort, staff[0].pv_status)).raw
+                    .filter((b) => b.homeStage === hold.stage)
+                    .map((b) => b.message)
+                : [];
+          if (blockers.length) {
+            throw new BadRequestException(
+              `Can't release — ${hold.stage} is still incomplete: ${blockers.join('; ')}`,
+            );
+          }
+        }
+      }
+      // hold.kind === 'COMPLETE': no gate re-check — reverting just removes
+      // the RM's word that it was done, so the real gate applies again.
+
+      // TypeORM's postgres driver returns [rows, affectedCount] for UPDATE … RETURNING.
+      const [updatedRows] = await manager.query(
+        `UPDATE stage_holds SET released_at = NOW(), released_by = $2, release_notes = $3 WHERE id = $1 RETURNING *`,
+        [holdId, actorId, input.notes ? String(input.notes) : null],
+      );
+      const row = updatedRows[0];
+      await manager.query(
+        `INSERT INTO pipeline_events (id, staff_id, event_type, from_stage, to_stage, actor_id, reason_code, payload, notes)
+         VALUES (gen_random_uuid(), $1, $2, $3, $3, $4, $5, $6, $7)`,
+        [
+          hold.staff_id,
+          hold.kind === 'COMPLETE' ? 'STAGE_COMPLETE_REVERTED' : 'HOLD_RELEASED',
+          hold.stage,
+          actorId,
+          hold.reason,
+          JSON.stringify({ hold_id: holdId, kind: hold.kind }),
+          input.notes ? String(input.notes) : null,
+        ],
+      );
+      this.logger.log(`[FSM] ${hold.staff_id}: ${hold.stage} ${hold.kind === 'COMPLETE' ? 'complete reverted' : 'hold released'} by ${actorId}`);
+      return row as StageHoldRow;
     });
   }
 }

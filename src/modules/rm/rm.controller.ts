@@ -14,6 +14,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { RmService } from './rm.service';
+import { HOLD_REASONS, COMPLETE_REASONS } from '../pipeline/pipeline-fsm.service';
 import { AuthUser } from '../../common/guards/branch-scope.util';
 
 const PIPELINE_STAGES = [
@@ -92,6 +93,83 @@ export class RmController {
     );
   }
 
+  @Post('pipeline/:staffId/hold')
+  @ApiOperation({
+    summary: 'Put a stage on hold — its work is pending, but the staff may advance past it',
+    description:
+      'Defaults to the staff\'s current stage. Advancing from a held stage skips that stage\'s exit gate; ' +
+      'releasing the hold is where the gate is checked instead. No placement can be created while a hold is open.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['reason'],
+      properties: {
+        reason: { type: 'string', enum: [...HOLD_REASONS], example: 'PV_PENDING' },
+        stage: { type: 'string', enum: PIPELINE_STAGES.slice(0, 6), description: 'Optional — defaults to the current stage' },
+        notes: { type: 'string' },
+      },
+    },
+  })
+  placeHold(
+    @Req() req: { user: AuthUser },
+    @Param('staffId') staffId: string,
+    @Body() body: { reason?: string; stage?: string; notes?: string },
+  ) {
+    return this.rm.placeHold(req.user, staffId, body ?? {});
+  }
+
+  @Post('pipeline/:staffId/complete')
+  @ApiOperation({
+    summary: 'Mark a stage complete — its work already happened outside the system',
+    description:
+      'For a migrated or previously-vetted staff member whose verification/training/agreement is already done ' +
+      'in reality, just not recorded here — re-doing it has no benefit. Permanent, not re-checked, and unlike ' +
+      'a hold it does NOT block placement. The underlying verification/training/video/agreement workflows are ' +
+      'unaffected for everyone else; this only satisfies the gate check for this one staff and stage.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['reason'],
+      properties: {
+        reason: { type: 'string', enum: [...COMPLETE_REASONS], example: 'ALREADY_VERIFIED_EXTERNALLY' },
+        stage: { type: 'string', enum: PIPELINE_STAGES.slice(0, 6), description: 'Optional — defaults to the current stage' },
+        notes: { type: 'string' },
+      },
+    },
+  })
+  markComplete(
+    @Req() req: { user: AuthUser },
+    @Param('staffId') staffId: string,
+    @Body() body: { reason?: string; stage?: string; notes?: string },
+  ) {
+    return this.rm.markComplete(req.user, staffId, body ?? {});
+  }
+
+  @Post('holds/:holdId/release')
+  @ApiOperation({
+    summary: 'Release a hold, or revert a complete',
+    description:
+      'A HOLD: if the staff has moved past the held stage, that stage\'s exit gate must pass first (400 lists ' +
+      'what is missing). A COMPLETE: reverted unconditionally — there is nothing to re-check, since it was ' +
+      'never a gate result to begin with.',
+  })
+  @ApiBody({ schema: { type: 'object', properties: { notes: { type: 'string' } } } })
+  releaseHold(
+    @Req() req: { user: AuthUser },
+    @Param('holdId') holdId: string,
+    @Body() body: { notes?: string },
+  ) {
+    return this.rm.releaseHold(req.user, holdId, body?.notes);
+  }
+
+  @Get('holds')
+  @ApiOperation({ summary: 'Open holds and completes, oldest first (branch/RM scoped)' })
+  holds(@Req() req: { user: AuthUser }) {
+    return this.rm.listHolds(req.user);
+  }
+
   @Get('trials')
   @ApiOperation({ summary: 'Active trial placements for RM' })
   trials(@Req() req: { user: AuthUser }) {
@@ -105,20 +183,26 @@ export class RmController {
   }
 
   @Post('deferred/:staffId/resume')
-  @ApiOperation({ summary: 'Resume deferred staff to target stage' })
+  @ApiOperation({ summary: 'Resume deferred staff — to the stage they were deferred from unless to_stage says otherwise' })
   @ApiBody({
     schema: {
       type: 'object',
-      required: ['to_stage'],
-      properties: { to_stage: { type: 'string', enum: PIPELINE_STAGES, example: 'S2_VERIFY' } },
+      properties: {
+        to_stage: {
+          type: 'string',
+          enum: PIPELINE_STAGES,
+          example: 'S2_VERIFY',
+          description: 'Optional — defaults to the stage the staff was deferred from. Cannot be later than that stage.',
+        },
+      },
     },
   })
   resumeDeferred(
     @Req() req: { user: AuthUser },
     @Param('staffId') staffId: string,
-    @Body() body: { to_stage: string },
+    @Body() body: { to_stage?: string },
   ) {
-    return this.rm.resumeDeferred(req.user, staffId, body.to_stage);
+    return this.rm.resumeDeferred(req.user, staffId, body?.to_stage);
   }
 
   @Get('terminal')

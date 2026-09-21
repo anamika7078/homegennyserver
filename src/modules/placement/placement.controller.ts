@@ -1,4 +1,5 @@
-import { Controller, Get, Post, Patch, Param, Body, Query, Req } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Body, Query, Req, BadRequestException } from '@nestjs/common';
+import { PlacementStatus } from '@prisma/client';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -106,12 +107,29 @@ export class PlacementController {
   @ApiQuery({ name: 'offset', required: false, type: Number, example: 0 })
   @ApiQuery({ name: 'staff_id', required: false, description: 'StaffApplicant id' })
   @ApiQuery({ name: 'client_id', required: false, description: 'FinanceCustomer id' })
-  findAll(@Query() q: Record<string, string>): Promise<PlacementList> {
+  @ApiQuery({ name: 'status', required: false, enum: ['TRIAL', 'CONFIRMED', 'EXITED', 'TERMINATED'] })
+  findAll(
+    @Req() req: { user: { id: string; role: string; branchId?: string | null } },
+    @Query() q: Record<string, string>,
+  ): Promise<PlacementList> {
+    const status = q['status']?.toUpperCase();
+    if (status && !(status in PlacementStatus)) {
+      throw new BadRequestException(`status must be one of ${Object.keys(PlacementStatus).join(', ')}`);
+    }
+    // Was unscoped — every RM saw every branch's placements.
+    const scope =
+      req.user.role === UserRole.RM
+        ? { rmId: req.user.id }
+        : req.user.role === UserRole.BM && req.user.branchId
+          ? { branchId: req.user.branchId }
+          : undefined;
     return this.service.findAll({
       limit:  q['limit']  ? parseInt(q['limit'],  10) : 100,
       offset: q['offset'] ? parseInt(q['offset'], 10) : 0,
       staffId: q['staff_id'] || undefined,
       clientId: q['client_id'] || undefined,
+      status: status as PlacementStatus | undefined,
+      scope,
     });
   }
 

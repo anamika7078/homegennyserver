@@ -4,6 +4,7 @@ import {
   PipelineStage,
   PvStatus,
   LanguageTier,
+  StageHold,
 } from '@prisma/client';
 
 function parseRoleTypes(value: unknown): string[] {
@@ -21,9 +22,16 @@ function parseRoleTypes(value: unknown): string[] {
   return [String(value)].filter(Boolean);
 }
 
-/** API / legacy snake_case shape expected by frontend */
-export function toStaffDto(row: PrismaStaff) {
+/** API / legacy snake_case shape expected by frontend. `open_holds` is present only when the caller loaded them. */
+export function toStaffDto(row: PrismaStaff & { stageHolds?: StageHold[] }) {
   return {
+    ...(row.stageHolds
+      ? {
+          open_holds: row.stageHolds
+            .filter((h) => !h.releasedAt)
+            .map((h) => ({ id: h.id, stage: h.stage, kind: h.kind, reason: h.reason, notes: h.notes, held_at: h.heldAt })),
+        }
+      : {}),
     id: row.id,
     staff_code: row.staffCode,
     branch_id: row.branchId,

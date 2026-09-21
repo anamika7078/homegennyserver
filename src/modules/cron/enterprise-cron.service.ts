@@ -238,22 +238,38 @@ export class EnterpriseCronService {
         AND dr.resume_at IS NULL
     `).catch(() => []);
 
+    // One transaction per staff, so a failure on one neither half-applies
+    // (stage moved, no event) nor stops the rest. The event insert used to
+    // omit `id`, which has no database default — so the first row failed
+    // after its stage had already changed, and the loop died there.
+    const done: typeof rows = [];
     for (const row of rows) {
-      await this.dataSource.query(
-        `UPDATE staff_applicants SET pipeline_stage = 'TERMINAL', terminal_outcome = 'DEFERRED', updated_at = NOW()
-         WHERE id = $1`,
-        [row.staff_id],
-      );
-      await this.dataSource.query(
-        `INSERT INTO pipeline_events (staff_id, event_type, from_stage, to_stage, reason_code, payload)
-         VALUES ($1, 'DEFERRED_TIMEOUT', 'DEFERRED', 'TERMINAL', '90_DAY_TIMEOUT', '{}')`,
-        [row.staff_id],
-      );
+      try {
+        await this.dataSource.transaction(async (manager) => {
+          await manager.query(
+            `UPDATE staff_applicants SET pipeline_stage = 'TERMINAL', terminal_outcome = 'DEFERRED', updated_at = NOW()
+             WHERE id = $1 AND pipeline_stage = 'DEFERRED'`,
+            [row.staff_id],
+          );
+          await manager.query(
+            `UPDATE deferred_records SET resume_at = NOW() WHERE id = $1`,
+            [row.id],
+          );
+          await manager.query(
+            `INSERT INTO pipeline_events (id, staff_id, event_type, from_stage, to_stage, reason_code, payload)
+             VALUES (gen_random_uuid(), $1, 'DEFERRED_TIMEOUT', 'DEFERRED', 'TERMINAL', '90_DAY_TIMEOUT', '{}')`,
+            [row.staff_id],
+          );
+        });
+        done.push(row);
+      } catch (e) {
+        this.logger.error(`Deferred timeout failed for ${row.staff_code}: ${(e as Error).message}`);
+      }
     }
 
-    if (rows.length) {
-      this.logger.warn(`Deferred timeout → terminal: ${rows.length} staff`);
-      this.events.emit('cron.deferred_timeout', rows);
+    if (done.length) {
+      this.logger.warn(`Deferred timeout → terminal: ${done.length} staff`);
+      this.events.emit('cron.deferred_timeout', done);
     }
   }
 

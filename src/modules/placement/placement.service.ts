@@ -149,7 +149,7 @@ export class PlacementService {
     const staffId = String(data.staff_id);
     const staff = await this.prisma.staffApplicant.findUnique({
       where: { id: staffId },
-      select: { series: true, pipelineStage: true },
+      select: { series: true, pipelineStage: true, assignedRmId: true, branchId: true },
     });
     if (!staff) throw new NotFoundException(`Staff ${staffId} not found`);
 
@@ -162,6 +162,21 @@ export class PlacementService {
     if (staff.pipelineStage !== 'S5_DEPLOY') {
       throw new BadRequestException(
         `Placement can only be created once the staff has reached S5_DEPLOY (current stage: ${staff.pipelineStage}).`,
+      );
+    }
+
+    // A held stage let the staff move on with its work still pending; that
+    // work has to be finished (the hold released) before they go to a client.
+    // A COMPLETE override doesn't block — it says the work already happened,
+    // it isn't deferred.
+    const openHolds = await this.prisma.stageHold.findMany({
+      where: { staffId, releasedAt: null, kind: 'HOLD' },
+      select: { stage: true, reason: true },
+    });
+    if (openHolds.length) {
+      throw new BadRequestException(
+        `Placement blocked — release the open hold(s) first: ` +
+          openHolds.map((h) => `${h.stage} (${h.reason})`).join(', '),
       );
     }
 
@@ -191,7 +206,11 @@ export class PlacementService {
       );
     }
 
-    const branchId = String(data.branch_id ?? '00000000-0000-0000-0000-000000000001');
+    // The placement belongs to the staff's branch and RM unless the caller says
+    // otherwise. Neither UI sends them, so every placement used to land on the
+    // main branch with no RM — and an RM's trial list, scoped by rm_id, was empty.
+    const branchId = String(data.branch_id ?? staff.branchId ?? '00000000-0000-0000-0000-000000000001');
+    const rmId = data.rm_id ? String(data.rm_id) : (staff.assignedRmId ?? actorId);
 
     // Deploy-time choice: start a TRIAL (default) or go straight to CONFIRMED —
     // e.g. a repeat/trusted client the RM doesn't need a trial period for.
@@ -209,6 +228,28 @@ export class PlacementService {
       );
     }
     const isHourly = placementType === 'TEMPORARY';
+
+    // A permanent placement is the staff's only placement. While one is active
+    // (on trial or confirmed) they can't be placed anywhere else, hourly or
+    // permanent; and a permanent one can't start while they hold any other.
+    // Several hourly placements at once is still the multi-client model
+    // (docs/HOURLY_MULTI_CLIENT_PLAN.md). The business decided this on 2026-09-21.
+    const active = await this.prisma.placement.findMany({
+      where: { staffId, status: { in: [PlacementStatus.TRIAL, PlacementStatus.CONFIRMED] } },
+      select: { id: true, status: true, clientId: true, placementType: true },
+    });
+    const blocking = active.find((p) => p.placementType === 'PERMANENT') ?? (isHourly ? undefined : active[0]);
+    if (blocking) {
+      const client = await this.getClientMeta(blocking.clientId);
+      const where = client?.customerName ?? 'another client';
+      throw new BadRequestException(
+        blocking.placementType === 'PERMANENT'
+          ? `This staff member is permanently placed with ${where} (${blocking.status}, id: ${blocking.id}). ` +
+              'A permanent placement is their only one — exit it before placing them anywhere else.'
+          : `A permanent placement must be the staff's only one, and they are placed hourly with ${where} ` +
+              `(${blocking.status}, id: ${blocking.id}). Exit their hourly placements first.`,
+      );
+    }
     const hourlyRate = data.hourly_rate != null ? Number(data.hourly_rate) : null;
     const hourlyFee = data.hourly_fee != null ? Number(data.hourly_fee) : null;
     const shiftHours = data.shift_hours != null ? Number(data.shift_hours) : 8;
@@ -236,8 +277,9 @@ export class PlacementService {
         staffId,
         clientId: String(data.client_id),
         branchId,
-        rmId: data.rm_id ? String(data.rm_id) : undefined,
+        rmId,
         status,
+        confirmedAt: directConfirm ? new Date() : undefined,
         placementType,
         shiftHours,
         staffSalary: wageTerms.staffSalary,
@@ -381,7 +423,9 @@ export class PlacementService {
 
     const row = await this.prisma.placement.update({
       where: { id },
-      data: { status: PlacementStatus.CONFIRMED },
+      // confirmed_at dates the late-exit fee band (exit-settlement.service.ts);
+      // nothing wrote it before, so every exit after a confirm priced as undated.
+      data: { status: PlacementStatus.CONFIRMED, confirmedAt: new Date() },
     });
 
     await this.prisma.deployment.updateMany({
@@ -407,10 +451,21 @@ export class PlacementService {
     return this.mapRow(row, staff, client);
   }
 
-  async findAll(params: { limit: number; offset: number; staffId?: string; clientId?: string }) {
-    const where = {
+  async findAll(params: {
+    limit: number;
+    offset: number;
+    staffId?: string;
+    clientId?: string;
+    status?: PlacementStatus;
+    /** An RM sees their own placements, a BM their branch's; unset for admin. */
+    scope?: { rmId?: string; branchId?: string };
+  }) {
+    const where: Prisma.PlacementWhereInput = {
       ...(params.staffId ? { staffId: params.staffId } : {}),
       ...(params.clientId ? { clientId: params.clientId } : {}),
+      ...(params.status ? { status: params.status } : {}),
+      ...(params.scope?.rmId ? { rmId: params.scope.rmId } : {}),
+      ...(params.scope?.branchId ? { branchId: params.scope.branchId } : {}),
     };
     const [rows, total] = await Promise.all([
       this.prisma.placement.findMany({
