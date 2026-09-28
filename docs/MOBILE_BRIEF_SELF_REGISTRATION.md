@@ -15,6 +15,31 @@ shows up in Finance's customer list immediately, and any RM can place staff
 against them from then on (no equivalent of the staff side's "claim" step —
 clients aren't RM-owned, so there's nothing to assign).
 
+**What happens after a client registers — verified against the live code,
+2026-09-28:**
+
+- The customer list every RM's client picker reads from
+  (`customer.service.ts` `listCustomers()`, `GET /finance/customers`,
+  reachable by RM/BM/Finance/Admin) has no RM or branch filter at all, and
+  orders `ORDER BY created_at DESC` — a client who just registered is not
+  just visible, they're the **first result** an RM sees.
+- Creating a placement (`POST /placements`, `placement.service.ts create()`)
+  runs several checks on the **staff** being placed (must already be at
+  S5_DEPLOY, no open stage holds, not already placed with this same client) —
+  and **none at all on the client**. No approval state, no verification
+  step, no PAN-confirmed flag — a `client_id` from a customer that registered
+  ten seconds ago is accepted exactly like one Finance onboarded manually
+  months ago.
+- That's why there's no "claim" step here unlike the staff side: staff
+  visibility is scoped by `assignedRmId` (null until claimed), but the
+  client list was never scoped by RM to begin with — every RM already sees
+  every client. Nothing had to be built for this to work; it already did.
+- One rough edge, not a blocker: `client_id` on `POST /placements` isn't even
+  checked for existence — a typo'd id would silently create a placement
+  against nothing rather than 404. Only RM/BM/Admin can call that endpoint,
+  so it's a minor robustness gap, not something the app needs to guard
+  against.
+
 #### Request body
 
 ```json
