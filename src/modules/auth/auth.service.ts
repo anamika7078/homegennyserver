@@ -17,7 +17,8 @@ import { RbacService } from '../rbac/rbac.service';
 import { AuditAction } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { FinanceCustomerService } from '../finance/customer/customer.service';
-import { EmployeesService } from '../employees/employees.service';
+import { StaffService } from '../staff/staff.service';
+import { PipelineFsmService, PipelineStage as FsmPipelineStage } from '../pipeline/pipeline-fsm.service';
 import { UserProvisioningService } from './user-provisioning.service';
 import { RegisterCustomerDto } from './dto/register-customer.dto';
 import { RegisterStaffDto } from './dto/register-staff.dto';
@@ -113,7 +114,8 @@ export class AuthService {
     private readonly rbac: RbacService,
     private readonly prisma: PrismaService,
     private readonly financeCustomer: FinanceCustomerService,
-    private readonly employees: EmployeesService,
+    private readonly staffService: StaffService,
+    private readonly fsm: PipelineFsmService,
     private readonly userProvisioning: UserProvisioningService,
   ) {}
 
@@ -203,10 +205,25 @@ export class AuthService {
 
   /**
    * Public self-registration for Staff. Creates the login account (role
-   * STAFF) AND a linked `employees` row with placeholder branch/category and
-   * status PENDING_HR_REVIEW — so the person shows up in HR's employee list
-   * immediately, flagged for HR to fill in branch/category/salary/designation.
-   * Rolled back the same way as registerCustomer if the employee row fails.
+   * STAFF) AND a linked `staff_applicants` row — the RM pipeline entity, not
+   * an `employees` (HR) row — so the person shows up on the RM side exactly
+   * like an RM-created intake does, at S1_INTAKE, and is then immediately
+   * advanced to S2_VERIFY: intake's whole job is capturing this basic info,
+   * and registering IS that. (An `employees` row only ever exists after S5
+   * deployment turns into a hire — see the HR↔pipeline bridge — so writing
+   * one here at registration was the wrong table from the start.)
+   *
+   * There is no RM to own this candidate yet — self-registration doesn't go
+   * through one — so `assignedRmId` is left null. That makes the row
+   * invisible to any individual RM's kanban (it's scoped to their own
+   * assigned staff), which is deliberate: GET /rm/unassigned-staff lists
+   * these for any RM/BM to see, and POST /rm/unassigned-staff/:id/claim is
+   * how one takes ownership. Until claimed, the pipeline still runs (S2
+   * verification etc. don't require an assigned RM) — only RM-scoped actions
+   * do.
+   *
+   * StaffService.create() runs the restricted-list check itself (throws
+   * ForbiddenException on a hit) — not duplicated here.
    */
   async registerStaff(
     dto: RegisterStaffDto,
@@ -214,34 +231,44 @@ export class AuthService {
   ): Promise<LoginResponse | { requires_2fa: true; user_id: string } | TotpSetupRequired> {
     await this.assertPhoneAndEmailAvailable(dto.phone, dto.email);
 
-    const employee = await this.employees.create({
-      fullName:         dto.full_name,
-      mobile:           dto.phone,
-      alternateMobile:  dto.alternate_phone,
-      email:            dto.email,
-      dateOfBirth:      dto.date_of_birth,
-      gender:           dto.gender,
-      address:          dto.address,
-      city:             dto.city,
-      state:            dto.state,
-      pincode:          dto.pincode,
-      emergencyContact: {},
-      joiningDate:      new Date().toISOString(),
-      department:       'Not Assigned',
-      designation:      'Not Assigned',
-      employmentType:   'Not Assigned',
-      salary:           0,
-      status:           'PENDING_HR_REVIEW',
-    });
-    const user = await this.userProvisioning.linkStaffAccount({
-      employeeId: employee.id,
-      mobile:     dto.phone,
-      fullName:   dto.full_name,
-      email:      dto.email,
-      password:   dto.password, // self-registered — always explicit, never the default
+    const created = await this.staffService.create({
+      full_name: dto.full_name,
+      mobile: dto.phone,
+      email: dto.email,
+      date_of_birth: dto.date_of_birth,
+      address: dto.address,
+      series: dto.series,
+      metadata: {
+        self_registered: true,
+        alternate_phone: dto.alternate_phone,
+        gender: dto.gender,
+        city: dto.city,
+        state: dto.state,
+        pincode: dto.pincode,
+      },
     });
 
-    this.logger.log(`[AUTH] Registered STAFF ${user.phone} — linked to employees (PENDING_HR_REVIEW)`);
+    const user = await this.userProvisioning.linkLightweightStaffAccount({
+      staffApplicantId: created.id as string,
+      phone:            dto.phone,
+      fullName:         dto.full_name,
+      email:            dto.email,
+      branchId:         null,
+      password:         dto.password, // self-registered — always explicit, never the default
+    });
+
+    // S1's job — full name, phone, DOB, address, category — is exactly what
+    // registration just captured, so there's nothing left for an RM to add
+    // before S2 verification can start. actorId is the staff's own new user
+    // row: there is no other actor for a self-service signup.
+    await this.fsm.advanceStage({
+      staffId: created.id as string,
+      toStage: FsmPipelineStage.S2_VERIFY,
+      actorId: user.id,
+      reasonCode: 'SELF_REGISTERED',
+    });
+
+    this.logger.log(`[AUTH] Registered STAFF ${user.phone} — self-registered, S1 complete, unassigned`);
     return this.login(this.toUserRecord(user), meta);
   }
 

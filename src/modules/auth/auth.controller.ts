@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Request, UseGuards, Get, Req, BadRequestException } from '@nestjs/common';
+import { Controller, Post, Body, Request, UseGuards, Get, Req } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiResponse } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
@@ -87,11 +87,12 @@ export class AuthController {
     };
   }
 
-  // ── SPEC CONFLICT (flagged, not resolved here — Phase 1 is auth/authz only) ──
-  // HomeGenny Platform v1.0 — User Roles & Permissions Reference states Staff do
-  // NOT self-register (RM-created) and Clients are RM-created at placement setup.
-  // These two endpoints contradict that. Left public and unchanged per instruction
-  // not to silently remove them; needs a product decision before Phase 2+.
+  // HomeGenny Platform v1.0's original User Roles & Permissions Reference had
+  // Staff and Clients both RM-created, with no self-registration. The product
+  // decision (2026-09-28) is that both DO self-register from the app now:
+  // Staff lands in the RM pipeline unassigned (see GET /rm/unassigned-staff /
+  // POST /rm/unassigned-staff/:id/claim) and Clients appear in Finance's
+  // customer list immediately, open to any RM to place staff against.
   @Post('register/customer')
   @Public()
   @UseGuards(ThrottlerGuard)
@@ -119,21 +120,22 @@ export class AuthController {
   @Throttle(AUTH_THROTTLE)
   @ApiTags(...TAG_MOBILE_ONLY)
   @ApiOperation({
-    summary: 'Staff self-registration — ALWAYS BLOCKED (400)',
+    summary: 'Self-register as Staff',
     description:
-      'Staff Applicants do NOT self-register via the mobile app per HomeGenny Platform v1.0 spec. Accounts are ' +
-      'onboarded exclusively by Admin, HR, or RM (see POST /employees or POST /admin/users/create). This route ' +
-      'exists only to return a clear 400 explaining that — do not build a staff sign-up screen against it.',
+      'Creates the login account AND a linked staff_applicants record (the RM pipeline entity) in one step, ' +
+      'already advanced past S1_INTAKE to S2_VERIFY — registering IS the intake step. No RM is assigned yet ' +
+      '(self-registration has none to assign): the staff member is listed at GET /rm/unassigned-staff until an ' +
+      'RM claims them via POST /rm/unassigned-staff/:id/claim. Returns tokens — the app is logged in right ' +
+      'after registering. Rate-limited to 5 requests/min per IP.',
   })
-  @ApiResponse({ status: 400, description: 'Always returned — staff self-registration is disabled by design.' })
+  @ApiResponse({ status: 201, description: 'Registered and logged in.', schema: LOGIN_RESPONSE_SCHEMA })
+  @ApiResponse({ status: 409, description: 'Phone or email already registered.' })
+  @ApiResponse({ status: 403, description: 'Phone or Aadhaar matches the restricted list.' })
   registerStaff(
     @Body() dto: RegisterStaffDto,
     @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> },
   ) {
-    throw new BadRequestException(
-      'Staff Applicants do NOT self-register via the mobile app per HomeGenny Platform v1.0 specifications. ' +
-      'Staff accounts are onboarded by an Admin, HR, or Relationship Manager (RM) who assigns their staff code. Please log in using your assigned credentials.',
-    );
+    return this.authService.registerStaff(dto, this.clientMeta(req));
   }
 
   @Post('login')

@@ -19,6 +19,15 @@ export class RegisterStaffDto {
   @Matches(/^\+?[0-9]{10,15}$/, { message: 'alternate_phone must be a valid 10-15 digit number' })
   alternate_phone?: string;
 
+  @ApiProperty({
+    enum: ['MAID', 'SC', 'UC', 'DR'],
+    example: 'MAID',
+    description: 'Work category — Maid, Skilled Care, Unskilled Care, or Driver. Drives which S2 verification ' +
+      'checks and video-cert prompts apply from here on; the RM can correct it later if needed.',
+  })
+  @IsIn(['MAID', 'SC', 'UC', 'DR'])
+  series: string;
+
   @ApiPropertyOptional({ example: 'pooja@example.com' })
   @IsOptional()
   @IsEmail()

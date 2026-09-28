@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -378,6 +379,68 @@ export class RmService {
       orderBy: { fullName: 'asc' },
     });
     return rows.map((r) => ({ id: r.id, full_name: r.fullName, branch_id: r.branchId }));
+  }
+
+  /**
+   * Staff who self-registered from the app: created at S1_INTAKE and
+   * immediately advanced to S2_VERIFY by registration itself, but with no
+   * assignedRmId — there was no RM in that flow to set one. Not scoped by RM
+   * or branch (a self-registered row has neither), unlike every other staff
+   * list in this service.
+   */
+  async listUnassignedStaff() {
+    const rows = await this.prisma.staffApplicant.findMany({
+      where: { assignedRmId: null, deletedAt: null, pipelineStage: { not: 'TERMINAL' } },
+      orderBy: { createdAt: 'asc' },
+    });
+    return rows.map(toStaffDto);
+  }
+
+  /**
+   * First RM to claim an unassigned (self-registered) staff member gets it.
+   * `updateMany`'s WHERE is what makes this safe under a race — Postgres
+   * applies it atomically, so two RMs claiming the same staff member at the
+   * same instant can't both succeed; whichever loses gets count 0 and a 409,
+   * not a stage where both believe they own it.
+   *
+   * Also fills in the branch, from the claiming RM, since self-registration
+   * couldn't set one either — branch-scoped views (BM's filter, attendance)
+   * need it from here on.
+   */
+  async claimStaff(user: AuthUser, staffId: string) {
+    const staff = await this.prisma.staffApplicant.findFirst({
+      where: { id: staffId, deletedAt: null },
+    });
+    if (!staff) throw new NotFoundException(`Staff ${staffId} not found`);
+    if (staff.assignedRmId) {
+      throw new ConflictException(
+        staff.assignedRmId === user.id
+          ? 'You already claimed this staff member.'
+          : 'This staff member has already been claimed by another RM.',
+      );
+    }
+
+    const { count } = await this.prisma.staffApplicant.updateMany({
+      where: { id: staffId, assignedRmId: null },
+      data: { assignedRmId: user.id, branchId: staff.branchId ?? user.branchId },
+    });
+    if (count === 0) {
+      throw new ConflictException('This staff member has already been claimed by another RM.');
+    }
+
+    await this.prisma.pipelineEvent.create({
+      data: {
+        staffId,
+        eventType: 'STAFF_CLAIMED',
+        fromStage: staff.pipelineStage,
+        toStage: staff.pipelineStage,
+        actorId: user.id,
+        payload: { self_registered: Boolean((staff.metadata as Record<string, unknown> | null)?.self_registered) },
+      },
+    });
+
+    const updated = await this.prisma.staffApplicant.findUnique({ where: { id: staffId } });
+    return toStaffDto(updated!);
   }
 
   async listIncidents(user: AuthUser, status?: string) {

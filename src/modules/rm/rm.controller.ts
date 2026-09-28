@@ -321,6 +321,28 @@ export class RmController {
     return this.rm.listRmUsers();
   }
 
+  @Get('unassigned-staff')
+  @ApiOperation({
+    summary: 'Staff who self-registered from the app and have no RM yet',
+    description:
+      'Not scoped by RM (there is nothing to scope by — that\'s the point) or by branch, since a self-registered ' +
+      'staff member has neither yet. Any RM/BM/Admin sees the same list; claim one to take it.',
+  })
+  listUnassignedStaff() {
+    return this.rm.listUnassignedStaff();
+  }
+
+  @Post('unassigned-staff/:staffId/claim')
+  @ApiOperation({
+    summary: 'Claim an unassigned (self-registered) staff member',
+    description:
+      'Sets the caller as assignedRmId — first to claim wins. Refuses (409) if someone already claimed it, ' +
+      'including the caller themself on a double-click, so the button never silently no-ops.',
+  })
+  claimStaff(@Req() req: { user: AuthUser }, @Param('staffId') staffId: string) {
+    return this.rm.claimStaff(req.user, staffId);
+  }
+
   @Get('locations')
   @ApiOperation({ summary: 'Cities and branches for attendance location filters' })
   locations(@Req() req: { user: AuthUser }) {
