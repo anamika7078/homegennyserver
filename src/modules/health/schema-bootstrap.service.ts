@@ -81,9 +81,16 @@ export class SchemaBootstrapService implements OnModuleInit {
     await this.ensureHrTables();
     await this.ensureCommercialTables();
 
+    // Used to `return` here once training_batches existed, skipping every
+    // statement below — including the ALTER/fix-up ones added after this
+    // table first went live (trainer_id, end_date, quiz_date, and the
+    // staff_id FK retarget), which then could NEVER apply to a database
+    // where the table already existed. Every one of those is IF NOT EXISTS
+    // or otherwise idempotent, same as everything else in this file, so
+    // there's no actual reason to skip them — this now always runs through,
+    // matching ensureBranchColumns/ensureFinanceColumns/etc above.
     if (await this.tablesExist()) {
-      this.logger.log('Module tables already present (training, finance)');
-      return;
+      this.logger.log('Module tables already present (training, finance) — checking for column/constraint fix-ups');
     }
 
     await this.exec(`
@@ -120,6 +127,108 @@ export class SchemaBootstrapService implements OnModuleInit {
     await this.exec(
       `CREATE INDEX IF NOT EXISTS idx_batch_enrollments_batch ON batch_enrollments(batch_id)`,
     );
+
+    // ── Study material — one row per item (video/PDF/note) a trainer attaches
+    // to a specific batch. `storage_key` holds the video-cert-style storage
+    // key (GCS or local, see local-material-storage.util.ts) for VIDEO, or the
+    // local file path for PDF; `body` holds the plain text for NOTE.
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS training_materials (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        batch_id    UUID NOT NULL REFERENCES training_batches(id) ON DELETE CASCADE,
+        type        VARCHAR(20) NOT NULL,
+        title       VARCHAR(200) NOT NULL,
+        storage_key TEXT,
+        body        TEXT,
+        size_bytes  BIGINT,
+        uploaded_by UUID,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await this.exec(
+      `CREATE INDEX IF NOT EXISTS idx_training_materials_batch ON training_materials(batch_id)`,
+    );
+
+    // ── Quiz — batch-scoped. Questions are MCQ (auto-graded, correct_option
+    // known at submit time) or TEXT (a trainer has to read and grade it).
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS training_quizzes (
+        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        batch_id   UUID NOT NULL REFERENCES training_batches(id) ON DELETE CASCADE,
+        title      VARCHAR(200) NOT NULL,
+        created_by UUID,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await this.exec(
+      `CREATE INDEX IF NOT EXISTS idx_training_quizzes_batch ON training_quizzes(batch_id)`,
+    );
+
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS quiz_questions (
+        id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        quiz_id        UUID NOT NULL REFERENCES training_quizzes(id) ON DELETE CASCADE,
+        question_text  TEXT NOT NULL,
+        type           VARCHAR(10) NOT NULL DEFAULT 'MCQ',
+        options        JSONB,
+        correct_option INT,
+        order_index    INT NOT NULL DEFAULT 0,
+        points         INT NOT NULL DEFAULT 1
+      )
+    `);
+    await this.exec(
+      `CREATE INDEX IF NOT EXISTS idx_quiz_questions_quiz ON quiz_questions(quiz_id)`,
+    );
+
+    // status: SCHEDULED (trainer-rescheduled, opens at available_at) |
+    // IN_PROGRESS | SUBMITTED (TEXT answers awaiting review) | GRADED. A retake
+    // is always a new row, so attempt history stays intact.
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS quiz_attempts (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        quiz_id      UUID NOT NULL REFERENCES training_quizzes(id) ON DELETE CASCADE,
+        staff_id     UUID NOT NULL REFERENCES staff_applicants(id),
+        status       VARCHAR(20) NOT NULL DEFAULT 'AVAILABLE',
+        available_at TIMESTAMPTZ,
+        started_at   TIMESTAMPTZ,
+        submitted_at TIMESTAMPTZ,
+        auto_score   INT,
+        max_score    INT,
+        passed       BOOLEAN,
+        graded_at    TIMESTAMPTZ,
+        graded_by    UUID,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await this.exec(
+      `CREATE INDEX IF NOT EXISTS idx_quiz_attempts_quiz ON quiz_attempts(quiz_id)`,
+    );
+    await this.exec(
+      `CREATE INDEX IF NOT EXISTS idx_quiz_attempts_staff ON quiz_attempts(staff_id)`,
+    );
+
+    await this.exec(`
+      CREATE TABLE IF NOT EXISTS quiz_answers (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        attempt_id      UUID NOT NULL REFERENCES quiz_attempts(id) ON DELETE CASCADE,
+        question_id     UUID NOT NULL REFERENCES quiz_questions(id) ON DELETE CASCADE,
+        selected_option INT,
+        answer_text     TEXT,
+        is_correct      BOOLEAN,
+        points_awarded  INT,
+        UNIQUE(attempt_id, question_id)
+      )
+    `);
+    await this.exec(
+      `CREATE INDEX IF NOT EXISTS idx_quiz_answers_attempt ON quiz_answers(attempt_id)`,
+    );
+
+    // pass_marks NULL means "60% of the quiz's total points", computed at read
+    // time so editing a question's points doesn't leave a stale threshold.
+    await this.exec(`ALTER TABLE training_quizzes ADD COLUMN IF NOT EXISTS pass_marks INT`);
+    await this.exec(`ALTER TABLE training_quizzes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ`);
+    await this.exec(`ALTER TABLE quiz_attempts ADD COLUMN IF NOT EXISTS rescheduled_by UUID`);
+    await this.exec(`ALTER TABLE quiz_attempts ADD COLUMN IF NOT EXISTS reschedule_note TEXT`);
 
     await this.exec(`
       CREATE TABLE IF NOT EXISTS payroll_records (
@@ -200,6 +309,39 @@ export class SchemaBootstrapService implements OnModuleInit {
     await this.exec(
       `ALTER TABLE training_batches ADD COLUMN IF NOT EXISTS trainer_id UUID`,
     );
+    // Batch duration and quiz date are now set explicitly by the trainer per
+    // batch, not derived from a fixed per-series day count — a batch can run
+    // however long this specific cohort actually needs.
+    await this.exec(
+      `ALTER TABLE training_batches ADD COLUMN IF NOT EXISTS end_date DATE`,
+    );
+    await this.exec(
+      `ALTER TABLE training_batches ADD COLUMN IF NOT EXISTS quiz_date DATE`,
+    );
+    // batch_enrollments.staff_id was created FKing to `employees`, not
+    // `staff_applicants` — the CREATE TABLE IF NOT EXISTS above (which does
+    // say staff_applicants) never touched it, because on this database the
+    // table already existed by the time that line was written, so the clause
+    // was a no-op. A trainee at S3_TRAIN is a staff_applicants row, not yet
+    // an employees row (that promotion happens after S5, per the HR<->
+    // pipeline bridge) — so a real trainee with no employees row of their own
+    // 500'd on enroll with a bare FK violation. Idempotent: the IF EXISTS
+    // check is false (a no-op) once this has run and fixed it once.
+    await this.exec(`
+      DO $do$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'batch_enrollments_staff_id_fkey'
+            AND confrelid = 'employees'::regclass
+        ) THEN
+          ALTER TABLE batch_enrollments DROP CONSTRAINT batch_enrollments_staff_id_fkey;
+          ALTER TABLE batch_enrollments ADD CONSTRAINT batch_enrollments_staff_id_fkey
+            FOREIGN KEY (staff_id) REFERENCES staff_applicants(id);
+        END IF;
+      END
+      $do$;
+    `);
     // Ensure all UUID primary key columns have gen_random_uuid() defaults
     // (some tables may have been created before this fix was applied)
     await this.exec(

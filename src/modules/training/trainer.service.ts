@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { VideoCertService } from '../video-cert/video-cert.service';
 import { AuthUser } from '../../common/guards/branch-scope.util';
 import { SchemaBootstrapService } from '../health/schema-bootstrap.service';
+import { TrainingQuizService } from './training-quiz.service';
 
 @Injectable()
 export class TrainerService {
@@ -13,6 +14,7 @@ export class TrainerService {
     private readonly prisma: PrismaService,
     private readonly schemaBootstrap: SchemaBootstrapService,
     private readonly videoCertService: VideoCertService,
+    private readonly quizzes: TrainingQuizService,
   ) {}
 
   private async ensureTables(): Promise<void> {
@@ -132,37 +134,24 @@ export class TrainerService {
           AND sa.deleted_at IS NULL ${staffBranchClause}
       `).catch(() => [{ total: BigInt(0) }]);
 
-      const attendancePendingRows = await this.prisma.$queryRawUnsafe<{ total: bigint }[]>(`
-        SELECT COUNT(DISTINCT e.staff_id) as total
-        FROM batch_enrollments e
-        JOIN training_batches b ON b.id = e.batch_id
-        WHERE b.status = 'ACTIVE'
-          ${branchClause} ${trainerClause}
-      `).catch(() => [{ total: BigInt(0) }]);
+      // Quiz-based — these used to read the S2.5 Assessor's `assessments`
+      // table, which has nothing to do with training.
+      const quizPendingReview = await this.quizzes.countPendingReview(user).catch(() => 0);
 
       const avgScoreRows = await this.prisma.$queryRawUnsafe<{ avg_score: number }[]>(`
-        SELECT COALESCE(AVG(
-          (a.skill_scores->>'communication')::float +
-          (a.skill_scores->>'technical')::float +
-          (a.skill_scores->>'empathy')::float +
-          (a.skill_scores->>'driving')::float +
-          (a.skill_scores->>'safety')::float
-        ) / NULLIF(
-          CASE WHEN a.skill_scores ? 'communication' THEN 1 ELSE 0 END +
-          CASE WHEN a.skill_scores ? 'technical' THEN 1 ELSE 0 END +
-          CASE WHEN a.skill_scores ? 'empathy' THEN 1 ELSE 0 END +
-          CASE WHEN a.skill_scores ? 'driving' THEN 1 ELSE 0 END +
-          CASE WHEN a.skill_scores ? 'safety' THEN 1 ELSE 0 END, 0
-        ), 0) AS avg_score
-        FROM assessments a
-        JOIN staff_applicants sa ON sa.id = a.staff_id
-        WHERE a.status = 'COMPLETED' ${staffBranchClause}
+        SELECT COALESCE(AVG(a.auto_score * 100.0 / NULLIF(a.max_score, 0)), 0) AS avg_score
+        FROM quiz_attempts a
+        JOIN training_quizzes q ON q.id = a.quiz_id
+        JOIN training_batches b ON b.id = q.batch_id
+        WHERE a.status = 'GRADED' ${branchClause} ${trainerClause}
       `).catch(() => [{ avg_score: 0 }]);
 
       const retriesRows = await this.prisma.$queryRawUnsafe<{ total: bigint }[]>(`
-        SELECT COUNT(*) as total FROM assessments
-        WHERE attempt_number > 1
-          AND created_at >= date_trunc('week', CURRENT_DATE)
+        SELECT COUNT(*) as total FROM quiz_attempts a
+        JOIN training_quizzes q ON q.id = a.quiz_id
+        JOIN training_batches b ON b.id = q.batch_id
+        WHERE a.rescheduled_by IS NOT NULL
+          AND a.created_at >= date_trunc('week', CURRENT_DATE) ${branchClause} ${trainerClause}
       `).catch(() => [{ total: BigInt(0) }]);
 
       const videoCerts = await this.getVideoCerts(user);
@@ -171,7 +160,7 @@ export class TrainerService {
         activeTrainees: Number(trainees[0]?.total ?? 0),
         sessionsToday: Number(sessionsToday[0]?.total ?? 0),
         videoCertsPending: Number(videoCertsRows[0]?.total ?? 0),
-        attendancePending: Number(attendancePendingRows[0]?.total ?? 0),
+        quizPendingReview,
         avgScore: Math.round(Number(avgScoreRows[0]?.avg_score ?? 0)),
         retries: Number(retriesRows[0]?.total ?? 0),
         videoCerts,
@@ -181,7 +170,7 @@ export class TrainerService {
         activeTrainees: 0,
         sessionsToday: 0,
         videoCertsPending: 0,
-        attendancePending: 0,
+        quizPendingReview: 0,
         avgScore: 0,
         retries: 0,
         videoCerts: [],
@@ -203,13 +192,12 @@ export class TrainerService {
     const rows = await this.prisma.$queryRawUnsafe<any[]>(`
       SELECT
         b.id, b.batch_code, b.series, b.trainer_name, b.trainer_id, b.classroom,
-        b.start_date, b.status, b.branch_id, b.created_at,
+        b.start_date, b.end_date, b.quiz_date, b.status, b.branch_id, b.created_at,
         COALESCE(
           json_agg(
             json_build_object(
               'id', e.id,
               'staffId', e.staff_id::text,
-              'attendance', e.attendance,
               'staffCode', COALESCE(emp.employee_id, sa.staff_code, 'N/A'),
               'fullName', COALESCE(emp.full_name, sa.full_name, 'Unknown'),
               'mobile', COALESCE(emp.mobile, sa.mobile, ''),
@@ -237,7 +225,10 @@ export class TrainerService {
         trainerName: r.trainer_name,
         classroom: r.classroom,
         startDate: r.start_date,
+        endDate: r.end_date ?? null,
+        quizDate: r.quiz_date ?? null,
         status: r.status,
+        createdAt: r.created_at,
         enrollments,
       };
     });
@@ -310,108 +301,5 @@ export class TrainerService {
       body.status,
       body.notes,
     );
-  }
-
-  async updateAssessment(trainerId: string, traineeId: string, data: any) {
-    let staffId = traineeId;
-    let applicant = await this.prisma.staffApplicant.findFirst({
-      where: { OR: [{ id: traineeId }, { staffCode: traineeId }] },
-    });
-    if (!applicant) {
-      const emp = await this.prisma.employee.findFirst({
-        where: { OR: [{ id: traineeId }, { employeeId: traineeId }] },
-      });
-      if (emp) {
-        applicant = await this.prisma.staffApplicant.findFirst({
-          where: { OR: [{ mobile: emp.mobile }, { staffCode: emp.employeeId }] },
-        });
-        if (!applicant) {
-          applicant = await this.prisma.staffApplicant.create({
-            data: {
-              id: emp.id,
-              staffCode: emp.employeeId,
-              fullName: emp.fullName,
-              mobile: emp.mobile,
-              dateOfBirth: emp.dateOfBirth ?? '1995-01-01',
-              address: emp.address ?? 'Delhi',
-              series: 'DRIVER',
-              branchId: emp.branchId || null,
-              pipelineStage: 'S3_TRAIN' as any,
-              languageTier: 'T1' as any,
-              pvStatus: 'CLEAR',
-            },
-          }).catch(async () => {
-            return await this.prisma.staffApplicant.create({
-              data: {
-                staffCode: emp.employeeId,
-                fullName: emp.fullName,
-                mobile: emp.mobile,
-                dateOfBirth: emp.dateOfBirth ?? '1995-01-01',
-                address: emp.address ?? 'Delhi',
-                series: 'DRIVER',
-                branchId: emp.branchId || null,
-                pipelineStage: 'S3_TRAIN' as any,
-                languageTier: 'T1' as any,
-                pvStatus: 'CLEAR',
-              },
-            });
-          });
-        }
-      }
-    }
-    if (applicant) {
-      staffId = applicant.id;
-    }
-
-    const attemptCount = await this.prisma.assessment.count({
-      where: { staffId },
-    });
-
-    const scoreVal = Number(data?.score ?? 75);
-    const skillScores = {
-      score: scoreVal,
-      communication: scoreVal,
-      technical: scoreVal,
-      empathy: scoreVal,
-      driving: scoreVal,
-      safety: scoreVal,
-    };
-    const resultVal = (data?.result || 'PASS') as any;
-    const remarksVal = data?.remarks || '';
-
-    const existing = await this.prisma.assessment.findFirst({
-      where: { staffId },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    let saved;
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trainerId);
-    if (existing) {
-      saved = await this.prisma.assessment.update({
-        where: { id: existing.id },
-        data: {
-          skillScores,
-          result: resultVal,
-          remarks: remarksVal,
-          status: 'COMPLETED',
-          approvedAt: new Date(),
-        },
-      });
-    } else {
-      saved = await this.prisma.assessment.create({
-        data: {
-          staffId,
-          assessorId: isUuid ? trainerId : null,
-          attemptNumber: attemptCount + 1,
-          skillScores,
-          result: resultVal,
-          remarks: remarksVal,
-          status: 'COMPLETED',
-          approvedAt: new Date(),
-        },
-      });
-    }
-
-    return { success: true, traineeId: staffId, assessment: saved };
   }
 }

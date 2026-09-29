@@ -40,13 +40,13 @@ export class TrainingController {
     return this.svc.enrollStaff(batchId, body.staff_id);
   }
 
-  @Patch('batches/:batchId/attendance')
-  @ApiOperation({ summary: 'Mark attendance for a specific day' })
-  markAttendance(
+  @Patch('batches/:batchId/schedule')
+  @ApiOperation({ summary: "Update a batch's end date and/or quiz date" })
+  updateSchedule(
     @Param('batchId') batchId: string,
-    @Body() body: { staff_id: string; day_number: number; attended: boolean },
+    @Body() body: { end_date?: string; quiz_date?: string },
   ) {
-    return this.svc.markAttendance(batchId, body.staff_id, body.day_number, body.attended);
+    return this.svc.updateBatchSchedule(batchId, body);
   }
 
   @Patch('batches/:batchId/status')

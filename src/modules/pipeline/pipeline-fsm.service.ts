@@ -120,7 +120,7 @@ const VALID_DEFERRED_REASONS = new Set<string>(Object.values(DeferredReason));
 const OUTCOMES_KEEPING_PLACEMENTS = new Set<string>([TerminalOutcome.ENROLLED, TerminalOutcome.CONDITIONAL]);
 
 /** Video prompt counts per series — mirrors video-cert.service.ts's VIDEO_PROMPTS keys. */
-const REQUIRED_VIDEO_PROMPTS: Record<string, number> = { MAID: 9, SC: 10, UC: 10, DR: 12 };
+export const REQUIRED_VIDEO_PROMPTS: Record<string, number> = { MAID: 9, SC: 10, UC: 10, DR: 12 };
 
 @Injectable()
 export class PipelineFsmService {
@@ -631,6 +631,32 @@ export class PipelineFsmService {
         if (!eligible) {
           throw new BadRequestException(
             `Verification incomplete — ${blockers.length} prerequisite(s) not met: ${blockers.join('; ')}`,
+          );
+        }
+      }
+
+      // ── S3_TRAIN exit gate — video certification (Pillar 5), not the quiz.
+      // A failed quiz never blocks here: submitAttempt()/gradeAttempt() just
+      // schedule a retake and leave the pipeline stage alone. Only incomplete
+      // video-cert prompts hold the staff at S3_TRAIN, same override rule as
+      // every other stage gate — an open HOLD or COMPLETE on S3_TRAIN (the
+      // `currentOverridden` check above, computed for whichever stage `current`
+      // is) lets it through regardless of what's actually been recorded. ─────
+      if (
+        !currentOverridden &&
+        current === PipelineStage.S3_TRAIN &&
+        toStage === PipelineStage.S4_AGREEMENTS
+      ) {
+        const requiredPrompts = REQUIRED_VIDEO_PROMPTS[seriesShort] ?? 0;
+        const videoRows = await manager.query(
+          `SELECT COUNT(DISTINCT prompt_key)::int AS cnt FROM video_certifications WHERE staff_id = $1 AND review_status = 'APPROVED'`,
+          [staffId],
+        );
+        const approvedPrompts = videoRows[0]?.cnt ?? 0;
+        if (approvedPrompts < requiredPrompts) {
+          throw new BadRequestException(
+            `Video certification incomplete (Pillar 5) — ${approvedPrompts}/${requiredPrompts} prompts RM-approved. ` +
+              `Complete video certification, or have the RM mark S3_TRAIN as COMPLETE, before moving to Agreements.`,
           );
         }
       }

@@ -4,10 +4,9 @@ import { AuthUser, resolveStaffScope } from '../../common/guards/branch-scope.ut
 import { SchemaBootstrapService } from '../health/schema-bootstrap.service';
 import * as crypto from 'crypto';
 
-const CURRICULUM_DAYS: Record<string, number> = {
-  DR: 5, DRIVER: 5, SC: 7, SKILLED_CARE: 7,
-  UC: 5, UNSKILLED_CARE: 5, M3X: 3, MAID: 3,
-};
+/** A trainee must be added within this long of the batch being created — after
+ *  that the window is closed and a new batch has to be made for them instead. */
+const ENROLLMENT_WINDOW_HOURS = 24;
 
 function seriesAlias(s: string): string {
   return ({ DRIVER: 'DR', SKILLED_CARE: 'SC', UNSKILLED_CARE: 'UC', MAID: 'M3X' } as Record<string, string>)[s] ?? s;
@@ -42,9 +41,11 @@ function mapBatch(r: any) {
     trainerId: r.trainer_id ?? null,
     classroom: r.classroom ?? null,
     startDate: r.start_date,
+    endDate: r.end_date ?? null,
+    quizDate: r.quiz_date ?? null,
     status: r.status ?? 'UPCOMING',
     scenarioCode: scenarioCode(r.series),
-    curriculumDays: CURRICULUM_DAYS[series] ?? 5,
+    createdAt: r.created_at,
     enrollments,
   };
 }
@@ -88,13 +89,12 @@ export class TrainingService {
     try {    const rows = await this.prisma.$queryRawUnsafe<any[]>(`
       SELECT
         b.id, b.batch_code, b.series, b.trainer_name, b.trainer_id, b.classroom,
-        b.start_date, b.status, b.branch_id, b.rm_id, b.created_at,
+        b.start_date, b.end_date, b.quiz_date, b.status, b.branch_id, b.rm_id, b.created_at,
         COALESCE(
           json_agg(
             json_build_object(
               'id', e.id,
               'staffId', e.staff_id::text,
-              'attendance', e.attendance,
               'staffCode', COALESCE(emp.employee_id, sa.staff_code, 'N/A'),
               'fullName', COALESCE(emp.full_name, sa.full_name, 'Unknown'),
               'mobile', COALESCE(emp.mobile, sa.mobile, ''),
@@ -127,10 +127,32 @@ export class TrainingService {
   async createBatch(user: AuthUser, body: Record<string, unknown>) {
     await this.ensureTables();
     const series = String(body.series ?? 'DR');
-    const trainerName = String(body.trainerName ?? body.trainer_name ?? (user as any).name ?? (user as any).fullName ?? 'Staff Trainer');
+    // `AuthUser` (the JWT payload) only ever carries id/role/branchId — it
+    // never had a name to fall back to, so this silently produced the literal
+    // string "Staff Trainer" for every batch a TRAINER created for themselves
+    // without the caller passing trainer_name explicitly. Look the real name
+    // up from `users` in that case instead of guessing at fields that don't exist.
+    let trainerName = body.trainerName ?? body.trainer_name;
+    if (!trainerName) {
+      const row = await this.prisma.user.findUnique({ where: { id: user.id }, select: { fullName: true } });
+      trainerName = row?.fullName ?? 'Staff Trainer';
+    }
+    trainerName = String(trainerName);
     const trainerId = String(body.trainerId ?? body.trainer_id ?? user.id);
     const classroom = String(body.classroom ?? 'Main Hall');
     const startDate = String(body.startDate ?? body.start_date ?? new Date().toISOString().slice(0, 10));
+    // No more fixed per-series curriculum length — the trainer decides how
+    // long THIS batch runs, so there's no sensible default to fall back to.
+    const endDateRaw = body.endDate ?? body.end_date;
+    if (!endDateRaw) {
+      throw new BadRequestException('end_date is required — how long this batch runs is the trainer\'s call now, not a fixed per-series length.');
+    }
+    const endDate = String(endDateRaw);
+    if (endDate < startDate) {
+      throw new BadRequestException(`end_date (${endDate}) can't be before start_date (${startDate}).`);
+    }
+    const quizDateRaw = body.quizDate ?? body.quiz_date;
+    const quizDate = quizDateRaw ? String(quizDateRaw) : null;
     const status = String(body.status ?? 'UPCOMING');
     // resolveStaffScope() only fills branchId/rmId in for the RM/BM cases —
     // for any other creator (TRAINER, ADMIN) both silently fell through to
@@ -155,10 +177,10 @@ export class TrainingService {
       code = genBatchCode(series);
       try {
         res = await this.prisma.$queryRawUnsafe<any[]>(
-          `INSERT INTO training_batches (id, batch_code, series, trainer_name, trainer_id, classroom, start_date, status, branch_id, rm_id, created_at, updated_at)
-           VALUES (gen_random_uuid(), $1, $2, $3, $4::uuid, $5, $6::date, $7, $8::uuid, $9::uuid, now(), now())
-           RETURNING id`,
-          code, series, trainerName, trainerId, classroom, startDate, status, branchId, rmId,
+          `INSERT INTO training_batches (id, batch_code, series, trainer_name, trainer_id, classroom, start_date, end_date, quiz_date, status, branch_id, rm_id, created_at, updated_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4::uuid, $5, $6::date, $7::date, $8::date, $9, $10::uuid, $11::uuid, now(), now())
+           RETURNING id, created_at`,
+          code, series, trainerName, trainerId, classroom, startDate, endDate, quizDate, status, branchId, rmId,
         );
         break;
       } catch (err: any) {
@@ -182,7 +204,10 @@ export class TrainingService {
         trainerName,
         classroom,
         startDate,
+        endDate,
+        quizDate,
         status,
+        createdAt: res![0].created_at,
         enrollments: [],
       },
     };
@@ -194,21 +219,46 @@ export class TrainingService {
       throw new BadRequestException('Invalid batch ID');
     }
     const batches = await this.prisma.$queryRawUnsafe<any[]>(
-      `SELECT id, start_date FROM training_batches WHERE id = $1::uuid`, batchId,
+      `SELECT id, start_date, created_at FROM training_batches WHERE id = $1::uuid`, batchId,
     ).catch(() => []);
     if (!batches.length) throw new NotFoundException('Batch not found');
     const batchStartDate = batches[0].start_date;
 
-    // Validate Employee or StaffApplicant exists
-    let empRows = await this.prisma.$queryRawUnsafe<any[]>(
-      `SELECT id, full_name FROM employees WHERE id = $1::uuid AND deleted_at IS NULL LIMIT 1`, staffId,
-    ).catch(() => []);
-    if (!empRows.length) {
-      empRows = await this.prisma.$queryRawUnsafe<any[]>(
-        `SELECT id, full_name FROM staff_applicants WHERE id = $1::uuid AND deleted_at IS NULL LIMIT 1`, staffId,
-      ).catch(() => []);
+    // Enrollment window: a trainee can only be added within
+    // ENROLLMENT_WINDOW_HOURS of the batch's own creation. Past that, this
+    // batch is closed to new additions — make a new one instead. This is
+    // about how long the ROSTER stays open, not the training dates
+    // themselves (start_date/end_date), which don't move.
+    const ageMs = Date.now() - new Date(batches[0].created_at).getTime();
+    const ageHours = ageMs / (60 * 60 * 1000);
+    if (ageHours > ENROLLMENT_WINDOW_HOURS) {
+      throw new BadRequestException(
+        `This batch's enrollment window closed ${Math.floor(ageHours - ENROLLMENT_WINDOW_HOURS)}h ago ` +
+          `(batches accept new trainees for ${ENROLLMENT_WINDOW_HOURS}h after creation). Create a new batch instead.`,
+      );
     }
-    if (!empRows.length) throw new NotFoundException('Staff or Employee not found');
+
+    // batch_enrollments.staff_id FKs to staff_applicants ONLY — never to
+    // employees. This used to check employees FIRST and accept a match there
+    // as good enough, so an id that only existed in employees (an HR record,
+    // not an S1-S5 pipeline candidate) passed this check and then blew up the
+    // INSERT below with a raw 23503 foreign-key-violation 500. The frontend's
+    // trainee picker already filters to S3_TRAIN staff_applicants, but that
+    // was never a real guarantee — this is the actual gate.
+    const staffRows = await this.prisma.$queryRawUnsafe<any[]>(
+      `SELECT id, full_name FROM staff_applicants WHERE id = $1::uuid AND deleted_at IS NULL LIMIT 1`, staffId,
+    ).catch(() => []);
+    if (!staffRows.length) {
+      const empRows = await this.prisma.$queryRawUnsafe<any[]>(
+        `SELECT id FROM employees WHERE id = $1::uuid AND deleted_at IS NULL LIMIT 1`, staffId,
+      ).catch(() => []);
+      if (empRows.length) {
+        throw new BadRequestException(
+          'This id is an HR employee record, not an S1-S5 pipeline trainee — it can\'t be enrolled in a training batch.',
+        );
+      }
+      throw new NotFoundException('Staff applicant not found');
+    }
 
     const existingInSameBatch = await this.prisma.$queryRawUnsafe<any[]>(
       `SELECT id FROM batch_enrollments WHERE batch_id = $1::uuid AND staff_id = $2::uuid`, batchId, staffId
@@ -231,28 +281,7 @@ export class TrainingService {
        VALUES (gen_random_uuid(), $1::uuid, $2::uuid, '{}')`,
       batchId, staffId,
     );
-    return { success: true, employeeName: empRows[0].full_name };
-  }
-
-  async markAttendance(batchId: string, staffId: string, dayNumber: number, attended: boolean) {
-    const rows = await this.prisma.$queryRawUnsafe<any[]>(
-      `SELECT id, attendance FROM batch_enrollments WHERE batch_id = $1::uuid AND staff_id = $2::uuid`,
-      batchId, staffId,
-    );
-    if (!rows.length) throw new NotFoundException('Enrollment not found');
-
-    let att: number[] = rows[0].attendance ?? [];
-    att = attended
-      ? [...new Set([...att, dayNumber])].sort((a, b) => a - b)
-      : att.filter((d) => d !== dayNumber);
-
-    // PostgreSQL array literal
-    const arrLiteral = `{${att.join(',')}}`;
-    await this.prisma.$executeRawUnsafe(
-      `UPDATE batch_enrollments SET attendance = $1::integer[] WHERE batch_id = $2::uuid AND staff_id = $3::uuid`,
-      arrLiteral, batchId, staffId,
-    );
-    return { success: true, attendance: att };
+    return { success: true, employeeName: staffRows[0].full_name };
   }
 
   async updateBatchStatus(batchId: string, status: string) {
@@ -263,6 +292,31 @@ export class TrainingService {
       `UPDATE training_batches SET status = $1, updated_at = now() WHERE id = $2::uuid`, s, batchId,
     );
     return { success: true, status: s };
+  }
+
+  /**
+   * Lets the trainer move the end date or quiz date after the batch already
+   * exists — unlike the 24h enrollment window, there's no deadline on this;
+   * a cohort's dates can slip without forcing a whole new batch.
+   */
+  async updateBatchSchedule(batchId: string, body: { end_date?: string; quiz_date?: string }) {
+    const batches = await this.prisma.$queryRawUnsafe<any[]>(
+      `SELECT start_date, end_date, quiz_date FROM training_batches WHERE id = $1::uuid`, batchId,
+    );
+    if (!batches.length) throw new NotFoundException('Batch not found');
+    const current = batches[0];
+
+    const endDate = body.end_date ? String(body.end_date) : current.end_date;
+    const quizDate = body.quiz_date !== undefined ? (body.quiz_date ? String(body.quiz_date) : null) : current.quiz_date;
+    if (endDate < current.start_date) {
+      throw new BadRequestException(`end_date (${endDate}) can't be before this batch's start_date (${current.start_date}).`);
+    }
+
+    await this.prisma.$executeRawUnsafe(
+      `UPDATE training_batches SET end_date = $1::date, quiz_date = $2::date, updated_at = now() WHERE id = $3::uuid`,
+      endDate, quizDate, batchId,
+    );
+    return { success: true, endDate, quizDate };
   }
 
   async deleteBatch(batchId: string) {

@@ -907,6 +907,9 @@ export class StaffMobileController {
         body: n.body,
         read: n.readAt !== null,
         sentAt: n.sentAt ?? n.createdAt,
+        // e.g. QUIZ_RESCHEDULED / QUIZ_PASSED / QUIZ_FAILED — lets the app deep-link.
+        type: n.template ?? null,
+        data: n.payload ?? {},
       })),
       unread: rows.filter((n) => n.readAt === null).length,
     };

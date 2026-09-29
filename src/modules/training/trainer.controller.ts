@@ -28,15 +28,6 @@ export class TrainerController {
     return this.trainerService.getVideoCerts(req.user);
   }
 
-  @Put('assessment/:traineeId')
-  async updateAssessment(
-    @Req() req: any,
-    @Param('traineeId') traineeId: string,
-    @Body() data: any
-  ) {
-    return this.trainerService.updateAssessment(req.user.id, traineeId, data);
-  }
-
   @Put('video-certifications/:id/review')
   async reviewVideoCert(
     @Req() req: any,
