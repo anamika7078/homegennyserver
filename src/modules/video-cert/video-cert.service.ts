@@ -289,6 +289,12 @@ export class VideoCertService {
    * Pillar 5: Finalizes a video upload – verifies the SHA-256 hash stored in GCS metadata
    * and persists the certification record. Returns the DB entity.
    */
+  /** A missing field used to reach prisma.create and come back as a bare 500. */
+  private assertRecordFields(f: Record<string, string | undefined>) {
+    const missing = Object.entries(f).filter(([, v]) => !v?.trim()).map(([k]) => k);
+    if (missing.length) throw new BadRequestException(`Missing required field(s): ${missing.join(', ')}`);
+  }
+
   async finalizeUpload(params: {
     staffId: string;
     promptKey: string;
@@ -297,6 +303,7 @@ export class VideoCertService {
     attemptNumber?: number;
   }) {
     const { staffId, promptKey, gcsKey, expectedHash, attemptNumber = 1 } = params;
+    this.assertRecordFields({ staffId, promptKey, gcsKey, hash: expectedHash });
     const valid = await this.verifyVideoHash(gcsKey, expectedHash);
     if (!valid) {
       throw new BadRequestException('SHA-256 hash verification failed');
@@ -327,6 +334,7 @@ export class VideoCertService {
     attemptNumber?: number;
   }) {
     const { staffId, promptKey, gcsKey, sha256Hash, attemptNumber = 1 } = params;
+    this.assertRecordFields({ staffId, promptKey, gcsKey, hash: sha256Hash });
     const cert = await this.prisma.videoCertification.create({
       data: {
         staffId,
