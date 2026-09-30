@@ -3,8 +3,12 @@ node_modules/
 dist/
 build/
 
-# Local video-cert storage (VIDEO_STORAGE_MODE=local jugaad — never commit actual uploads)
+# Uploaded files (videos, HR ID documents) — never commit; they live in the bucket
 local-uploads/
+uploads/
+
+# Service-account keys
+secrets/
 
 # Environment variables
 .env

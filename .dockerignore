@@ -1,0 +1,7 @@
+# Uploaded files and keys must never be baked into an image.
+uploads/
+local-uploads/
+secrets/
+node_modules/
+dist/
+.git/
