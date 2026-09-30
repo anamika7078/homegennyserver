@@ -8,6 +8,7 @@ import {
   UploadedFile,
   Body,
   Res,
+  Req,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
@@ -105,6 +106,20 @@ export class DocumentsController {
   async download(@Param('id') id: string, @Res() res: Response) {
     const { stream, mimeType, originalName } = await this.service.getFileDetails(id);
     sendStoredFile(res, stream, mimeType, 'attachment', originalName);
+  }
+
+  @Post(':id/verify')
+  @Roles(UserRole.HR, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Accept a document the staff member uploaded from the app' })
+  async verify(@Param('id') id: string, @Req() req: { user: { id: string } }) {
+    return this.service.verify(id, req.user.id);
+  }
+
+  @Post(':id/reject')
+  @Roles(UserRole.HR, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Reject a staff-uploaded document with a reason the staff member sees; they can re-upload' })
+  async reject(@Param('id') id: string, @Body('remark') remark: string, @Req() req: { user: { id: string } }) {
+    return this.service.reject(id, req.user.id, remark);
   }
 
   @Delete(':id')

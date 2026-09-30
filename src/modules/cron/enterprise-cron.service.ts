@@ -310,6 +310,9 @@ export class EnterpriseCronService {
       where: {
         employee: { deletedAt: null },
         validTill: { not: null },
+        // Status here is recomputed from the expiry date alone; a staff upload
+        // awaiting HR (or one HR rejected) must not become "Verified" overnight.
+        status: { notIn: ['Pending Verification', 'Rejected', 'Not Available'] },
       },
       include: { employee: true },
     });

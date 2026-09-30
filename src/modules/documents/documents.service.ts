@@ -1,9 +1,29 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, ConflictException } from '@nestjs/common';
 import { DocumentsRepository } from './documents.repository';
 import { Prisma } from '@prisma/client';
 import { FileStorageService } from '../../common/storage/file-storage.service';
 
 export const MAX_DOCUMENT_BYTES = 5 * 1024 * 1024;
+
+export const PENDING_VERIFICATION = 'Pending Verification';
+export const REJECTED = 'Rejected';
+/** A staff member may replace their own upload only while HR hasn't accepted it. */
+const STAFF_REPLACEABLE = new Set([PENDING_VERIFICATION, REJECTED, 'Not Available']);
+
+/** The staff app's document names, mapped onto the names HR's checklist uses. */
+const STAFF_TYPE_ALIASES: Record<string, string> = {
+  'police verification': 'Police Verification Certificate',
+  'aadhaar': 'Aadhaar Card',
+  'aadhar card': 'Aadhaar Card',
+  'pan': 'PAN Card',
+  'photo': 'Passport Size Photo',
+  'driving licence': 'Driving License',
+};
+
+export function normalizeStaffDocumentType(raw: string | undefined): string {
+  const t = (raw ?? '').trim().replace(/\s+/g, ' ');
+  return STAFF_TYPE_ALIASES[t.toLowerCase()] ?? t;
+}
 
 const EXTENSION_BY_MIME: Record<string, string> = {
   'application/pdf': '.pdf',
@@ -98,6 +118,7 @@ export class DocumentsService {
       docs
         .filter((d) => {
           if (d.status === 'Not Available') return this.hasUnavailableRemark(d);
+          if (d.status === PENDING_VERIFICATION || d.status === REJECTED) return false;
           return Boolean(d.fileUrl && d.fileUrl !== 'unavailable');
         })
         .map((d) => d.type),
@@ -219,9 +240,13 @@ export class DocumentsService {
       validFrom?: string;
       validTill?: string;
     },
+    source: { by: 'HR' | 'STAFF'; userId?: string } = { by: 'HR' },
   ) {
     if (!file) {
       throw new BadRequestException('No document file uploaded');
+    }
+    if (!type?.trim()) {
+      throw new BadRequestException('Document type is required');
     }
 
     const employee = await this.repo.findEmployeeById(employeeId);
@@ -240,18 +265,25 @@ export class DocumentsService {
     // Validate format for Aadhaar / PAN
     this.validateFormat(type, fields.docNumber);
 
+    const existing = await this.repo.findByEmployeeAndType(employeeId, type);
+    if (source.by === 'STAFF' && existing && !STAFF_REPLACEABLE.has(existing.status)) {
+      throw new ConflictException(
+        `Your ${type} is already on file with HR (${existing.status}). Ask HR if it needs replacing.`,
+      );
+    }
+
     // Store the new file first, so a failed upload never leaves the employee without the old one.
     const key = `hr-documents/${employeeId}/${Date.now()}_${type.replace(/[^a-zA-Z0-9]+/g, '_')}${extension}`;
     await this.storage.save(key, file.buffer, file.mimetype);
 
-    const existing = await this.repo.findByEmployeeAndType(employeeId, type);
     if (existing) {
       if (hasStoredFile(existing.fileUrl)) await this.storage.delete(existing.fileUrl);
       await this.repo.delete(existing.id);
     }
 
     const validTill = fields.validTill ? new Date(fields.validTill) : null;
-    const status = this.calculateStatus(validTill);
+    // A staff upload counts for nothing until HR has looked at it.
+    const status = source.by === 'STAFF' ? PENDING_VERIFICATION : this.calculateStatus(validTill);
 
     const createData: Prisma.EmployeeDocumentCreateInput = {
       type,
@@ -267,10 +299,42 @@ export class DocumentsService {
         originalName: file.originalname,
         mimeType: file.mimetype,
         size: file.size,
+        uploadedBy: source.by,
+        ...(source.userId ? { uploadedByUserId: source.userId } : {}),
       },
     };
 
     return this.repo.create(createData);
+  }
+
+  /** HR accepts a staff upload; its status then follows the expiry date like any HR upload. */
+  async verify(id: string, hrUserId: string) {
+    const doc = await this.findPending(id);
+    return this.repo.update(doc.id, {
+      status: this.calculateStatus(doc.validTill),
+      metadata: { ...(doc.metadata as object), verifiedByUserId: hrUserId, verifiedAt: new Date().toISOString() },
+    });
+  }
+
+  /** HR turns a staff upload down with a reason the staff member sees in the app; they can upload again. */
+  async reject(id: string, hrUserId: string, remark: string) {
+    if (!remark?.trim()) throw new BadRequestException('A remark is required to reject a document');
+    const doc = await this.findPending(id);
+    return this.repo.update(doc.id, {
+      status: REJECTED,
+      metadata: {
+        ...(doc.metadata as object),
+        rejection: { remark: remark.trim(), byUserId: hrUserId, at: new Date().toISOString() },
+      },
+    });
+  }
+
+  private async findPending(id: string) {
+    const doc = await this.findOne(id);
+    if (doc.status !== PENDING_VERIFICATION) {
+      throw new ConflictException(`Only a document pending verification can be verified or rejected (this one is ${doc.status})`);
+    }
+    return doc;
   }
 
   async findByEmployee(employeeId: string) {

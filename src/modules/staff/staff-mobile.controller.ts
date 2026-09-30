@@ -1,8 +1,10 @@
 import {
   Controller, Get, Post, Put, Body, Param, Req, Res, Query,
-  BadRequestException, ForbiddenException,
+  BadRequestException, ForbiddenException, UseInterceptors, UploadedFile,
 } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiQuery, ApiConsumes } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { Response } from 'express';
 import { sendStoredFile } from '../../common/storage/send-file.util';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -10,7 +12,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EmployeePayslipService } from '../employees/employee-payslip.service';
-import { DocumentsService } from '../documents/documents.service';
+import { DocumentsService, MAX_DOCUMENT_BYTES, REJECTED, normalizeStaffDocumentType } from '../documents/documents.service';
 
 const PIPELINE_STAGE_LABELS: Record<string, string> = {
   S1_INTAKE: 'Stage 1 - Intake',
@@ -846,12 +848,45 @@ export class StaffMobileController {
         issueDate: d.issueDate,
         validTill: d.validTill,
         uploadedAt: d.createdAt,
+        uploadedBy: d.metadata?.uploadedBy ?? 'HR',
+        // Set when HR rejected the staff member's own upload — shown so they know what to fix.
+        rejectionRemark: d.status === REJECTED ? d.metadata?.rejection?.remark ?? null : null,
         // Both go back through this controller, where ownership is checked.
         previewUrl: `/staff/documents/${d.id}/preview`,
         downloadUrl: `/staff/documents/${d.id}/download`,
       })),
       total: docs.length,
     };
+  }
+
+  @Post('documents')
+  @Roles(UserRole.STAFF)
+  @UseInterceptors(FileInterceptor('file', { storage: memoryStorage(), limits: { fileSize: MAX_DOCUMENT_BYTES, files: 1 } }))
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({
+    summary: 'Upload one of my own documents (Aadhaar, PAN, …) — HR verifies it before it counts',
+    description:
+      'Multipart: `file` (PDF/JPG/PNG, max 5 MB) and the document type in `document_type` ' +
+      '(or `name`, which the current app sends). The upload is saved as "Pending Verification" ' +
+      'and appears on HR\'s document screen; it does not satisfy onboarding until HR verifies it. ' +
+      'A pending or rejected upload of the same type is replaced; one HR already accepted is not (409).',
+  })
+  @ApiBody({ schema: { type: 'object', required: ['file'], properties: {
+    file: { type: 'string', format: 'binary' },
+    document_type: { type: 'string', example: 'Aadhaar Card' },
+    name: { type: 'string', description: 'Used as the type when document_type is absent' },
+  } } })
+  async uploadOwnDocument(
+    @Req() req: any,
+    @UploadedFile() file: Express.Multer.File,
+    @Body('document_type') documentType?: string,
+    @Body('name') name?: string,
+  ) {
+    const { employee } = await this.requireEmployee(req);
+    const type = normalizeStaffDocumentType(documentType || name);
+    if (!type || type.length > 60) throw new BadRequestException('document_type is required (max 60 characters)');
+    const doc: any = await this.documents.upload(employee.id, type, file, {}, { by: 'STAFF', userId: req.user.id });
+    return { id: doc.id, type: doc.type, status: doc.status, uploadedAt: doc.createdAt };
   }
 
   /**

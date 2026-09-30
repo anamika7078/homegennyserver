@@ -76,7 +76,7 @@ export class DocumentsRepository {
           gt: today,
         },
         status: {
-          not: 'Expired',
+          notIn: ['Expired', 'Pending Verification', 'Rejected', 'Not Available'],
         },
       },
       include: { employee: true },
@@ -94,7 +94,7 @@ export class DocumentsRepository {
           lt: today,
         },
         status: {
-          not: 'Expired',
+          notIn: ['Expired', 'Pending Verification', 'Rejected', 'Not Available'],
         },
       },
       include: { employee: true },
