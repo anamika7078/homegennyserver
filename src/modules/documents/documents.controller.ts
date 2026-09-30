@@ -10,9 +10,9 @@ import {
   Res,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { DocumentsService } from './documents.service';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { memoryStorage } from 'multer';
+import { sendStoredFile } from '../../common/storage/send-file.util';
+import { DocumentsService, MAX_DOCUMENT_BYTES } from './documents.service';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Response } from 'express';
@@ -25,7 +25,8 @@ export class DocumentsController {
 
   @Post(':employeeId/upload')
   @Roles(UserRole.HR, UserRole.ADMIN)
-  @UseInterceptors(FileInterceptor('file'))
+  // Multer enforces the limit while reading, instead of buffering an oversized file first.
+  @UseInterceptors(FileInterceptor('file', { storage: memoryStorage(), limits: { fileSize: MAX_DOCUMENT_BYTES, files: 1 } }))
   @ApiOperation({ summary: 'Upload or replace a document for an employee' })
   async upload(
     @Param('employeeId') employeeId: string,
@@ -94,17 +95,16 @@ export class DocumentsController {
   @Roles(UserRole.HR, UserRole.ADMIN)
   @ApiOperation({ summary: 'Preview document in browser' })
   async preview(@Param('id') id: string, @Res() res: Response) {
-    const { fullPath, mimeType } = await this.service.getFileDetails(id);
-    res.setHeader('Content-Type', mimeType);
-    return res.sendFile(fullPath);
+    const { stream, mimeType } = await this.service.getFileDetails(id);
+    sendStoredFile(res, stream, mimeType, 'inline');
   }
 
   @Get(':id/download')
   @Roles(UserRole.HR, UserRole.ADMIN)
   @ApiOperation({ summary: 'Download document file' })
   async download(@Param('id') id: string, @Res() res: Response) {
-    const { fullPath, originalName } = await this.service.getFileDetails(id);
-    res.download(fullPath, originalName);
+    const { stream, mimeType, originalName } = await this.service.getFileDetails(id);
+    sendStoredFile(res, stream, mimeType, 'attachment', originalName);
   }
 
   @Delete(':id')

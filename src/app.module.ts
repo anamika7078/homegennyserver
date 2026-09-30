@@ -74,6 +74,7 @@ import { UploadController } from './modules/upload/upload.controller';
 import { MapsController } from './modules/maps/maps.controller';
 import { ClientMobileController } from './modules/client/client-mobile.controller';
 
+import { StorageModule } from './common/storage/storage.module';
 import databaseConfig from './config/database.config';
 import appConfig from './config/app.config';
 
@@ -97,6 +98,7 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
       envFilePath: ['.env.production', '.env.local', '.env'],
       load: [databaseConfig, appConfig],
     }),
+    StorageModule,
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

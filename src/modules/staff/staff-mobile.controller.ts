@@ -4,7 +4,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
-import { createReadStream } from 'fs';
+import { sendStoredFile } from '../../common/storage/send-file.util';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
@@ -871,20 +871,16 @@ export class StaffMobileController {
   @ApiOperation({ summary: 'Open one of this staff member’s own documents' })
   async previewDocument(@Req() req: any, @Param('id') id: string, @Res() res: Response) {
     await this.ownDocumentOr403(req, id);
-    const { fullPath, mimeType, originalName } = await this.documents.getFileDetails(id);
-    res.setHeader('Content-Type', mimeType);
-    res.setHeader('Content-Disposition', `inline; filename="${originalName}"`);
-    createReadStream(fullPath).pipe(res);
+    const { stream, mimeType, originalName } = await this.documents.getFileDetails(id);
+    sendStoredFile(res, stream, mimeType, 'inline', originalName);
   }
 
   @Get('documents/:id/download')
   @ApiOperation({ summary: 'Save one of this staff member’s own documents' })
   async downloadDocument(@Req() req: any, @Param('id') id: string, @Res() res: Response) {
     await this.ownDocumentOr403(req, id);
-    const { fullPath, mimeType, originalName } = await this.documents.getFileDetails(id);
-    res.setHeader('Content-Type', mimeType);
-    res.setHeader('Content-Disposition', `attachment; filename="${originalName}"`);
-    createReadStream(fullPath).pipe(res);
+    const { stream, mimeType, originalName } = await this.documents.getFileDetails(id);
+    sendStoredFile(res, stream, mimeType, 'attachment', originalName);
   }
 
   @Get('notifications')

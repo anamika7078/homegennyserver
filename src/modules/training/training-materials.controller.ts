@@ -96,9 +96,9 @@ export class TrainingMaterialsController {
     if (!title) throw new BadRequestException('title is required');
     if (!file) throw new BadRequestException('file is required');
     if (file.mimetype !== 'application/pdf') throw new BadRequestException('Only PDF files are accepted here');
-    const { relativePath } = this.service.savePdf(batchId, file);
+    const { key: pdfKey } = await this.service.savePdf(batchId, file);
     return this.service.create({
-      batchId, type: 'PDF', title, storageKey: relativePath, sizeBytes: file.size, uploadedBy: req.user.id,
+      batchId, type: 'PDF', title, storageKey: pdfKey, sizeBytes: file.size, uploadedBy: req.user.id,
     });
   }
 
@@ -108,7 +108,7 @@ export class TrainingMaterialsController {
   async pdfFile(@Query('key') key: string, @Req() req: AuthedRequest, @Res() res: Response) {
     if (!key) throw new BadRequestException('key is required');
     await this.assertStaffFile(req, key);
-    const stream = this.service.readPdf(key);
+    const stream = await this.service.readPdf(key);
     res.setHeader('Content-Type', 'application/pdf');
     stream.pipe(res);
   }

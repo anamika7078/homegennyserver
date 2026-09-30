@@ -1,24 +1,26 @@
-import { Injectable, BadRequestException, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
 import { DocumentsRepository } from './documents.repository';
 import { Prisma } from '@prisma/client';
-import * as fs from 'fs';
-import * as path from 'path';
+import { FileStorageService } from '../../common/storage/file-storage.service';
+
+export const MAX_DOCUMENT_BYTES = 5 * 1024 * 1024;
+
+const EXTENSION_BY_MIME: Record<string, string> = {
+  'application/pdf': '.pdf',
+  'image/jpeg': '.jpg',
+  'image/jpg': '.jpg',
+  'image/png': '.png',
+};
+
+/** fileUrl holds the storage key (hr-documents/<employeeId>/...), or 'unavailable' for a remarked gap. */
+const hasStoredFile = (fileUrl?: string | null): fileUrl is string => !!fileUrl && fileUrl !== 'unavailable';
 
 @Injectable()
-export class DocumentsService implements OnModuleInit {
-  private readonly uploadDir = path.join(process.cwd(), 'uploads', 'employees');
-
-  constructor(private readonly repo: DocumentsRepository) {}
-
-  onModuleInit() {
-    try {
-      if (!fs.existsSync(this.uploadDir)) {
-        fs.mkdirSync(this.uploadDir, { recursive: true });
-      }
-    } catch (error) {
-      console.warn(`[DocumentsService] Warning: Could not create upload directory at ${this.uploadDir}. Ensure disk permissions are configured.`, error.message);
-    }
-  }
+export class DocumentsService {
+  constructor(
+    private readonly repo: DocumentsRepository,
+    private readonly storage: FileStorageService,
+  ) {}
 
   calculateStatus(validTill?: Date | null): string {
     if (!validTill) return 'Verified';
@@ -156,14 +158,7 @@ export class DocumentsService implements OnModuleInit {
 
     const existing = await this.repo.findByEmployeeAndType(employeeId, type);
     if (existing) {
-      if (existing.fileUrl && existing.fileUrl !== 'unavailable') {
-        const oldFilePath = path.join(process.cwd(), existing.fileUrl);
-        if (fs.existsSync(oldFilePath)) {
-          try {
-            fs.unlinkSync(oldFilePath);
-          } catch {}
-        }
-      }
+      if (hasStoredFile(existing.fileUrl)) await this.storage.delete(existing.fileUrl);
       await this.repo.delete(existing.id);
     }
 
@@ -234,40 +229,26 @@ export class DocumentsService implements OnModuleInit {
       throw new NotFoundException(`Employee with ID ${employeeId} not found`);
     }
 
-    // Size limit check: 5 MB
-    const maxSize = 5 * 1024 * 1024;
-    if (file.size > maxSize) {
+    if (file.size > MAX_DOCUMENT_BYTES) {
       throw new BadRequestException('Document exceeds maximum size limit of 5 MB');
     }
-
-    // MIME type check
-    const allowedMimeTypes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
-    if (!allowedMimeTypes.includes(file.mimetype)) {
+    const extension = EXTENSION_BY_MIME[file.mimetype];
+    if (!extension) {
       throw new BadRequestException('Only PDF, JPG, JPEG, and PNG formats are supported');
     }
 
     // Validate format for Aadhaar / PAN
     this.validateFormat(type, fields.docNumber);
 
-    // If document already exists of this type for employee, overwrite it (replace)
+    // Store the new file first, so a failed upload never leaves the employee without the old one.
+    const key = `hr-documents/${employeeId}/${Date.now()}_${type.replace(/[^a-zA-Z0-9]+/g, '_')}${extension}`;
+    await this.storage.save(key, file.buffer, file.mimetype);
+
     const existing = await this.repo.findByEmployeeAndType(employeeId, type);
     if (existing) {
-      // Delete old file
-      const oldFilePath = path.join(process.cwd(), existing.fileUrl);
-      if (fs.existsSync(oldFilePath)) {
-        try {
-          fs.unlinkSync(oldFilePath);
-        } catch {}
-      }
+      if (hasStoredFile(existing.fileUrl)) await this.storage.delete(existing.fileUrl);
       await this.repo.delete(existing.id);
     }
-
-    // Save file locally
-    const filename = `${employeeId}_${Date.now()}_${type.replace(/\s+/g, '_')}${path.extname(file.originalname)}`;
-    const filePath = path.join(this.uploadDir, filename);
-    fs.writeFileSync(filePath, file.buffer);
-
-    const relativeUrl = `uploads/employees/${filename}`;
 
     const validTill = fields.validTill ? new Date(fields.validTill) : null;
     const status = this.calculateStatus(validTill);
@@ -275,7 +256,7 @@ export class DocumentsService implements OnModuleInit {
     const createData: Prisma.EmployeeDocumentCreateInput = {
       type,
       docNumber: fields.docNumber || null,
-      fileUrl: relativeUrl,
+      fileUrl: key,
       issueDate: fields.issueDate ? new Date(fields.issueDate) : null,
       issuedBy: fields.issuedBy || null,
       validFrom: fields.validFrom ? new Date(fields.validFrom) : null,
@@ -306,13 +287,10 @@ export class DocumentsService implements OnModuleInit {
 
   async getFileDetails(id: string) {
     const doc = await this.findOne(id);
-    const fullPath = path.join(process.cwd(), doc.fileUrl);
-    if (!fs.existsSync(fullPath)) {
-      throw new NotFoundException('Document file not found on disk');
-    }
+    if (!hasStoredFile(doc.fileUrl)) throw new NotFoundException('No file on record for this document');
     return {
       doc,
-      fullPath,
+      stream: await this.storage.read(doc.fileUrl),
       mimeType: (doc.metadata as any)?.mimeType || 'application/octet-stream',
       originalName: (doc.metadata as any)?.originalName || 'file',
     };
@@ -320,12 +298,7 @@ export class DocumentsService implements OnModuleInit {
 
   async delete(id: string) {
     const doc = await this.findOne(id);
-    const fullPath = path.join(process.cwd(), doc.fileUrl);
-    if (fs.existsSync(fullPath)) {
-      try {
-        fs.unlinkSync(fullPath);
-      } catch {}
-    }
+    if (hasStoredFile(doc.fileUrl)) await this.storage.delete(doc.fileUrl);
     return this.repo.delete(id);
   }
 

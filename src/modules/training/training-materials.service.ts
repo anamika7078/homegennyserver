@@ -2,11 +2,10 @@ import { Injectable, Logger, BadRequestException, NotFoundException, ForbiddenEx
 import { ConfigService } from '@nestjs/config';
 import { Storage, Bucket } from '@google-cloud/storage';
 import * as fs from 'fs';
-import * as path from 'path';
 import { PrismaService } from '../../prisma/prisma.service';
+import { FileStorageService } from '../../common/storage/file-storage.service';
 import { LocalMaterialStorage } from './local-material-storage.util';
 
-const PDF_UPLOAD_DIR = path.join(process.cwd(), 'local-uploads', 'training-materials-pdf');
 const MAX_PDF_SIZE = 10 * 1024 * 1024; // 10 MB
 
 export type MaterialType = 'VIDEO' | 'PDF' | 'NOTE';
@@ -29,12 +28,10 @@ export class TrainingMaterialsService {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly files: FileStorageService,
   ) {
     this.localMode = config.get<string>('app.gcs.videoStorageMode') === 'local';
-    if (this.localMode) {
-      fs.mkdirSync(PDF_UPLOAD_DIR, { recursive: true });
-      return;
-    }
+    if (this.localMode) return;
     const projectId = config.get<string>('app.gcp.projectId');
     const keyFile = config.get<string>('app.gcp.keyFile');
     this.storage = new Storage({
@@ -46,7 +43,6 @@ export class TrainingMaterialsService {
     // rather than provisioning a second bucket for this.
     const bucketName = config.getOrThrow<string>('app.gcs.bucketVideoCerts');
     this.bucket = this.storage.bucket(bucketName);
-    fs.mkdirSync(PDF_UPLOAD_DIR, { recursive: true });
   }
 
   private async assertBatchExists(batchId: string): Promise<void> {
@@ -113,20 +109,19 @@ export class TrainingMaterialsService {
 
   // ── PDF: direct multipart upload, same idea as documents.service.ts ────────
 
-  savePdf(batchId: string, file: { buffer: Buffer; originalname: string; size: number }): { relativePath: string } {
+  async savePdf(batchId: string, file: { buffer: Buffer; originalname: string; size: number }): Promise<{ key: string }> {
     if (file.size > MAX_PDF_SIZE) {
       throw new BadRequestException(`PDF exceeds the ${MAX_PDF_SIZE / 1024 / 1024} MB limit`);
     }
     const filename = `${batchId}_${Date.now()}_${file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-    const fullPath = path.join(PDF_UPLOAD_DIR, filename);
-    fs.writeFileSync(fullPath, file.buffer);
-    return { relativePath: `local-uploads/training-materials-pdf/${filename}` };
+    const key = `training-materials-pdf/${batchId}/${filename}`;
+    await this.files.save(key, file.buffer, 'application/pdf');
+    return { key };
   }
 
-  readPdf(relativePath: string): fs.ReadStream {
-    const full = path.join(process.cwd(), relativePath);
-    if (!full.startsWith(PDF_UPLOAD_DIR) || !fs.existsSync(full)) throw new NotFoundException('File not found');
-    return fs.createReadStream(full);
+  readPdf(key: string) {
+    if (!key.startsWith('training-materials-pdf/')) throw new NotFoundException('File not found');
+    return this.files.read(key);
   }
 
   // ── The training_materials row itself ───────────────────────────────────
@@ -207,7 +202,7 @@ export class TrainingMaterialsService {
         );
       }
       if (type === 'PDF') {
-        try { fs.unlinkSync(path.join(process.cwd(), storage_key)); } catch { /* already gone */ }
+        await this.files.delete(storage_key);
       }
     }
   }
