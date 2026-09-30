@@ -201,6 +201,11 @@ export class TrainingMaterialsService {
     await this.prisma.$executeRawUnsafe(`DELETE FROM training_materials WHERE id = $1::uuid`, id);
     if (storage_key) {
       if (type === 'VIDEO' && this.localMode) LocalMaterialStorage.delete(storage_key);
+      if (type === 'VIDEO' && !this.localMode) {
+        await this.bucket!.file(storage_key).delete({ ignoreNotFound: true }).catch((e) =>
+          this.logger.warn(`Could not delete ${storage_key} from the bucket: ${e?.message}`),
+        );
+      }
       if (type === 'PDF') {
         try { fs.unlinkSync(path.join(process.cwd(), storage_key)); } catch { /* already gone */ }
       }
