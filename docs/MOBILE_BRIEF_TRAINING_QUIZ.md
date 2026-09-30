@@ -1,8 +1,9 @@
 # Mobile app change needed — Staff Training module (study material + quiz)
 
 **Audience:** the Flutter developer building the staff app's Training screens.
-**Backend status:** built and live-tested locally on 2026-09-29 (52/52 checks),
-**not yet deployed to the Hostinger server** — you'll get a heads-up when it is.
+**Backend status:** live on the Hostinger server (`https://homegenny.com/api/v1`)
+since 2026-09-29. Start with [MOBILE_INTEGRATION_GUIDE.md](MOBILE_INTEGRATION_GUIDE.md)
+for what to change in the app, screen by screen.
 
 ## Read this first — two things that will bite you
 
@@ -94,13 +95,14 @@ One call gives the whole screen. Real response, trimmed:
   trailing `/api/v1` duplication — the value already starts with `/api/v1`) and
   send the `Authorization: Bearer …` header. A PDF viewer that can't send headers
   won't work; download the bytes with the token, then show the file.
-- `VIDEO` → today also a relative URL that needs the Bearer header
-  (`video_player`'s `VideoPlayerController.networkUrl(..., httpHeaders: {...})`
-  supports this). Later, when cloud storage is switched on, this becomes a full
+- `VIDEO` → since 2026-09-30 (server on the cloud bucket) a full
   `https://storage.googleapis.com/…` signed URL that needs **no** header and
-  expires after 1 hour. **Handle both:** if `viewUrl` starts with `http`, use it
-  as-is; otherwise prefix the host and add the header. Don't cache the URL —
-  re-fetch `/training/mine` to get a fresh one.
+  expires after 1 hour. A local-disk backend (a developer laptop) instead
+  returns a relative URL that needs the Bearer header
+  (`VideoPlayerController.networkUrl(..., httpHeaders: {...})`).
+  **Handle both:** if `viewUrl` starts with `http`, use it as-is; otherwise
+  prefix the host and add the header. Don't cache the URL — re-fetch
+  `/training/mine` to get a fresh one.
 - A staff can only open material from batches they're enrolled in (403 otherwise).
 
 ### The quiz object and its `state`
