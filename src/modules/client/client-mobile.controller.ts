@@ -3,13 +3,14 @@ import {
   UploadedFiles, BadRequestException,
 } from '@nestjs/common';
 import { AnyFilesInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiBody, ApiConsumes, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
-import { IncidentsService } from '../incidents/incidents.service';
+import { IncidentsService, MAX_COMPLAINT_PHOTOS, MAX_COMPLAINT_PHOTO_BYTES } from '../incidents/incidents.service';
 import { FinanceInvoiceService } from '../finance/invoice/invoice.service';
 import { CLIENT_VISIBLE_INVOICE_STATUSES } from '../../common/finance/invoice-status';
 import { buildServiceLines, periodRange } from '../../common/finance/service-lines.util';
@@ -340,7 +341,11 @@ export class ClientMobileController {
   }
 
   @Post('complaints')
-  @UseInterceptors(AnyFilesInterceptor())
+  @UseInterceptors(AnyFilesInterceptor({
+    storage: memoryStorage(),
+    // Enforced while reading, so an oversized upload never sits in memory whole.
+    limits: { fileSize: MAX_COMPLAINT_PHOTO_BYTES, files: MAX_COMPLAINT_PHOTOS, fields: 30 },
+  }))
   @ApiConsumes('multipart/form-data')
   @ApiOperation({
     summary: 'Raise a client complaint',
@@ -350,9 +355,8 @@ export class ClientMobileController {
       'subject + description (+ optional images[]). staff_id/type/title are optional overrides for direct ' +
       'API testing — staff_id defaults to your active placement\'s staff, title defaults to subject, ' +
       'type defaults to CLIENT_COMPLAINT. ' +
-      'images[] is OPTIONAL and is accepted but NOT persisted — no file storage is wired to this ' +
-      'endpoint, so uploaded files are discarded and the response says so in `imagesStored`. ' +
-      'Use evidence_urls (plain string URLs) for evidence that has to survive.',
+      'Photos: up to 5, JPG/PNG/WebP, max 5 MB each, in fields named `images` or `images[0]`, `images[1]`, …. ' +
+      'They are stored privately and returned on GET /incidents/:id as `photos[]` URLs that re-check access.',
   })
   @ApiBody({
     schema: {
@@ -365,7 +369,7 @@ export class ClientMobileController {
           type: 'array',
           items: { type: 'string', format: 'binary' },
           nullable: true,
-          description: 'Optional. Accepted but NOT stored yet — see `imagesStored` in the response.',
+          description: 'Optional. Up to 5 JPG/PNG/WebP photos, 5 MB each.',
         },
         staff_id: { type: 'string', description: 'Optional — defaults to your active placement\'s staff' },
         type: { type: 'string', enum: CLIENT_INCIDENT_TYPES as unknown as string[], example: 'CLIENT_COMPLAINT', description: 'Optional — defaults to CLIENT_COMPLAINT' },
@@ -385,25 +389,23 @@ export class ClientMobileController {
     const type = CLIENT_INCIDENT_TYPES.includes(body.type) ? body.type : 'CLIENT_COMPLAINT';
     const title = body.title ?? body.subject ?? 'Client complaint';
     const evidenceUrls = Array.isArray(body.evidence_urls) ? body.evidence_urls : undefined;
+    const photos = this.incidents.pickComplaintPhotos(files);
 
     const incident = await this.incidents.fileByClient(
       { staffId, type, title, description: body.description, evidenceUrls },
       customer.id,
       req.user.id,
     );
+    const imagesStored = await this.incidents.attachPhotos(incident.id, photos);
 
-    // Say out loud that uploaded files were dropped. The app lets the user
-    // attach photos and there is no storage behind this endpoint; a plain
-    // success response made that look like it had worked.
-    const imagesReceived = files?.length ?? 0;
     return {
       success: true,
       ticketNumber: incident.id,
       status: incident.status,
-      imagesReceived,
-      imagesStored: 0,
-      ...(imagesReceived > 0
-        ? { warning: 'Image uploads are not stored yet — send evidence_urls for evidence that must persist.' }
+      imagesReceived: photos.length,
+      imagesStored,
+      ...(imagesStored < photos.length
+        ? { warning: `${photos.length - imagesStored} photo(s) could not be saved — the complaint was filed without them.` }
         : {}),
       message: 'Complaint submitted to RM and Branch Manager.',
     };

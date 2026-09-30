@@ -1,7 +1,24 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction, IncidentType } from '@prisma/client';
+import { FileStorageService } from '../../common/storage/file-storage.service';
+
+export const MAX_COMPLAINT_PHOTOS = 5;
+export const MAX_COMPLAINT_PHOTO_BYTES = 5 * 1024 * 1024;
+
+const PHOTO_EXTENSION: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+};
+
+interface StoredPhoto { key: string; mimeType: string; size: number; originalName: string }
+
+function storedPhotos(metadata: unknown): StoredPhoto[] {
+  const photos = (metadata as { photos?: unknown } | null)?.photos;
+  return Array.isArray(photos) ? (photos as StoredPhoto[]) : [];
+}
 
 /**
  * Pillar 9 — Incident Trail. The DB model (Incident/IncidentComment) already
@@ -10,10 +27,65 @@ import { AuditAction, IncidentType } from '@prisma/client';
  */
 @Injectable()
 export class IncidentsService {
+  private readonly logger = new Logger(IncidentsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly storage: FileStorageService,
   ) {}
+
+  /**
+   * The photos a client attaches to a complaint. Throws before anything is
+   * stored, so a bad file never leaves a complaint with half its photos.
+   */
+  pickComplaintPhotos(files: Express.Multer.File[] = []): Express.Multer.File[] {
+    const photos = files.filter((f) => f.fieldname === 'images' || f.fieldname.startsWith('images['));
+    if (photos.length > MAX_COMPLAINT_PHOTOS) {
+      throw new BadRequestException(`At most ${MAX_COMPLAINT_PHOTOS} photos per complaint`);
+    }
+    for (const p of photos) {
+      if (!PHOTO_EXTENSION[p.mimetype]) {
+        throw new BadRequestException(`"${p.originalname}" is not a JPG, PNG or WebP photo`);
+      }
+    }
+    return photos;
+  }
+
+  /** Stores the photos under incident-evidence/<incidentId>/ and records them on the incident. Returns how many were stored. */
+  async attachPhotos(incidentId: string, photos: Express.Multer.File[]): Promise<number> {
+    if (!photos.length) return 0;
+    const stored: StoredPhoto[] = [];
+    for (const [i, p] of photos.entries()) {
+      const key = `incident-evidence/${incidentId}/${Date.now()}_${i + 1}${PHOTO_EXTENSION[p.mimetype]}`;
+      try {
+        await this.storage.save(key, p.buffer, p.mimetype);
+        stored.push({ key, mimeType: p.mimetype, size: p.size, originalName: p.originalname });
+      } catch (e: any) {
+        this.logger.error(`Could not store complaint photo for incident ${incidentId}: ${e?.message}`);
+      }
+    }
+    if (stored.length) {
+      const current = await this.prisma.incident.findUnique({ where: { id: incidentId }, select: { metadata: true } });
+      await this.prisma.incident.update({
+        where: { id: incidentId },
+        data: { metadata: { ...((current?.metadata as object) ?? {}), photos: stored } as any },
+      });
+    }
+    return stored.length;
+  }
+
+  async readPhoto(incidentId: string, index: number) {
+    // Raw row: findOne() strips the storage keys from what it returns.
+    const incident = await this.prisma.incident.findUnique({
+      where: { id: incidentId },
+      select: { id: true, clientId: true, metadata: true },
+    });
+    if (!incident) throw new NotFoundException(`Incident ${incidentId} not found`);
+    const photo = storedPhotos(incident.metadata)[index];
+    if (!photo) throw new NotFoundException('Photo not found');
+    return { incident, mimeType: photo.mimeType, stream: await this.storage.read(photo.key) };
+  }
 
   /** Client can only file against staff actually (or previously) placed with them. */
   async assertClientDeployedStaff(clientId: string, staffId: string): Promise<void> {
@@ -96,7 +168,14 @@ export class IncidentsService {
       },
     });
     if (!incident) throw new NotFoundException(`Incident ${id} not found`);
-    return incident;
+    // Storage keys stay server-side; callers get URLs that re-check access.
+    const photos = storedPhotos(incident.metadata).map((p, index) => ({
+      index,
+      mimeType: p.mimeType,
+      url: `/incidents/${incident.id}/photos/${index}`,
+    }));
+    const { photos: _keys, ...metadata } = (incident.metadata ?? {}) as Record<string, unknown>;
+    return { ...incident, metadata, photos };
   }
 
   /**

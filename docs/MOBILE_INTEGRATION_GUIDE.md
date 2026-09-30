@@ -54,6 +54,21 @@ where the camera plugin allows. (Upload limit 500 MB; send every field in
 `fields` unchanged, then `file` last. All earlier video-cert records were
 deleted on 2026-09-30, so every prompt starts as "not uploaded".)
 
+### 4. Client app — complaint photos are now saved
+`POST /client/complaints` used to accept `images[]` and throw them away
+(`imagesStored: 0`). Since 2026-09-30 they are stored. No request change is
+needed — the app's `images[0]`, `images[1]`, … fields work as they are.
+
+- Limits: up to **5** photos, **JPG / PNG / WebP**, **5 MB** each. Over the
+  limit → `413`; wrong type or more than 5 → `400`, and **no complaint is
+  created** — show the message and let the client fix the selection.
+  (iOS HEIC isn't accepted; `image_picker` returns JPEG by default.)
+- Response: `imagesReceived`, `imagesStored`; a `warning` only if a photo
+  failed to save after the complaint was filed.
+- To show them: `GET /incidents/:id` → `photos: [{ index, mimeType, url }]`,
+  where `url` is relative (`/incidents/:id/photos/0`) and needs the client's
+  Bearer token. A client can only open photos on their own complaints.
+
 ## Testing
 
 | Role | Phone | Password |

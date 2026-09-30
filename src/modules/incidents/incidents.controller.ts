@@ -1,4 +1,6 @@
-import { Controller, Get, Post, Param, Body, Query, Request, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Param, Body, Query, Request, Res, BadRequestException, ParseIntPipe } from '@nestjs/common';
+import type { Response } from 'express';
+import { sendStoredFile } from '../../common/storage/send-file.util';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery, ApiBody } from '@nestjs/swagger';
 import { IncidentType } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -90,6 +92,23 @@ export class IncidentsController {
       assertClientOwns(client.id, incident.clientId);
     }
     return incident;
+  }
+
+  @Get(':id/photos/:index')
+  @Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN, UserRole.CLIENT)
+  @ApiOperation({ summary: 'One photo attached to a complaint — same access rule as the incident itself' })
+  async photo(
+    @Param('id') id: string,
+    @Param('index', ParseIntPipe) index: number,
+    @Request() req: AuthedRequest,
+    @Res() res: Response,
+  ) {
+    const { incident, stream, mimeType } = await this.incidents.readPhoto(id, index);
+    if (req.user.role === 'CLIENT') {
+      const client = await resolveFinanceCustomer(this.prisma, req.user.id);
+      assertClientOwns(client.id, incident.clientId);
+    }
+    sendStoredFile(res, stream, mimeType, 'inline');
   }
 
   @Post(':id/comment')
