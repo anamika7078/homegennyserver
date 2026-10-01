@@ -1,33 +1,44 @@
-# Staff app — integration status (start here)
+# Mobile app — cloud storage (bucket) changes
 
 **Audience:** the Flutter developer on `homegennyapp`.
-**Checked against:** `homegennyapp` `main` @ `4b30810` ("training module api functionality", 2026-09-29), 2026-09-30.
-Everything below is live on the Hostinger server (`https://homegenny.com/api/v1`).
+**As of:** 2026-10-01. Everything below is live on the Hostinger server (`https://homegenny.com/api/v1`).
 
-| Brief | Covers |
-|---|---|
-| [MOBILE_BRIEF_TRAINING_QUIZ.md](MOBILE_BRIEF_TRAINING_QUIZ.md) | Training home, study material, quiz states, submit, result, notifications |
-| [MOBILE_BRIEF_STAFF_DOCUMENTS.md](MOBILE_BRIEF_STAFF_DOCUMENTS.md) | Staff uploads their own documents, HR verifies |
-| [MOBILE_BRIEF_SELF_REGISTRATION.md](MOBILE_BRIEF_SELF_REGISTRATION.md) | Staff / client sign-up |
+Since 2026-09-30 the server stores uploaded files in a **private Google Cloud
+Storage bucket** instead of its own disk. This page lists only what that
+changes for the app. Files are never public: every file comes back either as
+a short-lived signed bucket link or through an API URL that needs the user's
+Bearer token.
 
-## Already done in the app ✅
+## 1. Video certification
 
-- Base URL defaults to `https://homegenny.com/api/v1` (no longer Render).
-- Training module on the real API: `GET /training/mine`, quiz start / questions / submit / result.
-- Quiz model: `correctIndex` removed, answer-type (`TEXT`) questions, all quiz states (`LOCKED`, `SCHEDULED`, `UNDER_REVIEW`, `PASSED`, `FAILED`, …).
-- Quiz notifications deep-link from `notifications_screen.dart`.
-- Self-registration: `/auth/register/staff` and `/auth/register/customer` wired in `auth_datasource.dart`.
-- Video certification upload handles the cloud bucket (absolute signed URL, posted without the Bearer token).
+The server now returns a bucket upload target instead of its own
+`/video-cert/local-upload` path:
 
-Every path in `ApiConstants` on `main` (107) was checked against the live backend: all the ones the app actually calls exist.
+- `uploadUrl` is `https://storage.googleapis.com/homegenny/` plus a set of
+  policy `fields`. POST it as multipart: **every** field in `fields`
+  unchanged, then `file` last. **Don't send the Bearer token** to this URL.
+- Max **500 MB**. The bucket stores every certification video as
+  `video/mp4`. iOS cameras record `.mov` by default, which may not play in
+  the RM's browser, so record MP4 where the camera plugin allows.
+- After the upload, `verify-hash` and `finalize` work as before.
+  `finalize` returns **400** (not 500) if `staffId`, `promptKey`, `gcsKey`
+  or the hash is missing.
+- All earlier video-cert records were deleted on 2026-09-30, so every
+  prompt starts as "not uploaded".
 
-## Still to do
+## 2. Study material videos
 
-### 1. Staff documents — show the new statuses
-`POST /staff/documents` now works (it used to 404). A staff upload lands as
-`Pending Verification` until HR verifies it; HR can reject it with a reason.
-`GET /staff/documents` rows now include `uploadedBy` and `rejectionRemark`.
-The app doesn't handle these yet:
+A training video's `viewUrl` is now a signed bucket link
+(`https://storage.googleapis.com/…`). Play it as-is with **no** auth
+header. It expires after 1 hour, so fetch a fresh one instead of caching it.
+PDF `viewUrl`s are unchanged: relative, and they need the Bearer header.
+
+## 3. Staff documents
+
+`POST /staff/documents` now stores the file in the bucket (it used to 404).
+A staff upload lands as `Pending Verification` until HR verifies it, and HR
+can reject it with a reason. `GET /staff/documents` rows now include
+`uploadedBy` and `rejectionRemark`.
 
 | `status` | Show |
 |---|---|
@@ -35,47 +46,51 @@ The app doesn't handle these yet:
 | `Rejected` | "Rejected: {rejectionRemark}" + **Upload again** |
 | `Verified` / `Expiring Soon` / `Expired` / `Not Available` | as today |
 
-Also handle **409** on upload ("already accepted by HR — ask HR to replace it")
-and **413** (over 5 MB). Contract: [MOBILE_BRIEF_STAFF_DOCUMENTS.md](MOBILE_BRIEF_STAFF_DOCUMENTS.md).
-Prefer sending `document_type` with HR's exact names (`Police Verification Certificate`, not `Police Verification`).
+- Limits: PDF / JPG / PNG, **5 MB**. Over 5 MB → `413`. Wrong type → `400`.
+  If HR has already accepted that document type → `409`, and the staff
+  member has to ask HR to replace it.
+- Send `document_type` using HR's exact names, e.g. `Police Verification Certificate`
+  rather than `Police Verification`.
+- `previewUrl` / `downloadUrl` are relative and need the Bearer header.
 
-### 2. Remove dead constants and helpers
+Full contract: [MOBILE_BRIEF_STAFF_DOCUMENTS.md](MOBILE_BRIEF_STAFF_DOCUMENTS.md).
 
-| Remove | Where | Why |
-|---|---|---|
-| `uploadImage`, `uploadVideo`, `uploadDocument` constants + the `uploadImage()/uploadVideo()/uploadDocument()` helpers | `api_constants.dart`, `lib/core/network/api_service.dart` | `/upload/*` was removed from the backend (it never stored files); now 404. Nothing calls the helpers. |
-| `staffTasks` (`/staff/tasks/today`) | `api_constants.dart` | No such route; tasks come in `GET /staff/dashboard` → `todayTasks`, which the app already reads. |
-| `clientInvoice` (`/client/payments/invoice`) | `api_constants.dart` | No such route and unused; invoice detail is `/client/invoices/{invoiceNumber}`. |
+## 4. Client complaint photos
 
-### 3. Video certification on iPhone
-The bucket stores every certification video as `video/mp4`. iOS cameras
-record `.mov` by default, which may not play in the RM's browser. Record MP4
-where the camera plugin allows. (Upload limit 500 MB; send every field in
-`fields` unchanged, then `file` last. All earlier video-cert records were
-deleted on 2026-09-30, so every prompt starts as "not uploaded".)
-
-### 4. Client app — complaint photos are now saved
 `POST /client/complaints` used to accept `images[]` and throw them away
-(`imagesStored: 0`). Since 2026-09-30 they are stored. No request change is
-needed — the app's `images[0]`, `images[1]`, … fields work as they are.
+(`imagesStored: 0`). They are now stored. The request stays the same: the
+`images[0]`, `images[1]`, … fields work as they are.
 
-- Limits: up to **5** photos, **JPG / PNG / WebP**, **5 MB** each. Over the
-  limit → `413`; wrong type or more than 5 → `400`, and **no complaint is
-  created** — show the message and let the client fix the selection.
-  (iOS HEIC isn't accepted; `image_picker` returns JPEG by default.)
-- Response: `imagesReceived`, `imagesStored`; a `warning` only if a photo
-  failed to save after the complaint was filed.
-- To show them: `GET /incidents/:id` → `photos: [{ index, mimeType, url }]`,
-  where `url` is relative (`/incidents/:id/photos/0`) and needs the client's
-  Bearer token. A client can only open photos on their own complaints.
+- Limits: up to **5** photos, **JPG / PNG / WebP**, **5 MB** each. Over
+  the size limit → `413`. Wrong type or more than 5 → `400`, and in both
+  cases **no complaint is created**, so show the message and let the client
+  fix the selection. iOS HEIC isn't accepted; `image_picker` returns JPEG
+  by default.
+- The response has `imagesReceived` and `imagesStored`. It includes a
+  `warning` only if a photo failed to save after the complaint was filed.
+- To show them, call `GET /incidents/:id`. It returns
+  `photos: [{ index, mimeType, url }]`, where `url` is relative
+  (`/incidents/:id/photos/0`) and needs the client's Bearer token. A
+  client can only open photos on their own complaints.
+
+## 5. Removed upload endpoints
+
+`/upload/image`, `/upload/video` and `/upload/document` were removed. They
+never stored anything (they returned a fake URL) and now return 404. Delete
+these from the app:
+
+| Remove | Where |
+|---|---|
+| `uploadImage`, `uploadVideo`, `uploadDocument` constants | `api_constants.dart` |
+| `uploadImage()`, `uploadVideo()`, `uploadDocument()` helpers | `lib/core/network/api_service.dart` |
 
 ## Testing
 
 | Role | Phone | Password |
 |---|---|---|
-| Trainer | 9800000005 | `hg` |
-| HR | 9800000008 | `hg` |
-| RM | 9800000002 | `hg` |
+| Trainer (adds study material) | 9800000005 | `hg` |
+| HR (verifies documents) | 9800000008 | `hg` |
+| RM (reviews video certs and complaints) | 9800000002 | `hg` |
 
-For a staff login, ask the backend team for a test staff account — staff
-passwords are personal and aren't shared here.
+For a staff or client login, ask the backend team for a test account.
+Their passwords are personal and aren't shared here.
