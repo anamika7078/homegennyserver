@@ -31,6 +31,7 @@ const REQUIRED_VERIFICATION_TRACKS: Record<string, string[]> = {
   SKILLED_CARE: ['AADHAAR_EKYC', 'HEALTH_SCREENING'],
   UNSKILLED_CARE: ['AADHAAR_EKYC'],
   MAID: ['AADHAAR_EKYC'],
+  COOK: ['AADHAAR_EKYC', 'HEALTH_SCREENING'],
 };
 
 function isPvClear(seriesShort: string, pvStatus: string): boolean {
@@ -169,11 +170,19 @@ export class ClientMobileController {
     return {
       assignedStaff: placements.map((p) => {
         const s = staffById.get(p.staffId);
+        const series = s?.series ?? null;
         return {
+          // Daily care (care plan, menu, instructions) is addressed by placement.
+          placementId: p.id,
+          features: {
+            care_plan: series === 'SKILLED_CARE' || series === 'UNSKILLED_CARE',
+            menu: series === 'COOK',
+            instructions: true,
+          },
           staffId: p.staffId,
           staffCode: s?.staffCode ?? null,
           fullName: s?.fullName ?? null,
-          series: s?.series ?? null,
+          series,
           deploymentDate: p.trialStartDate?.toISOString() ?? p.createdAt.toISOString(),
           status: p.status === 'CONFIRMED' ? 'ACTIVE_DEPLOYED' : 'ON_TRIAL',
         };

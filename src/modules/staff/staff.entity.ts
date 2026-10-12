@@ -10,6 +10,7 @@ export enum Series {
   SKILLED_CARE = 'SKILLED_CARE',
   UNSKILLED_CARE = 'UNSKILLED_CARE',
   DRIVER = 'DRIVER',
+  COOK = 'COOK',
 }
 
 export enum PipelineStage {

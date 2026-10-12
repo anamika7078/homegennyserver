@@ -4,6 +4,7 @@ import { Repository, DataSource } from 'typeorm';
 import { TerminalOutcome, DeferredReason } from '@prisma/client';
 import * as crypto from 'crypto';
 import { mapSeriesToShort, mapSeriesFromShort } from '../../common/mappers/staff.mapper';
+import { isStage25Enabled } from '../../common/config/active-series';
 
 // Pipeline Stages
 export enum PipelineStage {
@@ -29,6 +30,7 @@ export enum StaffSeries {
   SC = 'SC',
   UC = 'UC',
   DR = 'DR',
+  CK = 'CK',
 }
 
 // NOTE: this file used to also declare its own local `TerminalOutcome` enum
@@ -120,7 +122,7 @@ const VALID_DEFERRED_REASONS = new Set<string>(Object.values(DeferredReason));
 const OUTCOMES_KEEPING_PLACEMENTS = new Set<string>([TerminalOutcome.ENROLLED, TerminalOutcome.CONDITIONAL]);
 
 /** Video prompt counts per series — mirrors video-cert.service.ts's VIDEO_PROMPTS keys. */
-export const REQUIRED_VIDEO_PROMPTS: Record<string, number> = { MAID: 9, SC: 10, UC: 10, DR: 12 };
+export const REQUIRED_VIDEO_PROMPTS: Record<string, number> = { MAID: 9, SC: 10, UC: 10, DR: 12, CK: 9 };
 
 @Injectable()
 export class PipelineFsmService {
@@ -146,6 +148,8 @@ export class PipelineFsmService {
         return this.routeUnskilledCaretakerScenario(flags);
       case StaffSeries.MAID:
         return this.routeMaidScenario(flags);
+      case StaffSeries.CK:
+        return this.routeCookScenario(flags);
       default:
         throw new BadRequestException(`Unknown series: ${series}`);
     }
@@ -226,6 +230,28 @@ export class PipelineFsmService {
     if (f.trial_mutual_exit) return 'M3X-14';
     if (f.placed_confirmed) return 'M3X-01';
     return 'M3X-13';
+  }
+
+  /**
+   * Cook has no scenario document in the spec yet. These codes follow the UC/SC
+   * shape — health screening matters because a cook handles the household's
+   * food — and are HomeGenny's own until the spec catches up (2026-10-12).
+   */
+  private routeCookScenario(f: Record<string, any>): string {
+    if (f.restricted_list) return 'CK-04';
+    if (!f.aadhaar_verified) return 'CK-03';
+    if (f.medical_failed) return 'CK-05';
+    if (f.pv_failed) return 'CK-06';
+    if (f.abandoned) return f.abandoned_pre_deposit ? 'CK-06A' : 'CK-06B';
+    if (f.pv_pending && !f.pv_exempt) return 'CK-07';
+    if (!f.video_cert_complete) return 'CK-08';
+    if (f.agreement_rejected) return 'CK-09';
+    if (f.trial_client_reject) return 'CK-10';
+    if (f.trial_staff_exit) return 'CK-11';
+    if (f.placed_extended_trial) return 'CK-12';
+    if (f.trial_mutual_exit) return 'CK-14';
+    if (f.placed_confirmed) return 'CK-01';
+    return 'CK-13';
   }
 
   private routeAbandonmentDR(f: Record<string, any>): string {
@@ -353,7 +379,7 @@ export class PipelineFsmService {
     if (!agreementSigned) raw.push({ message: 'No signed agreement on file', homeStage: PipelineStage.S4_AGREEMENTS });
 
     // Pillar 3 — Medical/Sobriety, required for SC/UC/DR (not MAID).
-    if (seriesShort === 'SC' || seriesShort === 'UC' || seriesShort === 'DR') {
+    if (seriesShort === 'SC' || seriesShort === 'UC' || seriesShort === 'DR' || seriesShort === 'CK') {
       const medRows = await manager.query(
         `SELECT status FROM verification_tracks WHERE staff_id = $1 AND track_type = 'HEALTH_SCREENING'`,
         [staffId],
@@ -451,7 +477,7 @@ export class PipelineFsmService {
       }
     }
 
-    if (seriesShort === 'SC' || seriesShort === 'UC' || seriesShort === 'DR') {
+    if (seriesShort === 'SC' || seriesShort === 'UC' || seriesShort === 'DR' || seriesShort === 'CK') {
       const medRows = await manager.query(
         `SELECT status FROM verification_tracks WHERE staff_id = $1 AND track_type = 'HEALTH_SCREENING'`,
         [staffId],
@@ -535,10 +561,26 @@ export class PipelineFsmService {
         }
       }
 
-      const validNext = VALID_TRANSITIONS[current];
+      // Stage 2.5 is the Driver practical test, paused along with Driver. Nobody
+      // new goes in. Anyone already in it can leave, and a staff deferred FROM it
+      // may resume back into it — a resume can't go past the stage deferred from,
+      // so refusing S2_5 would leave them nowhere to go but backwards.
+      let s25Open = isStage25Enabled();
+      if (!s25Open && current === PipelineStage.DEFERRED && toStage === PipelineStage.S2_5_ASSESS) {
+        const rows = await manager.query(
+          `SELECT resume_stage FROM deferred_records WHERE staff_id = $1 AND resume_at IS NULL LIMIT 1`,
+          [staffId],
+        );
+        s25Open = rows[0]?.resume_stage === PipelineStage.S2_5_ASSESS;
+      }
+      const validNext = VALID_TRANSITIONS[current].filter(
+        (s) => s !== PipelineStage.S2_5_ASSESS || s25Open,
+      );
       if (!validNext.includes(toStage)) {
         throw new BadRequestException(
-          `Invalid transition: ${current} → ${toStage}. Allowed: ${validNext.join(', ')}`
+          toStage === PipelineStage.S2_5_ASSESS && !s25Open
+            ? `Stage 2.5 (practical assessment) is switched off while the Driver series is paused — move ${current} → S3_TRAIN instead.`
+            : `Invalid transition: ${current} → ${toStage}. Allowed: ${validNext.join(', ')}`
         );
       }
 
@@ -781,6 +823,10 @@ export class PipelineFsmService {
         throw new BadRequestException(
           `Can't override ${stage} — only a stage the staff has reached (${STAGE_ORDER.slice(0, currentIdx + 1).join(', ')}).`,
         );
+      }
+      // With Stage 2.5 off, the only staff it can matter to is one sitting in it.
+      if (stage === PipelineStage.S2_5_ASSESS && !isStage25Enabled() && current !== PipelineStage.S2_5_ASSESS) {
+        throw new BadRequestException(`Stage 2.5 is switched off while the Driver series is paused, so there is nothing to ${kind === 'COMPLETE' ? 'complete' : 'hold'} there.`);
       }
 
       // Checked here and not only by the partial unique index, which Prisma

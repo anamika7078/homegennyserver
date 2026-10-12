@@ -64,6 +64,21 @@ export const VIDEO_PROMPTS: Record<string, { count: number; minDuration: number;
       'Confirm you understand HomeGenny terms — this certification video is permanent legal evidence',
     ]
   },
+  // Cook — 9 prompts, same count as MAID. Kept in step with REQUIRED_VIDEO_PROMPTS
+  // in the pipeline FSM and the staff app controller.
+  CK: {
+    count: 9, minDuration: 270, prompts: [
+      'State your full name, age, and hometown',
+      'Describe your cooking experience — cuisines you cook and for how many people',
+      'How do you keep the kitchen, utensils and ingredients clean and safe?',
+      'How do you cook for someone who is diabetic, on low salt, or has a food allergy?',
+      'How do you adjust spice, salt and oil to what a family likes?',
+      'How do you plan a week’s menu and keep track of groceries?',
+      'What do you do if the family does not like a dish you made?',
+      'How would you handle a burn, cut or gas leak in the kitchen?',
+      'Confirm you understand HomeGenny terms — this certification video is permanent legal evidence',
+    ]
+  },
 };
 
 @Injectable()
@@ -128,7 +143,7 @@ export class VideoCertService {
     // actually stores) always missed.
     const key = mapSeriesToShort(mapSeriesFromShort(series.toUpperCase()));
     const prompts = VIDEO_PROMPTS[key];
-    if (!prompts) throw new BadRequestException(`Unknown series: ${series}. Valid: MAID, SC, UC, DR`);
+    if (!prompts) throw new BadRequestException(`Unknown series: ${series}. Valid: UC, SC, CK (MAID, DR for existing staff)`);
     return prompts;
   }
 

@@ -5,6 +5,7 @@ import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '@prisma/client';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { computeWageBreakup, WageConfigInput } from './wage-calculator.util';
+import { StaffRequestsService } from '../staff-requests/staff-requests.service';
 
 // Spec (HomeGenny_StageDescriptions, S5 Trial Period): Maid/UC/DR = 7-day
 // trial, SC = 14-day trial. create() used to default every series to 14 days
@@ -15,6 +16,7 @@ const TRIAL_DAYS_BY_SERIES: Record<string, number> = {
   UNSKILLED_CARE: 7,
   DRIVER: 7,
   SKILLED_CARE: 14,
+  COOK: 7,
 };
 const DEFAULT_TRIAL_DAYS = 7;
 
@@ -49,6 +51,7 @@ export class PlacementService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly events: EventEmitter2,
+    private readonly staffRequests: StaffRequestsService,
   ) {}
 
   private mapRow(p: {
@@ -190,6 +193,19 @@ export class PlacementService {
     // So the guard narrows to what it was guarding: the same client twice.
     // See docs/HOURLY_MULTI_CLIENT_PLAN.md §B1.
     const clientId = String(data.client_id ?? '');
+
+    // Filling a client's staff request: checked before anything is written, and
+    // the request's terms are the defaults for what the caller left out.
+    const staffRequestId = data.staff_request_id ? String(data.staff_request_id) : null;
+    if (staffRequestId) {
+      const sr = await this.staffRequests.assertPlacementFits(staffRequestId, staffId, clientId);
+      data = {
+        placement_type: sr.placementType,
+        shift_hours: Number(sr.shiftHours),
+        ...data,
+      };
+    }
+
     const duplicate = await this.prisma.placement.findFirst({
       where: {
         staffId,
@@ -286,7 +302,9 @@ export class PlacementService {
         managementFee: wageTerms.managementFee,
         hourlyRate: isHourly ? hourlyRate : null,
         hourlyFee: isHourly ? hourlyFee : null,
-        metadata: wageTerms.metadataPatch as Prisma.InputJsonValue,
+        metadata: (staffRequestId
+          ? { ...(wageTerms.metadataPatch as object), staff_request_id: staffRequestId }
+          : wageTerms.metadataPatch) as Prisma.InputJsonValue,
         trialStartDate: data.trial_start_date ? new Date(String(data.trial_start_date)) : new Date(),
         trialEndDate: data.trial_end_date
           ? new Date(String(data.trial_end_date))
@@ -312,6 +330,10 @@ export class PlacementService {
       entityId: row.id,
       metadata: { action: directConfirm ? 'placement_confirmed_direct' : 'trial_started' },
     });
+
+    if (staffRequestId) {
+      await this.staffRequests.recordPlacement(staffRequestId, row.staffId, row.id, actorId);
+    }
 
     this.events.emit('realtime.broadcast', {
       channel: 'deployments',

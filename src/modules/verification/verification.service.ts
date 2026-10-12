@@ -407,6 +407,7 @@ export class VerificationService {
       SKILLED_CARE: ['AADHAAR_EKYC', 'POLICE_VERIFICATION', 'HEALTH_SCREENING'],
       UNSKILLED_CARE: ['AADHAAR_EKYC', 'POLICE_VERIFICATION'],
       MAID: ['AADHAAR_EKYC', 'POLICE_VERIFICATION'],
+      COOK: ['AADHAAR_EKYC', 'POLICE_VERIFICATION', 'HEALTH_SCREENING'],
     };
 
     const bySlug = new Map(staff.verificationTracks.map((t) => [TRACK_LABELS[t.trackType] ?? t.trackType, t]));

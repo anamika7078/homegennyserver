@@ -20,11 +20,13 @@ const DESIGNATION_BY_SERIES: Record<string, string> = {
   UNSKILLED_CARE: 'Care Helper',
   SKILLED_CARE: 'Caretaker',
   DRIVER: 'Driver',
+  COOK: 'Cook',
   // Short codes, which some callers still use. See the series dual-representation
   // note in the pipeline FSM.
   UC: 'Care Helper',
   SC: 'Caretaker',
   DR: 'Driver',
+  CK: 'Cook',
 };
 
 export function designationFor(series: string | null | undefined): string {

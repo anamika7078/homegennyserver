@@ -9,12 +9,12 @@ import * as crypto from 'crypto';
 const ENROLLMENT_WINDOW_HOURS = 24;
 
 function seriesAlias(s: string): string {
-  return ({ DRIVER: 'DR', SKILLED_CARE: 'SC', UNSKILLED_CARE: 'UC', MAID: 'M3X' } as Record<string, string>)[s] ?? s;
+  return ({ DRIVER: 'DR', SKILLED_CARE: 'SC', UNSKILLED_CARE: 'UC', MAID: 'M3X', COOK: 'CK' } as Record<string, string>)[s] ?? s;
 }
 
 function scenarioCode(series: string): string {
   const s = seriesAlias(series);
-  return ({ DR: 'DR-14', SC: 'SC-10', UC: 'UC-07', M3X: 'M3X-07' } as Record<string, string>)[s] ?? 'S3';
+  return ({ DR: 'DR-14', SC: 'SC-10', UC: 'UC-07', M3X: 'M3X-07', CK: 'CK-07' } as Record<string, string>)[s] ?? 'S3';
 }
 
 function genBatchCode(series: string): string {

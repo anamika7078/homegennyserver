@@ -14,6 +14,8 @@ import { ApprovalStatus, Prisma } from '@prisma/client';
 import { hashPassword } from '../../common/utils/password.util';
 import { assertStrongPassword } from '../../common/utils/password.util';
 import { UserProvisioningService } from '../auth/user-provisioning.service';
+import { mapSeriesFromShort } from '../../common/mappers/staff.mapper';
+import { ACTIVE_SERIES, assertSeriesActive, isStage25Enabled } from '../../common/config/active-series';
 
 const PIPELINE_STAGES = [
   'S1_INTAKE',
@@ -166,7 +168,11 @@ export class AdminService {
             email: email || undefined,
             dateOfBirth: new Date(data.dateOfBirth || '1995-01-01'),
             address: data.address || 'Delhi NCR',
-            series: data.series || 'MAID',
+            // The quick-add form sends no series. It used to default to MAID,
+            // which is no longer taken on, so fall back to the first active one.
+            series: data.series
+              ? (() => { const s = mapSeriesFromShort(String(data.series)); assertSeriesActive(s); return s; })()
+              : ACTIVE_SERIES[0],
             branchId: branchId || null,
             pipelineStage: 'S1_INTAKE',
             verifiedDocs: {},
@@ -738,7 +744,8 @@ export class AdminService {
         deferred_cases: kpis[4],
         pending_video: kpis[5],
       },
-      funnel: PIPELINE_STAGES.map((stage) => ({
+      // S2.5 only while Driver runs, or while somebody is still in it.
+      funnel: PIPELINE_STAGES.filter((s) => s !== 'S2_5_ASSESS' || isStage25Enabled() || (countMap[s] ?? 0) > 0).map((stage) => ({
         stage,
         count: countMap[stage] ?? 0,
       })),

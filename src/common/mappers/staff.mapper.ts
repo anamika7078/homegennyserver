@@ -6,6 +6,8 @@ import {
   LanguageTier,
   StageHold,
 } from '@prisma/client';
+import { BadRequestException } from '@nestjs/common';
+import { assertSeriesActive } from '../config/active-series';
 
 function parseRoleTypes(value: unknown): string[] {
   if (!value) return [];
@@ -62,6 +64,11 @@ export function toStaffDto(row: PrismaStaff & { stageHolds?: StageHold[] }) {
   };
 }
 
+/**
+ * Either vocabulary in, the DB enum out. An unknown value is refused rather
+ * than guessed: this used to fall back to SKILLED_CARE, which would have
+ * quietly filed every new cook as a skilled caretaker.
+ */
 export function mapSeriesFromShort(s: string): StaffSeries {
   const m: Record<string, StaffSeries> = {
     DR: StaffSeries.DRIVER,
@@ -71,8 +78,15 @@ export function mapSeriesFromShort(s: string): StaffSeries {
     UC: StaffSeries.UNSKILLED_CARE,
     UNSKILLED_CARE: StaffSeries.UNSKILLED_CARE,
     MAID: StaffSeries.MAID,
+    M3X: StaffSeries.MAID,
+    CK: StaffSeries.COOK,
+    COOK: StaffSeries.COOK,
   };
-  return m[s] ?? StaffSeries.SKILLED_CARE;
+  const series = m[String(s ?? '').trim().toUpperCase()];
+  if (!series) {
+    throw new BadRequestException(`Unknown series "${s}". Use one of: UC, SC, CK (or MAID, DR for existing staff).`);
+  }
+  return series;
 }
 
 export function mapSeriesToShort(s: StaffSeries): string {
@@ -81,6 +95,7 @@ export function mapSeriesToShort(s: StaffSeries): string {
     [StaffSeries.SKILLED_CARE]: 'SC',
     [StaffSeries.UNSKILLED_CARE]: 'UC',
     [StaffSeries.MAID]: 'MAID',
+    [StaffSeries.COOK]: 'CK',
   };
   return m[s] ?? s;
 }
@@ -92,8 +107,13 @@ export function generateStaffCode(series: StaffSeries): string {
   return `HG-${code}-${date}-${seq}`;
 }
 
+/** Builds a NEW staff row, so the series must be given and must be one HomeGenny takes on now. */
 export function parseCreateStaffBody(body: Record<string, unknown>) {
-  const series = mapSeriesFromShort(String(body.series ?? 'SC'));
+  if (body.series === undefined || body.series === null || body.series === '') {
+    throw new BadRequestException('series is required (UC, SC or CK).');
+  }
+  const series = mapSeriesFromShort(String(body.series));
+  assertSeriesActive(series);
   const roleTypes =
     body.role_types === undefined || body.role_types === null
       ? []

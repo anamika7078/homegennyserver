@@ -28,6 +28,7 @@ export class ScenarioEngine {
       case Series.SKILLED_CARE: return this.routeSkilledCare(flags);
       case Series.UNSKILLED_CARE: return this.routeUnskilledCare(flags);
       case Series.MAID: return this.routeMaid(flags);
+      case Series.COOK: return this.routeCook(flags);
       default: return 'SC-01';
     }
   }
@@ -90,6 +91,17 @@ export class ScenarioEngine {
     if (f.returning) return 'UC-03';
     if (f.noPriorExperience) return 'UC-02';
     return 'UC-01';
+  }
+
+  /** Cook — no spec document yet; mirrors the UC shape. See routeCookScenario() in the pipeline FSM. */
+  private routeCook(f: RoutingFlags): string {
+    if (f.documentFraud) return 'CK-10';
+    if (f.adversePV) return 'CK-11';
+    if (f.activeHealthCondition) return 'CK-07';
+    if (f.documentGap) return 'CK-09';
+    if (f.returning) return 'CK-03';
+    if (f.noPriorExperience) return 'CK-02';
+    return 'CK-01';
   }
 
   private routeMaid(f: RoutingFlags): string {

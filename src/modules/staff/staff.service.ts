@@ -196,7 +196,8 @@ export class StaffService {
     const mappedEmployees = empItems.map((e) => {
       const depStr = `${e.department || ''} ${e.designation || ''}`.toUpperCase();
       let series = 'DRIVER';
-      if (depStr.includes('MAID') || depStr.includes('COOK') || depStr.includes('CLEAN')) series = 'MAID';
+      if (depStr.includes('COOK') || depStr.includes('CHEF')) series = 'COOK';
+      else if (depStr.includes('MAID') || depStr.includes('CLEAN')) series = 'MAID';
       else if (depStr.includes('SKILL') || depStr.includes('CARE') || depStr.includes('NURSE')) series = 'SKILLED_CARE';
       else if (depStr.includes('UNSKILL') || depStr.includes('HELP') || depStr.includes('BOY') || depStr.includes('GUARD')) series = 'UNSKILLED_CARE';
       else if (depStr.includes('DRIV')) series = 'DRIVER';

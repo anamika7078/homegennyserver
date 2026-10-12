@@ -47,6 +47,8 @@ import { AuditModule } from './modules/audit/audit.module';
 import { ScenarioModule } from './modules/scenario/scenario.module';
 import { EnterpriseCronModule } from './modules/cron/cron.module';
 import { SeriesModule } from './modules/series/series.module';
+import { StaffRequestsModule } from './modules/staff-requests/staff-requests.module';
+import { DailyCareModule } from './modules/daily-care/daily-care.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { HealthModule } from './modules/health/health.module';
 import { RmModule } from './modules/rm/rm.module';
@@ -142,6 +144,8 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     LoanModule,
     EnterpriseCronModule,
     SeriesModule,
+    StaffRequestsModule,
+    DailyCareModule,
     RealtimeModule,
     HealthModule,
     AuthModule,

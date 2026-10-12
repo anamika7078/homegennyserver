@@ -20,12 +20,15 @@ export class RegisterStaffDto {
   alternate_phone?: string;
 
   @ApiProperty({
-    enum: ['MAID', 'SC', 'UC', 'DR'],
-    example: 'MAID',
-    description: 'Work category — Maid, Skilled Care, Unskilled Care, or Driver. Drives which S2 verification ' +
-      'checks and video-cert prompts apply from here on; the RM can correct it later if needed.',
+    enum: ['UC', 'SC', 'CK'],
+    example: 'UC',
+    description: 'Work category — Unskilled Care, Skilled Care, or Cook (GET /meta/series lists the active ones). ' +
+      'MAID and DR are still recognised but refused while those series are paused. Drives which S2 verification ' +
+      'checks and video-cert prompts apply from here on.',
   })
-  @IsIn(['MAID', 'SC', 'UC', 'DR'])
+  // Every known code passes here so a paused series gets the clear "not being
+  // taken on" message from assertSeriesActive(), not a bare enum error.
+  @IsIn(['UC', 'SC', 'CK', 'COOK', 'UNSKILLED_CARE', 'SKILLED_CARE', 'MAID', 'DR', 'DRIVER'])
   series: string;
 
   @ApiPropertyOptional({ example: 'pooja@example.com' })

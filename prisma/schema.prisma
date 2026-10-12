@@ -52,6 +52,7 @@ model Branch {
   users                    User[]
   salaryStructures         SalaryStructure[]
   payrollProcessingBatches PayrollProcessingBatch[]
+  staffRequests            StaffRequest[]
 
   @@map("branches")
 }
@@ -82,6 +83,9 @@ model User {
   employeeProfile    Employee?
   staffApplicant     StaffApplicant?  @relation("StaffApplicantUser")
   sessions           UserSession[]
+  staffRequestsAssigned  StaffRequest[]          @relation("StaffRequestRm")
+  staffRequestsCreated   StaffRequest[]          @relation("StaffRequestCreator")
+  staffRequestCandidates StaffRequestCandidate[] @relation("StaffRequestCandidateAdder")
 
   @@index([role])
   @@index([branchId])
@@ -166,6 +170,7 @@ model StaffApplicant {
   upgradeRequests        UpgradeRequest[]
   verificationTracks     VerificationTrack[]
   videoCerts             VideoCertification[]
+  staffRequestCandidates StaffRequestCandidate[]
 
   @@index([pipelineStage, series])
   @@index([branchId, assignedRmId])
@@ -464,6 +469,15 @@ model Placement {
   updatedAt        DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
   payrolls         PayrollRecord[]
   branch           Branch          @relation(fields: [branchId], references: [id])
+  staffRequestCandidates StaffRequestCandidate[]
+  carePlans              CarePlan[]
+  careTasks              CareTask[]
+  dailyCareReports       DailyCareReport[]
+  menuPlans              MenuPlan[]
+  mealLogs               MealLog[]
+  clientInstructions     ClientInstruction[]
+  clientInputAcks        ClientInputAck[]
+  careFiles              CareFile[]
 
   @@map("placements")
 }
@@ -1302,6 +1316,7 @@ model FinanceCustomer {
   finance_rate_cards              finance_rate_cards[]
   agreements                      Agreement[]
   branches                        FinanceCustomerBranch[]
+  staffRequests                   StaffRequest[]
 
   @@index([unitCode])
   @@index([panCard])
@@ -1881,6 +1896,8 @@ enum StaffSeries {
   SKILLED_CARE
   UNSKILLED_CARE
   DRIVER
+  /// Added 2026-10-12 by scratch/_cook_series_migration.js (needs the type's owner).
+  COOK
 
   @@map("staff_applicants_series_enum")
 }
@@ -2234,4 +2251,322 @@ model FinanceCustomerBranch {
 
   @@index([customerId])
   @@map("finance_customer_branches")
+}
+
+/// A client (app) or RM (web) asking for staff. Phase B of
+/// docs/CLIENT_REQUESTS_AND_DAILY_CARE_PLAN.md; table made by
+/// scratch/_staff_requests_migration.js. Status: NEW (no RM) → ASSIGNED →
+/// SHORTLISTED → CLIENT_SELECTED → FULFILLED, or CANCELLED.
+model StaffRequest {
+  id                   String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  requestNo            String                  @unique @map("request_no") @db.VarChar(20)
+  /// NULL while the request is a lead with no client account yet.
+  clientId             String?                 @map("client_id") @db.Uuid
+  leadName             String?                 @map("lead_name") @db.VarChar(200)
+  leadPhone            String?                 @map("lead_phone") @db.VarChar(20)
+  leadCity             String?                 @map("lead_city") @db.VarChar(100)
+  branchId             String?                 @map("branch_id") @db.Uuid
+  rmId                 String?                 @map("rm_id") @db.Uuid
+  /// CLIENT_APP | RM_WEB | REPLACEMENT
+  source               String                  @db.VarChar(20)
+  /// Plain id, no FK: replacement_requests is not declared in this schema.
+  replacementRequestId String?                 @map("replacement_request_id") @db.Uuid
+  series               StaffSeries
+  placementType        String                  @default("PERMANENT") @map("placement_type") @db.VarChar(20)
+  shiftHours           Decimal                 @default(8) @map("shift_hours") @db.Decimal(4, 1)
+  startDate            DateTime?               @map("start_date") @db.Date
+  address              String?
+  language             String?                 @db.VarChar(50)
+  genderPref           String                  @default("ANY") @map("gender_pref") @db.VarChar(10)
+  budgetMin            Decimal?                @map("budget_min") @db.Decimal(10, 2)
+  budgetMax            Decimal?                @map("budget_max") @db.Decimal(10, 2)
+  headcount            Int                     @default(1)
+  requirements         Json                    @default("{}")
+  notes                String?
+  status               String                  @default("NEW") @db.VarChar(20)
+  cancelReason         String?                 @map("cancel_reason")
+  assignedAt           DateTime?               @map("assigned_at") @db.Timestamptz(6)
+  shortlistedAt        DateTime?               @map("shortlisted_at") @db.Timestamptz(6)
+  selectedAt           DateTime?               @map("selected_at") @db.Timestamptz(6)
+  fulfilledAt          DateTime?               @map("fulfilled_at") @db.Timestamptz(6)
+  cancelledAt          DateTime?               @map("cancelled_at") @db.Timestamptz(6)
+  createdBy            String?                 @map("created_by") @db.Uuid
+  metadata             Json                    @default("{}")
+  createdAt            DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime                @default(now()) @map("updated_at") @db.Timestamptz(6)
+  client               FinanceCustomer?        @relation(fields: [clientId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  branch               Branch?                 @relation(fields: [branchId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  rm                   User?                   @relation("StaffRequestRm", fields: [rmId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  creator              User?                   @relation("StaffRequestCreator", fields: [createdBy], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  candidates           StaffRequestCandidate[]
+
+  @@index([clientId, createdAt(sort: Desc)], map: "idx_staff_requests_client")
+  @@index([status, branchId, createdAt(sort: Desc)], map: "idx_staff_requests_queue")
+  @@index([rmId, status], map: "idx_staff_requests_rm")
+  @@map("staff_requests")
+}
+
+/// A staff member the RM put forward for a StaffRequest.
+/// PROPOSED → CLIENT_SELECTED → PLACED, or CLIENT_REJECTED / WITHDRAWN.
+model StaffRequestCandidate {
+  id          String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  requestId   String         @map("request_id") @db.Uuid
+  staffId     String         @map("staff_id") @db.Uuid
+  status      String         @default("PROPOSED") @db.VarChar(20)
+  rmNote      String?        @map("rm_note")
+  clientNote  String?        @map("client_note")
+  placementId String?        @map("placement_id") @db.Uuid
+  addedBy     String?        @map("added_by") @db.Uuid
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime       @default(now()) @map("updated_at") @db.Timestamptz(6)
+  request     StaffRequest   @relation(fields: [requestId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  staff       StaffApplicant @relation(fields: [staffId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  placement   Placement?     @relation(fields: [placementId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  adder       User?          @relation("StaffRequestCandidateAdder", fields: [addedBy], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@unique([requestId, staffId], map: "staff_request_candidates_request_id_staff_id_key")
+  @@index([staffId], map: "idx_staff_request_candidates_staff")
+  @@map("staff_request_candidates")
+}
+
+// ── Daily care / cook tracking / client instructions ────────────────────────
+// Phases C–E of docs/CLIENT_REQUESTS_AND_DAILY_CARE_PLAN.md; tables made by
+// scratch/_daily_care_migration.js. FKs only to placements and between these.
+
+/// A caretaker placement's care plan, written by the client. One row per
+/// version; editing makes a new ACTIVE row and marks the old one SUPERSEDED.
+model CarePlan {
+  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  placementId  String     @map("placement_id") @db.Uuid
+  clientId     String     @map("client_id") @db.Uuid
+  version      Int
+  /// ACTIVE | SUPERSEDED
+  status       String     @default("ACTIVE") @db.VarChar(20)
+  patient      Json       @default("{}")
+  medications  Json       @default("[]")
+  vitals       Json       @default("[]")
+  activities   Json       @default("[]")
+  dietNotes    String?    @map("diet_notes")
+  dos          String?
+  donts        String?
+  /// What changed against the previous version, for the staff app to highlight.
+  changes      Json       @default("[]")
+  createdBy    String?    @map("created_by") @db.Uuid
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  supersededAt DateTime?  @map("superseded_at") @db.Timestamptz(6)
+  metadata     Json       @default("{}")
+  placement    Placement  @relation(fields: [placementId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  tasks        CareTask[]
+
+  @@unique([placementId, version], map: "care_plans_placement_id_version_key")
+  @@map("care_plans")
+}
+
+/// One line of a caretaker's day: a dose, a vital reading, an activity.
+model CareTask {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  placementId   String    @map("placement_id") @db.Uuid
+  planId        String    @map("plan_id") @db.Uuid
+  taskDate      DateTime  @map("task_date") @db.Date
+  /// MEDICATION | VITAL | ACTIVITY
+  sourceType    String    @map("source_type") @db.VarChar(20)
+  sourceId      String    @map("source_id") @db.VarChar(64)
+  title         String    @db.VarChar(255)
+  /// HH:MM, IST
+  scheduledTime String    @map("scheduled_time") @db.VarChar(5)
+  /// PENDING | DONE | SKIPPED | MISSED
+  status        String    @default("PENDING") @db.VarChar(20)
+  doneAt        DateTime? @map("done_at") @db.Timestamptz(6)
+  doneBy        String?   @map("done_by") @db.Uuid
+  value         Json?
+  outOfRange    Boolean   @default(false) @map("out_of_range")
+  skipReason    String?   @map("skip_reason")
+  notes         String?
+  notifiedAt    DateTime? @map("notified_at") @db.Timestamptz(6)
+  photoFileIds  Json      @default("[]") @map("photo_file_ids")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  placement     Placement @relation(fields: [placementId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  plan          CarePlan  @relation(fields: [planId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([placementId, taskDate, sourceType, sourceId, scheduledTime], map: "care_tasks_placement_id_task_date_source_type_source_id_sch_key")
+  @@index([placementId, taskDate], map: "idx_care_tasks_day")
+  @@map("care_tasks")
+}
+
+model DailyCareReport {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  placementId   String    @map("placement_id") @db.Uuid
+  staffId       String    @map("staff_id") @db.Uuid
+  reportDate    DateTime  @map("report_date") @db.Date
+  meals         Json      @default("[]")
+  fluidIntakeMl Int?      @map("fluid_intake_ml")
+  sleep         String?   @db.VarChar(50)
+  mood          String?   @db.VarChar(50)
+  hygiene       Json      @default("{}")
+  notes         String?
+  submittedAt   DateTime  @default(now()) @map("submitted_at") @db.Timestamptz(6)
+  photoFileIds  Json      @default("[]") @map("photo_file_ids")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  placement     Placement @relation(fields: [placementId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([placementId, reportDate], map: "daily_care_reports_placement_id_report_date_key")
+  @@map("daily_care_reports")
+}
+
+/// What a household eats. Per client, not per placement, so it survives a change of cook.
+model FoodProfile {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  clientId         String   @unique(map: "food_profiles_client_id_key") @map("client_id") @db.Uuid
+  version          Int      @default(1)
+  dietType         String?  @map("diet_type") @db.VarChar(20)
+  allergies        Json     @default("[]")
+  spiceLevel       Int?     @map("spice_level")
+  salt             String?  @db.VarChar(10)
+  oil              String?  @db.VarChar(10)
+  healthConditions Json     @default("[]") @map("health_conditions")
+  cuisines         Json     @default("[]")
+  dislikes         String?
+  familySize       Int?     @map("family_size")
+  notes            String?
+  /// The version before this one, for the staff app to show what changed.
+  previous         Json?
+  updatedBy        String?  @map("updated_by") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("food_profiles")
+}
+
+model MenuPlan {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  placementId        String    @map("placement_id") @db.Uuid
+  menuDate           DateTime  @map("menu_date") @db.Date
+  /// BREAKFAST | LUNCH | SNACKS | DINNER
+  meal               String    @db.VarChar(20)
+  dishes             Json      @default("[]")
+  specialInstruction String?   @map("special_instruction")
+  servings           Int?
+  /// PLANNED (client) | SUGGESTED (cook) | APPROVED | REJECTED
+  status             String    @default("PLANNED") @db.VarChar(20)
+  version            Int       @default(1)
+  previous           Json?
+  rejectReason       String?   @map("reject_reason")
+  createdBy          String?   @map("created_by") @db.Uuid
+  createdByRole      String?   @map("created_by_role") @db.VarChar(20)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  placement          Placement @relation(fields: [placementId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  mealLogs           MealLog[]
+
+  @@unique([placementId, menuDate, meal], map: "menu_plans_placement_id_menu_date_meal_key")
+  @@map("menu_plans")
+}
+
+model MealLog {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  placementId String        @map("placement_id") @db.Uuid
+  staffId     String        @map("staff_id") @db.Uuid
+  mealDate    DateTime      @map("meal_date") @db.Date
+  meal        String        @db.VarChar(20)
+  menuPlanId  String?       @map("menu_plan_id") @db.Uuid
+  dishes      Json          @default("[]")
+  servings    Int?
+  cookedAt    DateTime      @default(now()) @map("cooked_at") @db.Timestamptz(6)
+  notes       String?
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime      @default(now()) @map("updated_at") @db.Timestamptz(6)
+  placement   Placement     @relation(fields: [placementId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  menuPlan    MenuPlan?     @relation(fields: [menuPlanId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  feedback    MealFeedback?
+
+  @@unique([placementId, mealDate, meal], map: "meal_logs_placement_id_meal_date_meal_key")
+  @@map("meal_logs")
+}
+
+model MealFeedback {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  mealLogId String   @unique(map: "meal_feedback_meal_log_id_key") @map("meal_log_id") @db.Uuid
+  rating    Int
+  tags      Json     @default("[]")
+  comment   String?
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  mealLog   MealLog  @relation(fields: [mealLogId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("meal_feedback")
+}
+
+/// An order from the client to their staff, text or voice. RECURRING ones are
+/// standing orders: acknowledged once, never "done".
+model ClientInstruction {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  placementId    String    @map("placement_id") @db.Uuid
+  clientId       String    @map("client_id") @db.Uuid
+  staffId        String    @map("staff_id") @db.Uuid
+  /// ONE_TIME | RECURRING
+  kind           String    @default("ONE_TIME") @db.VarChar(20)
+  text           String?
+  voiceFileId    String?   @map("voice_file_id") @db.Uuid
+  dueAt          DateTime? @map("due_at") @db.Timestamptz(6)
+  recurrence     Json?
+  /// SENT | ACKNOWLEDGED | DONE | REFUSED | CANCELLED
+  status         String    @default("SENT") @db.VarChar(20)
+  staffNote      String?   @map("staff_note")
+  acknowledgedAt DateTime? @map("acknowledged_at") @db.Timestamptz(6)
+  doneAt         DateTime? @map("done_at") @db.Timestamptz(6)
+  refusedAt      DateTime? @map("refused_at") @db.Timestamptz(6)
+  /// right_to_refuse_log.refusal_id, when the staff said it is not their job
+  refusalId      String?   @map("refusal_id") @db.Uuid
+  /// UPHELD (staff was right) | OVERTURNED (staff must do it)
+  rmDecision     String?   @map("rm_decision") @db.VarChar(20)
+  rmNote         String?   @map("rm_note")
+  decidedAt      DateTime? @map("decided_at") @db.Timestamptz(6)
+  decidedBy      String?   @map("decided_by") @db.Uuid
+  createdBy      String?   @map("created_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  placement      Placement @relation(fields: [placementId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([placementId, createdAt(sort: Desc)], map: "idx_client_instructions_placement")
+  @@map("client_instructions")
+}
+
+/// "Padh liya": which version of a client input a staff member has seen.
+model ClientInputAck {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  placementId    String    @map("placement_id") @db.Uuid
+  staffId        String    @map("staff_id") @db.Uuid
+  /// CARE_PLAN | FOOD_PROFILE | MENU | INSTRUCTION | MEAL_FEEDBACK
+  inputType      String    @map("input_type") @db.VarChar(20)
+  inputId        String    @map("input_id") @db.Uuid
+  version        Int       @default(1)
+  seenAt         DateTime? @map("seen_at") @db.Timestamptz(6)
+  acknowledgedAt DateTime? @map("acknowledged_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  placement      Placement @relation(fields: [placementId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([staffId, inputType, inputId, version], map: "client_input_acks_staff_id_input_type_input_id_version_key")
+  @@map("client_input_acks")
+}
+
+/// Photos, prescriptions and voice notes. Streamed only through GET /care-files/:id.
+model CareFile {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  placementId  String    @map("placement_id") @db.Uuid
+  /// PHOTO | PRESCRIPTION | VOICE
+  kind         String    @db.VarChar(20)
+  storageKey   String    @map("storage_key")
+  mimeType     String    @map("mime_type") @db.VarChar(100)
+  size         Int
+  originalName String?   @map("original_name") @db.VarChar(255)
+  uploadedBy   String?   @map("uploaded_by") @db.Uuid
+  uploadedRole String?   @map("uploaded_role") @db.VarChar(20)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  placement    Placement @relation(fields: [placementId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([placementId], map: "idx_care_files_placement")
+  @@map("care_files")
 }

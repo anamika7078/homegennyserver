@@ -12,6 +12,7 @@ function toLegacySeries(s: StaffSeries): Series {
     [StaffSeries.SKILLED_CARE]: Series.SKILLED_CARE,
     [StaffSeries.UNSKILLED_CARE]: Series.UNSKILLED_CARE,
     [StaffSeries.MAID]: Series.MAID,
+    [StaffSeries.COOK]: Series.COOK,
   };
   return m[s] ?? Series.SKILLED_CARE;
 }

@@ -13,6 +13,7 @@ import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EmployeePayslipService } from '../employees/employee-payslip.service';
 import { DocumentsService, MAX_DOCUMENT_BYTES, REJECTED, normalizeStaffDocumentType } from '../documents/documents.service';
+import { isStage25Enabled } from '../../common/config/active-series';
 
 const PIPELINE_STAGE_LABELS: Record<string, string> = {
   S1_INTAKE: 'Stage 1 - Intake',
@@ -28,9 +29,19 @@ const PIPELINE_STAGE_LABELS: Record<string, string> = {
 /** The 6 forward stages of the FSM — DEFERRED/TERMINAL are exception states, handled separately. */
 const STAGE_ORDER = ['S1_INTAKE', 'S2_VERIFY', 'S2_5_ASSESS', 'S3_TRAIN', 'S4_AGREEMENTS', 'S5_DEPLOY'];
 
+/**
+ * The stages this staff member actually goes through. S2.5 is the Driver
+ * practical test, so it shows only for a Driver while Stage 2.5 is running,
+ * or for anyone whose history already passed through it.
+ */
+function stageOrderFor(series: string | undefined, touchedS25: boolean): string[] {
+  const keep = touchedS25 || (series === 'DRIVER' && isStage25Enabled());
+  return keep ? STAGE_ORDER : STAGE_ORDER.filter((s) => s !== 'S2_5_ASSESS');
+}
+
 const STAGE_DESCRIPTIONS: Record<string, string> = {
   S1_INTAKE: 'Restricted-list check, personal details, and deposit collection',
-  S2_VERIFY: 'Aadhaar eKYC, driving licence, eChallan, police verification, and medical checks',
+  S2_VERIFY: 'Aadhaar eKYC, police verification, and medical checks',
   S2_5_ASSESS: 'Practical/road test (Driver series only)',
   S3_TRAIN: 'Series-specific training modules and video self-certification',
   S4_AGREEMENTS: 'Employment contract, scope of work, and client indemnity sign-off',
@@ -50,6 +61,8 @@ const REQUIRED_VERIFICATION_TRACKS: Record<string, string[]> = {
   SKILLED_CARE: ['AADHAAR_EKYC', 'HEALTH_SCREENING'],
   UNSKILLED_CARE: ['AADHAAR_EKYC'],
   MAID: ['AADHAAR_EKYC'],
+  // A cook handles the household's food, so health screening is required.
+  COOK: ['AADHAAR_EKYC', 'HEALTH_SCREENING'],
 };
 
 /**
@@ -59,12 +72,13 @@ const REQUIRED_VERIFICATION_TRACKS: Record<string, string[]> = {
  * has to change with it or the app will show a completion the gate disagrees
  * with.
  */
-const REQUIRED_VIDEO_PROMPTS: Record<string, number> = { MAID: 9, SC: 10, UC: 10, DR: 12 };
+const REQUIRED_VIDEO_PROMPTS: Record<string, number> = { MAID: 9, SC: 10, UC: 10, DR: 12, CK: 9 };
 const STAFF_SERIES_SHORT: Record<string, string> = {
   MAID: 'MAID',
   SKILLED_CARE: 'SC',
   UNSKILLED_CARE: 'UC',
   DRIVER: 'DR',
+  COOK: 'CK',
 };
 
 /** "1 day", not "1 days" — this text is read by the staff member, not a log. */
@@ -95,10 +109,10 @@ export class StaffMobileController {
    * getTimeline() reads, just staff-scoped and reshaped for the app's
    * List<PipelineStage> model.
    */
-  private async buildPipelineProgress(staff: { id: string; pipelineStage: string } | null) {
+  private async buildPipelineProgress(staff: { id: string; pipelineStage: string; series?: string } | null) {
     if (!staff) {
       return {
-        items: STAGE_ORDER.map((stage) => ({
+        items: stageOrderFor(undefined, false).map((stage) => ({
           id: stage,
           title: PIPELINE_STAGE_LABELS[stage],
           description: STAGE_DESCRIPTIONS[stage],
@@ -115,11 +129,16 @@ export class StaffMobileController {
       orderBy: { occurredAt: 'asc' },
     });
 
+    const touchedS25 =
+      staff.pipelineStage === 'S2_5_ASSESS' ||
+      events.some((e) => e.fromStage === 'S2_5_ASSESS' || e.toStage === 'S2_5_ASSESS');
+    const stageOrder = stageOrderFor(staff.series, touchedS25);
+
     // completedAt per stage = occurredAt of the event whose fromStage was that stage
     // (i.e. the transition that moved the applicant OUT of it).
     const completedAtByStage: Record<string, Date> = {};
     for (const event of events) {
-      if (event.fromStage && STAGE_ORDER.includes(event.fromStage) && !completedAtByStage[event.fromStage]) {
+      if (event.fromStage && stageOrder.includes(event.fromStage) && !completedAtByStage[event.fromStage]) {
         completedAtByStage[event.fromStage] = event.occurredAt;
       }
     }
@@ -128,11 +147,11 @@ export class StaffMobileController {
     // If deferred/terminal, "current" for display purposes is the last forward
     // stage actually reached — the most recent event's fromStage — not DEFERRED/TERMINAL itself.
     const displayStage = isException
-      ? events[events.length - 1]?.fromStage ?? STAGE_ORDER[0]
+      ? events[events.length - 1]?.fromStage ?? stageOrder[0]
       : staff.pipelineStage;
-    const currentIndex = STAGE_ORDER.indexOf(displayStage);
+    const currentIndex = stageOrder.indexOf(displayStage);
 
-    const items = STAGE_ORDER.map((stage, index) => {
+    const items = stageOrder.map((stage, index) => {
       let status: 'completed' | 'current' | 'pending';
       if (index < currentIndex) {
         status = 'completed';
@@ -154,7 +173,7 @@ export class StaffMobileController {
     return {
       items,
       overall_status: isException ? (staff.pipelineStage as 'DEFERRED' | 'TERMINAL') : ('IN_PROGRESS' as const),
-      completion_pct: Math.round((completedCount / STAGE_ORDER.length) * 100),
+      completion_pct: Math.round((completedCount / stageOrder.length) * 100),
     };
   }
 

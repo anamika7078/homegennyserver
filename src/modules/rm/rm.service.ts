@@ -22,6 +22,7 @@ import {
   MUMBAI_BRANCH_ID,
 } from './branch-areas.config';
 import * as crypto from 'crypto';
+import { isStage25Enabled } from '../../common/config/active-series';
 
 // Spec (HomeGenny_StageDescriptions, S1 Series Differences): "branch-configurable
 // but typically" these amounts. Keyed on the raw StaffSeries enum, not the
@@ -31,6 +32,7 @@ const SERIES_DEPOSIT_DEFAULTS: Record<string, number> = {
   UNSKILLED_CARE: 1000,
   SKILLED_CARE: 1500,
   DRIVER: 2000,
+  COOK: 1000,
 };
 
 const KANBAN_STAGES: PipelineStage[] = [
@@ -43,6 +45,14 @@ const KANBAN_STAGES: PipelineStage[] = [
   'DEFERRED',
   'TERMINAL',
 ];
+
+/**
+ * Stage 2.5 runs only while Driver does. A paused 2.5 still gets its column if
+ * somebody is sitting in it, so nobody disappears from the board.
+ */
+function kanbanStages(occupied: (stage: PipelineStage) => boolean): PipelineStage[] {
+  return KANBAN_STAGES.filter((s) => s !== 'S2_5_ASSESS' || isStage25Enabled() || occupied(s));
+}
 
 /** A HOLD open this long is flagged `overdue` on /rm/holds — surfaced, not acted on. */
 const HOLD_OVERDUE_DAYS = 7;
@@ -171,10 +181,9 @@ export class RmService {
         _count: true,
       }).catch(() => []);
 
-      const funnel = KANBAN_STAGES.map((stage) => ({
-        stage,
-        count: (stageCounts as { pipelineStage: string; _count: number }[]).find((s) => s.pipelineStage === stage)?._count ?? 0,
-      }));
+      const countOf = (stage: PipelineStage) =>
+        (stageCounts as { pipelineStage: string; _count: number }[]).find((s) => s.pipelineStage === stage)?._count ?? 0;
+      const funnel = kanbanStages((s) => countOf(s) > 0).map((stage) => ({ stage, count: countOf(stage) }));
 
       const seriesDist = await this.prisma.staffApplicant.groupBy({
         by: ['series'],
@@ -237,7 +246,7 @@ export class RmService {
       },
     });
 
-    const columns = KANBAN_STAGES.reduce(
+    const columns = kanbanStages((s) => items.some((i) => i.pipelineStage === s)).reduce(
       (acc, stage) => {
         acc[stage] = items
           .filter((i) => i.pipelineStage === stage)

@@ -91,6 +91,8 @@ export class PipelineService {
         return this.routeUnskilledCare(flags);
       case Series.MAID:
         return this.routeMaid(flags);
+      case Series.COOK:
+        return this.routeCook(flags);
       default:
         throw new BadRequestException(`Unknown series: ${series}`);
     }
@@ -112,6 +114,17 @@ export class PipelineService {
     if (f.noPriorProfessional)                      return 'DR-03';
     if (f.returning && f.cleanExit)                 return 'DR-04';
     return 'DR-01';
+  }
+
+  /** Cook — no spec document yet; mirrors the UC shape. See routeCookScenario() in the pipeline FSM. */
+  private routeCook(f: RoutingFlags): string {
+    if (f.documentFraud) return 'CK-10';
+    if (f.adversePV) return 'CK-11';
+    if (f.activeHealthCondition) return 'CK-07';
+    if (f.documentGap) return 'CK-09';
+    if (f.returning) return 'CK-03';
+    if (f.noPriorExperience) return 'CK-02';
+    return 'CK-01';
   }
 
   private routeSkilledCare(f: RoutingFlags): string {
