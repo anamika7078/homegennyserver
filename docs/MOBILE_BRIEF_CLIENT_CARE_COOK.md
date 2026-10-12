@@ -1,9 +1,7 @@
 # Mobile App Brief — Series, Staff Requests, Care & Cook Tracking
 
-**This is the one document the mobile team needs for this work.** Each phase's section is added here
-once its backend is built and live-tested. A section marked ⏳ is not ready yet, so don't build it yet.
-
-Plan (backend side): `docs/CLIENT_REQUESTS_AND_DAILY_CARE_PLAN.md`
+**This is the one document the mobile team needs for this work.** Every section below is built on the
+backend and tested against live API calls, so all six are ready to build.
 
 | # | Section | Status |
 |---|---|---|
@@ -12,17 +10,17 @@ Plan (backend side): `docs/CLIENT_REQUESTS_AND_DAILY_CARE_PLAN.md`
 | 3 | Nurse / Caretaker: care plan + daily checklist | ✅ Ready |
 | 4 | Cook: food profile + menu + meal log | ✅ Ready |
 | 5 | Client instructions (text / voice note) | ✅ Ready |
-| 6 | Staff sees every client input ("Client ki taraf se naya", "Padh liya") | ✅ Ready |
+| 6 | Staff sees every client input ("New from the family", "Mark as read") | ✅ Ready |
 
 **Common rules (all sections)**
-- Base URL `/api/v1`. Every response is `{ success, data }`. Errors put a readable `message` in the body; show it as it is.
+- **All app text is English.** Button labels, banners and messages in this brief are the exact English text to show. The API returns English messages only.
+- Base URL `/api/v1`. A successful response is `{ success: true, data }`.
+- An error looks like `{ "statusCode": 400, "message": { "message": "<readable text>", "error": "Bad Request" } }`. Show `message.message` to the user as it is.
 - Series has two forms. **Long** `UNSKILLED_CARE / SKILLED_CARE / COOK / MAID / DRIVER` is in `series_db`. **Short** `UC / SC / CK / MAID / DR` is in `series`. Never compare one form against the other.
 
 ---
 
 ## 1. Series: UC / SC / Cook only, Stage 2.5 off
-
-Added 2026-10-12 (plan Phase A).
 
 ### In short
 
@@ -37,7 +35,7 @@ Added 2026-10-12 (plan Phase A).
 
 ---
 
-### 1. New endpoint: `GET /api/v1/meta/series`
+### 1.1 New endpoint: `GET /api/v1/meta/series`
 
 **Public** (no token), because self-registration needs it before login.
 
@@ -62,7 +60,7 @@ Added 2026-10-12 (plan Phase A).
 | `value` | The DB enum. This is what `series_db` holds on every staff object. |
 | `short` | The display code. This is what `series` holds on staff objects, and what `POST /rm/intake` and `POST /auth/register/staff` take. |
 | `active` | `true` = can be chosen for a **new** staff member. |
-| `stage_2_5_enabled` | `false` = hide everything about Stage 2.5 (see section 4). |
+| `stage_2_5_enabled` | `false` = hide everything about Stage 2.5 (see 1.4). |
 
 > ⚠️ **Series has two forms, long and short.** Mixing them up has caused 3 silent bugs
 > before. **Long:** `UNSKILLED_CARE / SKILLED_CARE / COOK / MAID / DRIVER`.
@@ -75,7 +73,7 @@ UC / SC / CK as active.
 
 ---
 
-### 2. Where series is **chosen** → show only `active: true`
+### 1.2 Where series is **chosen** → show only `active: true`
 
 | Screen | File (origin/main) | Change |
 |---|---|---|
@@ -91,7 +89,7 @@ A missing series → `400 "series is required (UC, SC or CK)."`
 An unknown series → `400 "Unknown series \"X\". Use one of: UC, SC, CK (or MAID, DR for existing staff)."`
 Show `message` as it is.
 
-### 3. Where series is **shown or filtered** → handle all five
+### 1.3 Where series is **shown or filtered** → handle all five
 
 Lists, badges and filters must still handle MAID and DR, because those staff
 still exist. Add **CK** everywhere a series badge or colour is looked up, and
@@ -100,7 +98,7 @@ make sure an unknown value doesn't crash or show as "DR":
 - Staff cards, staff detail, placement cards, client app's staff profile: add a CK badge.
 - `GET /video-cert/prompts/CK` returns **9 prompts** for Cook (the same count as MAID).
 
-### 4. Stage 2.5 → hide it
+### 1.4 Stage 2.5 → hide it
 
 When `stage_2_5_enabled === false`:
 
@@ -128,7 +126,7 @@ Backend behaviour (live):
   (no S2.5) for staff who never went through it. Render what comes back.
   `completion_pct` is computed over those 5.
 
-### 5. Checklist
+### 1.5 Checklist (section 1)
 
 - [ ] `GET /meta/series` wired in, cached, with a fallback
 - [ ] Intake + self-registration pickers: active series only (UC/SC/CK)
@@ -139,13 +137,9 @@ Backend behaviour (live):
 - [ ] A staff already in S2_5_ASSESS still shows and can be moved out
 - [ ] Kanban columns come from API keys
 
-Backend test: `npm run test:series` (`scratch/_live_test_series_phase_a.js`).
-
 ---
 
 ## 2. Staff Request: client app + RM
-
-Added 2026-10-12 (plan Phase B). Backend test: `npm run test:requests` (62 checks).
 
 ### In short
 The client asks for staff from the app. The request goes to an RM automatically. The RM puts forward
@@ -246,7 +240,7 @@ Any open status ──(client or RM cancels, with a reason)──▶ CANCELLED
     "selected_at": null,
     "fulfilled_at": null,
     "cancelled_at": null,
-    "rm": { "name": "Pooja Mishra", "phone": "9800000002" },
+    "rm": { "name": "Ritu Sharma", "phone": "98XXXXXXXX" },
     "candidates": [
       {
         "candidate_id": "9c32d12d-a6b8-4c6c-b9a0-78ed3b3cac18",
@@ -321,9 +315,9 @@ which includes `candidates[].staff.mobile`. **Never** use these endpoints from t
 `POST /placements` with `staff_request_id` refuses a staff member who isn't on that request's
 shortlist, a different client, a different series, or a lead with no client account.
 
-## Before sections 3–6: placements, files, dates
+---
 
-Added 2026-10-12. Backend test: `npm run test:care` (106 HTTP checks + 9 scheduled-job checks).
+## Before sections 3–6: placements, files, dates
 
 **Everything in 3–6 is per placement.** The client app gets `placementId` and `features` on each item of
 `GET /client/assigned-staff` (new fields, existing ones unchanged):
@@ -365,10 +359,8 @@ yesterday**. Older days are closed (400).
 
 ## 3. Nurse / Caretaker: care plan + daily checklist
 
-Added 2026-10-12 (plan Phase C).
-
 ```
-Client writes care plan ──▶ staff notified ("Care plan changed — please read") ──▶ staff "Padh liya" (section 6)
+Client writes care plan ──▶ staff notified ("Care plan changed — please read") ──▶ staff taps "Mark as read" (section 6)
         │
         ▼ every day (from the active plan)
 Checklist: each medicine dose, each check (BP, sugar…), each activity at its time
@@ -453,8 +445,6 @@ Client sees it all: today, history, monthly PDF
 
 ## 4. Cook: food profile + menu + meal log
 
-Added 2026-10-12 (plan Phase D).
-
 ```
 Client: food profile (diet, spice, salt/oil, health, allergies) ── belongs to the household, survives a change of cook
 Client: weekly menu  ─┐
@@ -466,7 +456,7 @@ Same complaint 3× in 14 days ──▶ app suggests a profile change (never cha
 
 ### Client app screens
 - **Food profile** form.
-- **Week menu**: a Mon–Sun × meal grid. Tap a slot to set the dishes and a note ("kam teekha").
+- **Week menu**: a Mon–Sun × meal grid. Tap a slot to set the dishes and a note ("less spicy").
   The cook's suggestions show **Approve** / **Decline**. Show `health_warnings` as a yellow note
   (a warning only; it doesn't block).
 - **Meals feed**: photos, dishes, and a **Rate** button.
@@ -510,13 +500,11 @@ Same complaint 3× in 14 days ──▶ app suggests a profile change (never cha
 
 ## 5. Client instructions (text / voice note)
 
-Added 2026-10-12 (plan Phase E).
-
 ```
 Client: instruction (text and/or voice note; one-time or a standing daily order)
    ▼
-SENT ──"Samjha"──▶ ACKNOWLEDGED ──"Ho gaya"──▶ DONE           (client told at each step)
-   └──"Ye mera kaam nahi" (reason)──▶ REFUSED ──▶ RM decides, both sides told:
+SENT ──"Got it"──▶ ACKNOWLEDGED ──"Done"──▶ DONE                   (client told at each step)
+   └──"Not my job" (reason)──▶ REFUSED ──▶ RM decides, both sides told:
                                          UPHELD     → stays REFUSED (outside the job)
                                          OVERTURNED → back to ACKNOWLEDGED (part of the job)
 Client can cancel while SENT / ACKNOWLEDGED.
@@ -531,8 +519,8 @@ Client can cancel while SENT / ACKNOWLEDGED.
 | client | POST | `/care/placements/:pid/instructions` | `{ text?, voice_file_id?, kind: ONE_TIME/RECURRING, due_at? (ISO), recurrence?: { times[], days[] } }`. Needs at least text or a voice note. |
 | client | POST | `/client/instructions/:id/cancel` | — |
 | staff | GET | `/staff/care/instructions?status=` | — returns `{ items[] }`, each with `client_name` |
-| staff | POST | `/staff/care/instructions/:id/ack` | — ("Samjha") |
-| staff | POST | `/staff/care/instructions/:id/done` | `{ note? }` ("Ho gaya") |
+| staff | POST | `/staff/care/instructions/:id/ack` | — ("Got it") |
+| staff | POST | `/staff/care/instructions/:id/done` | `{ note? }` ("Done") |
 | staff | POST | `/staff/care/instructions/:id/refuse` | `{ reason }` (required) |
 
 Each instruction has: `status`, `text`, `voice_url` (play it with the token), `acknowledged_at`, `done_at`,
@@ -544,16 +532,16 @@ button on the card.
 
 ---
 
-## 6. Staff sees every client input ("Client ki taraf se naya", "Padh liya")
+## 6. Staff sees every client input ("New from the family", "Mark as read")
 
-Added 2026-10-12. This rule covers sections 3–5: whatever the family puts in the app for their staff
+This rule covers sections 3–5: whatever the family puts in the app for their staff
 reaches that staff member's app, and the family can see that it was read.
 
 | Endpoint (staff) | |
 |---|---|
 | `GET /staff/care/client-updates?placement_id=&unread=true` | `{ items[], unread }`, newest first. Each item: `{ type, id, version, placement_id, client_name, title, changes[], at, seen_at, acknowledged_at }` |
-| `GET /staff/care/client-updates/unread-count` | `{ unread }`, for the **"Client ki taraf se naya"** home card badge |
-| `POST /staff/care/client-updates/:type/:id/ack` | **"Padh liya"**. Use the `type` and `id` from the item. For `INSTRUCTION` this is the same as "Samjha". |
+| `GET /staff/care/client-updates/unread-count` | `{ unread }`, for the **"New from the family"** home card badge |
+| `POST /staff/care/client-updates/:type/:id/ack` | **"Mark as read"**. Use the `type` and `id` from the item. For `INSTRUCTION` this is the same as "Got it". |
 
 | `type` | What it is | Who |
 |---|---|---|
@@ -564,11 +552,11 @@ reaches that staff member's app, and the family can see that it was read.
 | `INSTRUCTION` | an instruction (status in `changes`) | everyone |
 
 - **Show `changes[]` as highlighted lines.** The backend writes them, so don't diff anything yourself.
-- Opening the feed marks items **seen**. Only the **Padh liya** button sets `acknowledged_at`.
+- Opening the feed marks items **seen**. Only the **Mark as read** button sets `acknowledged_at`.
 - A **new version** (for example, the plan edited again) is a new unread item. Acknowledging an old
   version is refused (400).
 - **Care plan banner:** in the caretaker's Today screen, while `plan.acknowledged === false`, show a banner
-  over the checklist: "Plan badla hai — pehle dekh lo". Show `plan.changes` in it, with a **Padh liya** button.
+  over the checklist: "The care plan has changed — please read it first". Show `plan.changes` in it, with a **Mark as read** button.
 - **The family sees it was read:** `staff_acknowledged_at` on `GET /care/placements/:pid/plan`, and
   `acknowledged_at` on instructions. The client also gets a notification ("Kavita read the care plan").
 - **If the staff doesn't read it:** when a **medicine or check change** stays unread for 2 hours, the RM
@@ -600,5 +588,5 @@ In-app rows (`GET /client/notifications`, and the staff app's `GET /staff/notifi
 - [ ] Client: food profile, week menu grid with warnings, approve/decline, meals feed, rating, suggestions
 - [ ] Staff (cook): Today, log meal with optional photo, suggest menu
 - [ ] Instructions on both sides, with voice notes and a big **Play** button
-- [ ] Staff: "Client ki taraf se naya" card + feed with highlighted `changes[]` + **Padh liya**
+- [ ] Staff: "New from the family" card + feed with highlighted `changes[]` + **Mark as read**
 - [ ] Client: "Read ✓" on care plan and instructions

@@ -9,8 +9,8 @@ import { CareFilesService } from './care-files.service';
 /**
  * Phase E — the client tells their staff what to do, in text or a voice note.
  *
- *   SENT → ACKNOWLEDGED ("samjha") → DONE ("ho gaya")
- *        ↘ REFUSED ("ye mera kaam nahi") → RM decides:
+ *   SENT → ACKNOWLEDGED (read) → DONE
+ *        ↘ REFUSED ("not part of my job") → RM decides:
  *              UPHELD     — the staff was right; it stays refused
  *              OVERTURNED — it is part of the job; back to ACKNOWLEDGED
  *   SENT/ACKNOWLEDGED → CANCELLED (client)
@@ -164,7 +164,7 @@ export class InstructionsService {
     return this.dto(row);
   }
 
-  /** "Ye mera kaam nahi" — opens a Right-to-Refuse case and puts it in front of the RM. */
+  /** "Not part of my job" — opens a Right-to-Refuse case and puts it in front of the RM. */
   async refuse(user: AuthUser, id: string, body: Record<string, unknown>) {
     const { ins, ctx } = await this.forStaff(user, id);
     if (!['SENT', 'ACKNOWLEDGED'].includes(ins.status)) throw new BadRequestException(`This instruction is ${ins.status}.`);

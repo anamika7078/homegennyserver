@@ -258,19 +258,19 @@ export class StaffCareController {
   }
 
   @Post('instructions/:id/ack')
-  @ApiOperation({ summary: '"Samjha"' })
+  @ApiOperation({ summary: 'Acknowledge — the staff member has read the instruction' })
   ack(@Req() req: Req, @Param('id') id: string) {
     return this.instructions.acknowledge(req.user, id);
   }
 
   @Post('instructions/:id/done')
-  @ApiOperation({ summary: '"Ho gaya" (one-time instructions only)' })
+  @ApiOperation({ summary: 'Mark done (one-time instructions only)' })
   doneIns(@Req() req: Req, @Param('id') id: string, @Body() body: Record<string, unknown>) {
     return this.instructions.done(req.user, id, body);
   }
 
   @Post('instructions/:id/refuse')
-  @ApiOperation({ summary: '"Ye mera kaam nahi" — opens a Right-to-Refuse case for the RM. { reason }' })
+  @ApiOperation({ summary: 'Refuse as outside the job — opens a Right-to-Refuse case for the RM. { reason }' })
   refuse(@Req() req: Req, @Param('id') id: string, @Body() body: Record<string, unknown>) {
     return this.instructions.refuse(req.user, id, body);
   }
@@ -290,7 +290,7 @@ export class StaffCareController {
   }
 
   @Post('client-updates/:type/:id/ack')
-  @ApiOperation({ summary: '"Padh liya". type: CARE_PLAN | FOOD_PROFILE | MENU | INSTRUCTION | MEAL_FEEDBACK' })
+  @ApiOperation({ summary: 'Mark as read. type: CARE_PLAN | FOOD_PROFILE | MENU | INSTRUCTION | MEAL_FEEDBACK' })
   ackUpdate(@Req() req: Req, @Param('type') type: string, @Param('id') id: string) {
     return this.updates.ack(req.user, type, id);
   }

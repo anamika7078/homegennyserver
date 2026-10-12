@@ -14,7 +14,7 @@ import { InstructionsService } from './instructions.service';
  * for their staff, the staff sees — and the client can see that they saw it.
  *
  *   GET  /staff/client-updates            every client input, newest first, with what changed
- *   POST /staff/client-updates/:type/:id/ack   "Padh liya"
+ *   POST /staff/client-updates/:type/:id/ack   mark as read
  *
  * Plus the two things built on top of the same data: the RM's compliance
  * board and the client's monthly PDF.
@@ -127,7 +127,7 @@ export class ClientUpdatesService {
       }
     }
 
-    // Seen = it reached the app. Instructions carry their own "samjha" (acknowledged_at).
+    // Seen = it reached the app. Instructions carry their own acknowledgement (acknowledged_at).
     const acks = items.length
       ? await this.prisma.clientInputAck.findMany({ where: { staffId: staff.id, inputId: { in: items.map((i) => i.id) } } })
       : [];
@@ -162,7 +162,7 @@ export class ClientUpdatesService {
     return { unread };
   }
 
-  /** "Padh liya". For an instruction it is the same as "samjha". */
+  /** Mark as read. For an instruction this is the same as acknowledging it. */
   async ack(user: AuthUser, type: string, id: string) {
     const t = String(type).toUpperCase() as InputType;
     if (!INPUT_TYPES.includes(t)) throw new BadRequestException(`type must be one of ${INPUT_TYPES.join(', ')}.`);
