@@ -240,10 +240,12 @@ async function main() {
     process.exit(1);
   }
   const host = new URL(url).hostname;
-  const isLocal = /^(localhost|127\.0\.0\.1)$/.test(host);
-  console.log(`Target: ${host}${isLocal ? '' : '  ** REMOTE **'}\n`);
+  console.log(`Target: ${host}\n`);
 
-  const c = new Client({ connectionString: url, ssl: isLocal ? false : { rejectUnauthorized: false } });
+  // SSL only for managed hosts. Keying on "localhost" breaks inside the compose
+  // network, where the host is `postgres` and the server has no SSL.
+  const needsSsl = /render\.com|dpg-|sslmode=require/i.test(url);
+  const c = new Client({ connectionString: url, ssl: needsSsl ? { rejectUnauthorized: false } : false });
   await c.connect();
   try {
     await c.query('BEGIN');
