@@ -678,7 +678,9 @@ These changes update sections 2 and 4. Where they disagree with those sections, 
   - It copies one week onto another, dates from today on.
   - Slots the client already set in the target week are kept unless `overwrite: true`.
   - Returns `{ copied, kept_existing, menu }`.
-- Suggested UI: in the week view, a **"Use as my weekly menu"** button saves the current week as the template, and **"Same as last week"** calls copy-week.
+- Suggested UI for the week view:
+  - **"Use as my weekly menu"**: there is no separate API for this. Take the week's `items`, turn each `date` into its weekday (`dow`), keep `meal`, `dish_ids`, `dishes`, `meal_time`, `special_instruction` and `servings`, and send them with `PUT /client/menu-template`.
+  - **"Same as last week"**: calls copy-week.
 
 ### 7.4 Cook app
 
