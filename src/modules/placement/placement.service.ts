@@ -197,13 +197,18 @@ export class PlacementService {
     // Filling a client's staff request: checked before anything is written, and
     // the request's terms are the defaults for what the caller left out.
     const staffRequestId = data.staff_request_id ? String(data.staff_request_id) : null;
+    let visitMeta: Record<string, unknown> = {};
     if (staffRequestId) {
       const sr = await this.staffRequests.assertPlacementFits(staffRequestId, staffId, clientId);
+      const visitDate = sr.startDate ? sr.startDate.toISOString().slice(0, 10) : undefined;
       data = {
         placement_type: sr.placementType,
         shift_hours: Number(sr.shiftHours),
+        // A one-time visit is that one day.
+        ...(sr.visitType === 'ONE_TIME' && visitDate ? { trial_start_date: visitDate, trial_end_date: visitDate } : {}),
         ...data,
       };
+      if (sr.visitType === 'ONE_TIME') visitMeta = { visit_type: 'ONE_TIME', visit_date: visitDate, duration_min: sr.durationMin };
     }
 
     const duplicate = await this.prisma.placement.findFirst({
@@ -303,7 +308,7 @@ export class PlacementService {
         hourlyRate: isHourly ? hourlyRate : null,
         hourlyFee: isHourly ? hourlyFee : null,
         metadata: (staffRequestId
-          ? { ...(wageTerms.metadataPatch as object), staff_request_id: staffRequestId }
+          ? { ...(wageTerms.metadataPatch as object), staff_request_id: staffRequestId, ...visitMeta }
           : wageTerms.metadataPatch) as Prisma.InputJsonValue,
         trialStartDate: data.trial_start_date ? new Date(String(data.trial_start_date)) : new Date(),
         trialEndDate: data.trial_end_date

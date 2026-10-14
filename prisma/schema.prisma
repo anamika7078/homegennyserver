@@ -2278,6 +2278,14 @@ model StaffRequest {
   placementType        String                  @default("PERMANENT") @map("placement_type") @db.VarChar(20)
   shiftHours           Decimal                 @default(8) @map("shift_hours") @db.Decimal(4, 1)
   startDate            DateTime?               @map("start_date") @db.Date
+  /// ONE_TIME (one visit) | REGULAR (daily staff)
+  visitType            String                  @default("REGULAR") @map("visit_type") @db.VarChar(20)
+  /// ONE_TIME only: 60 | 90 | 120 | 180
+  durationMin          Int?                    @map("duration_min")
+  /// Cook: the dishes for the visit, or the weekly pattern
+  menu                 Json?
+  /// UC/SC: care needs in the care-plan format; becomes care plan v1 on placement
+  careNeeds            Json?                   @map("care_needs")
   /// HH:MM, IST
   startTime            String?                 @map("start_time") @db.VarChar(5)
   lat                  Decimal?                @db.Decimal(10, 7)

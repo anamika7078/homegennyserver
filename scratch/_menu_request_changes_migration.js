@@ -72,6 +72,14 @@ const STEPS = [
           ALTER TABLE staff_requests ADD COLUMN IF NOT EXISTS lng NUMERIC(10,7)`,
   },
   {
+    // docs/REQUEST_BOOKING_FLOW_PLAN.md — the request carries the whole booking.
+    label: 'staff_requests: visit_type, duration_min, menu, care_needs',
+    sql: `ALTER TABLE staff_requests ADD COLUMN IF NOT EXISTS visit_type VARCHAR(20) NOT NULL DEFAULT 'REGULAR';
+          ALTER TABLE staff_requests ADD COLUMN IF NOT EXISTS duration_min INT;
+          ALTER TABLE staff_requests ADD COLUMN IF NOT EXISTS menu JSONB;
+          ALTER TABLE staff_requests ADD COLUMN IF NOT EXISTS care_needs JSONB`,
+  },
+  {
     label: 'finance_customers: lat, lng',
     sql: `ALTER TABLE finance_customers ADD COLUMN IF NOT EXISTS lat NUMERIC(10,7);
           ALTER TABLE finance_customers ADD COLUMN IF NOT EXISTS lng NUMERIC(10,7)`,

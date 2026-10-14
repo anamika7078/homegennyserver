@@ -94,6 +94,7 @@ const UC_BODY = {
   placement_type: 'PERMANENT',
   shift_hours: 12,
   start_date: inDays(3),
+  start_time: '10:00',
   language: 'Hindi',
   gender_pref: 'ANY',
   // Budget is no longer asked for; sent anyway, it must be ignored.
@@ -165,12 +166,13 @@ async function main() {
     await bad('MAID refused (paused series)', { ...UC_BODY, series: 'MAID' }, /not being taken on/i);
     await bad('UC asked for injections → told to ask for SC', { ...UC_BODY, requirements: { ...UC_BODY.requirements, medical_needs: ['INJECTION'] } }, /Skilled Caretaker/i);
     await bad('care request without mobility refused', { ...UC_BODY, requirements: { patient_age: 70 } }, /mobility/i);
-    await bad('cook request without diet_type refused', { series: 'CK', address: '22 Green Park, New Delhi', requirements: { family_size: 4, meals_per_day: ['LUNCH'] } }, /diet_type/i);
+    await bad('cook request without diet_type refused', { series: 'CK', start_date: inDays(3), start_time: '10:00', address: '22 Green Park, New Delhi', requirements: { family_size: 4, meals_per_day: ['LUNCH'] } }, /diet_type/i);
     await bad('start_date in the past refused', { ...UC_BODY, start_date: '2020-01-01' }, /past/i);
     const noAddr = { ...UC_BODY }; delete noAddr.address;
     await bad('address is required', noAddr, /address is required/i);
     await bad('lat without lng refused', { ...UC_BODY, lng: undefined }, /lat and lng together/i);
-    await bad('start_time without start_date refused', { ...UC_BODY, start_date: undefined, start_time: '09:00' }, /start_date/i);
+    await bad('start_date required', { ...UC_BODY, start_date: undefined }, /start_date is required/i);
+    await bad('start_time required', { ...UC_BODY, start_time: undefined }, /start_time is required/i);
     await bad('start_time not HH:MM refused', { ...UC_BODY, start_time: '9am' }, /HH:MM/i);
 
     // ── create ───────────────────────────────────────────────────────────────
@@ -202,7 +204,7 @@ async function main() {
 
     const cook = await req('POST', '/client/staff-requests', {
       token: clientToken,
-      body: { series: 'CK', address: '22 Green Park, New Delhi', requirements: { diet_type: 'veg', family_size: 4, meals_per_day: ['lunch', 'dinner'], health_conditions: ['diabetic'] } },
+      body: { series: 'CK', start_date: inDays(3), start_time: '10:00', address: '22 Green Park, New Delhi', requirements: { diet_type: 'veg', family_size: 4, meals_per_day: ['lunch', 'dinner'], health_conditions: ['diabetic'] } },
     });
     check('cook request accepted', ok2xx(cook) && cook.body?.series === 'CK', { status: cook.status, msg: msg(cook) });
     if (cook.body?.id) requestIds.push(cook.body.id);
@@ -275,7 +277,7 @@ async function main() {
       check('request FULFILLED', after.body?.status === 'FULFILLED', after.body?.status);
       check('candidate PLACED with the placement id', after.body?.candidates?.find((c) => c.staff.id === A)?.placement_id === plId);
       const { rows: fn } = await db.query(`SELECT template FROM notifications WHERE user_id = $1 AND payload->>'request_id' = $2`, [cust.portalUserId, sr.id]);
-      check('client told it is fulfilled', fn.some((n) => n.template === 'STAFF_REQUEST_FULFILLED'), fn);
+      check('client told the booking is confirmed', fn.some((n) => n.template === 'STAFF_REQUEST_CONFIRMED'), fn);
       const late = await req('POST', `/rm/staff-requests/${sr.id}/shortlist`, { token: rmToken, body: { staff_ids: [D] } });
       check('a fulfilled request is closed to changes', late.status === 400, late.status);
     }

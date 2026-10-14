@@ -23,6 +23,6 @@ import {
   imports: [RightToRefuseModule],
   controllers: [PlacementCareController, CareFilesController, ClientCareController, StaffCareController, RmCareController, DishesController, RmCheckinsController],
   providers: [CareAccessService, CareFilesService, CarePlanService, CookService, InstructionsService, ClientUpdatesService, MenuCatalogService, CheckinsService],
-  exports: [CareAccessService],
+  exports: [CareAccessService, CookService, CarePlanService],
 })
 export class DailyCareModule {}

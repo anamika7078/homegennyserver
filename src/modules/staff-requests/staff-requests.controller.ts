@@ -7,13 +7,15 @@ import { StaffRequestsService } from './staff-requests.service';
 const REQUEST_BODY = {
   schema: {
     type: 'object',
-    required: ['series', 'address', 'requirements'],
+    required: ['series', 'start_date', 'start_time', 'address', 'requirements'],
     properties: {
       series: { type: 'string', enum: ['UC', 'SC', 'CK'], description: 'Active series only — see GET /meta/series' },
-      placement_type: { type: 'string', enum: ['PERMANENT', 'TEMPORARY'], default: 'PERMANENT' },
+      visit_type: { type: 'string', enum: ['REGULAR', 'ONE_TIME'], default: 'REGULAR', description: 'ONE_TIME = one visit of duration_min; REGULAR = daily staff' },
+      duration_min: { type: 'integer', enum: [60, 90, 120, 180], description: 'Required for ONE_TIME (sets TEMPORARY, shift_hours = duration/60)' },
+      placement_type: { type: 'string', enum: ['PERMANENT', 'TEMPORARY'], default: 'PERMANENT', description: 'REGULAR only' },
       shift_hours: { type: 'number', example: 8 },
-      start_date: { type: 'string', example: '2026-10-20', description: 'YYYY-MM-DD, not in the past' },
-      start_time: { type: 'string', example: '09:00', description: 'HH:MM IST; needs start_date' },
+      start_date: { type: 'string', example: '2026-10-20', description: 'Required. YYYY-MM-DD, not in the past' },
+      start_time: { type: 'string', example: '09:00', description: 'Required. HH:MM IST' },
       address: { type: 'string', description: 'Required — where the staff will work' },
       lat: { type: 'number', example: 28.5355, description: 'Map pin (send with lng)' },
       lng: { type: 'number', example: 77.391 },
@@ -21,6 +23,16 @@ const REQUEST_BODY = {
       gender_pref: { type: 'string', enum: ['ANY', 'FEMALE', 'MALE'], default: 'ANY' },
       headcount: { type: 'integer', default: 1, minimum: 1, maximum: 20 },
       notes: { type: 'string' },
+      menu: {
+        type: 'object',
+        description:
+          'Cook only. ONE_TIME: { dish_ids[], dishes[], meal?, meal_time?, special_instruction? } — 1+ dishes, max 3/4/5/7 for 60/90/120/180 min. ' +
+          'REGULAR (optional): { items: [weekly template items] }. Becomes the menu / template when staff is placed.',
+      },
+      care_needs: {
+        type: 'object',
+        description: 'UC/SC only, optional. Care-plan format: patient, medications[], vitals[], activities[], diet_notes, dos, donts (UC: no medications/vitals). Becomes care plan v1 when staff is placed.',
+      },
       requirements: {
         type: 'object',
         description:

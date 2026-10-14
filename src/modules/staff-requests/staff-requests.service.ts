@@ -13,6 +13,11 @@ import { AuthUser } from '../../common/guards/branch-scope.util';
 import { assertSeriesActive } from '../../common/config/active-series';
 import { mapSeriesFromShort, mapSeriesToShort } from '../../common/mappers/staff.mapper';
 import { MEDICAL_DUTY_CODES } from '../series/series.constants';
+import { CookService } from '../daily-care/cook.service';
+import { CarePlanService } from '../daily-care/care-plan.service';
+
+/** One-time visit lengths, in minutes. */
+const VISIT_DURATIONS = [60, 90, 120, 180];
 
 /**
  * Staff requests — Phase B of docs/CLIENT_REQUESTS_AND_DAILY_CARE_PLAN.md.
@@ -62,6 +67,9 @@ function dateOnly(v: unknown, field: string): Date | undefined {
   if (Number.isNaN(d.getTime())) throw new BadRequestException(`${field} is not a real date.`);
   return d;
 }
+function addDaysIso(d: string, n: number): string {
+  return new Date(Date.parse(`${d}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+}
 function todayIst(): string {
   return new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
 }
@@ -73,6 +81,8 @@ export class StaffRequestsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly cook: CookService,
+    private readonly care: CarePlanService,
   ) {}
 
   // ── Validation ─────────────────────────────────────────────────────────────
@@ -84,23 +94,37 @@ export class StaffRequestsService {
     const series = mapSeriesFromShort(rawSeries);
     assertSeriesActive(series);
 
-    const placementType = (str(body.placement_type) ?? 'PERMANENT').toUpperCase();
+    // ONE_TIME = one visit of a set length (e.g. a cook for 2 hours on 15 Oct);
+    // REGULAR = staff who come every day, permanent or hourly.
+    const visitType = (str(body.visit_type) ?? 'REGULAR').toUpperCase();
+    if (!['ONE_TIME', 'REGULAR'].includes(visitType)) throw new BadRequestException('visit_type must be ONE_TIME or REGULAR.');
+    let placementType = (str(body.placement_type) ?? 'PERMANENT').toUpperCase();
     if (!['PERMANENT', 'TEMPORARY'].includes(placementType)) {
       throw new BadRequestException('placement_type must be PERMANENT or TEMPORARY.');
     }
-    const shiftHours = num(body.shift_hours, 'shift_hours') ?? 8;
+    let shiftHours = num(body.shift_hours, 'shift_hours') ?? 8;
     if (shiftHours <= 0 || shiftHours > 24) throw new BadRequestException('shift_hours must be between 1 and 24.');
-
-    const startDate = dateOnly(body.start_date, 'start_date');
-    if (startDate && startDate.toISOString().slice(0, 10) < todayIst()) {
-      throw new BadRequestException('start_date cannot be in the past.');
+    let durationMin: number | null = null;
+    if (visitType === 'ONE_TIME') {
+      durationMin = num(body.duration_min, 'duration_min') ?? null;
+      if (!durationMin || !VISIT_DURATIONS.includes(durationMin)) {
+        throw new BadRequestException(`duration_min is required for a one-time visit — one of ${VISIT_DURATIONS.join(', ')}.`);
+      }
+      // A visit is billed by the hour, for its own length.
+      placementType = 'TEMPORARY';
+      shiftHours = durationMin / 60;
     }
 
-    // Start time is optional; when the start is today it can't already have passed.
+    // Every request is scheduled: the date and time are part of the booking.
+    const startDate = dateOnly(body.start_date, 'start_date');
+    if (!startDate) throw new BadRequestException('start_date is required — when should the staff come?');
+    if (startDate.toISOString().slice(0, 10) < todayIst()) {
+      throw new BadRequestException('start_date cannot be in the past.');
+    }
     const startTime = str(body.start_time);
-    if (startTime !== undefined) {
+    if (!startTime) throw new BadRequestException('start_time is required (HH:MM).');
+    {
       if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)) throw new BadRequestException('start_time must be HH:MM (24-hour).');
-      if (!startDate) throw new BadRequestException('Give start_date along with start_time.');
       const nowIst = new Date(Date.now() + 330 * 60_000).toISOString();
       if (startDate.toISOString().slice(0, 10) === todayIst() && startTime < nowIst.slice(11, 16)) {
         throw new BadRequestException('start_time has already passed today.');
@@ -129,6 +153,8 @@ export class StaffRequestsService {
 
     return {
       series,
+      visitType,
+      durationMin,
       placementType,
       shiftHours,
       startDate,
@@ -311,10 +337,43 @@ export class StaffRequestsService {
     return c;
   }
 
+  /**
+   * The parts of the booking that go straight to the staff app once someone is
+   * placed: the cook's dishes, or the caretaker's care needs. Checked now, with
+   * the same rules they will face later.
+   */
+  private async parseHandoff(fields: ReturnType<StaffRequestsService['parseRequestBody']>, body: Record<string, unknown>, clientId: string | null) {
+    let menu: Record<string, unknown> | null = null;
+    let careNeeds: Record<string, unknown> | null = null;
+    if (fields.series === StaffSeries.COOK) {
+      if (body.care_needs !== undefined && body.care_needs !== null) throw new BadRequestException('care_needs is for caretakers (UC/SC); a cook request takes menu.');
+      menu = await this.cook.parseRequestMenu(clientId, fields.visitType as 'ONE_TIME' | 'REGULAR', body.menu, {
+        durationMin: fields.durationMin,
+        startTime: fields.startTime ?? null,
+      });
+    } else {
+      if (body.menu !== undefined && body.menu !== null) throw new BadRequestException('menu is for a cook request; caretakers take care_needs.');
+      if (body.care_needs && typeof body.care_needs === 'object') {
+        const p = await this.care.validateCareNeeds(fields.series, body.care_needs as Record<string, unknown>);
+        careNeeds = {
+          patient: p.patient,
+          medications: p.medications,
+          vitals: p.vitals,
+          activities: p.activities,
+          diet_notes: p.dietNotes,
+          dos: p.dos,
+          donts: p.donts,
+        };
+      }
+    }
+    return { menu, careNeeds };
+  }
+
   /** From the client app — the client is whoever is logged in. */
   async createFromClient(userId: string, body: Record<string, unknown>) {
     const customer = await this.resolveCustomer(userId);
-    const fields = this.parseRequestBody(body);
+    const fields = { ...this.parseRequestBody(body) };
+    Object.assign(fields, await this.parseHandoff(fields, body, customer.id));
     const branchId = await this.resolveBranch(customer.id, customer.city);
     const created = await this.insert(
       {
@@ -339,8 +398,9 @@ export class StaffRequestsService {
 
   /** From the RM web — for an existing client, or a lead with no account yet. */
   async createFromRm(user: AuthUser, body: Record<string, unknown>) {
-    const fields = this.parseRequestBody(body);
+    const fields = { ...this.parseRequestBody(body) };
     const clientId = str(body.client_id) ?? null;
+    Object.assign(fields, await this.parseHandoff(fields, body, clientId));
     let customer: { id: string; address: string; city: string | null } | null = null;
     if (clientId) {
       customer = await this.prisma.financeCustomer.findUnique({ where: { id: clientId }, select: { id: true, address: true, city: true } });
@@ -385,6 +445,8 @@ export class StaffRequestsService {
       source: string;
       rmId?: string;
       replacementRequestId?: string;
+      menu?: Record<string, unknown> | null;
+      careNeeds?: Record<string, unknown> | null;
     },
     actorId: string,
   ) {
@@ -404,6 +466,10 @@ export class StaffRequestsService {
           source: data.source,
           replacementRequestId: data.replacementRequestId,
           series: data.series,
+          visitType: data.visitType,
+          durationMin: data.durationMin,
+          menu: (data.menu ?? undefined) as Prisma.InputJsonValue | undefined,
+          careNeeds: (data.careNeeds ?? undefined) as Prisma.InputJsonValue | undefined,
           placementType: data.placementType,
           shiftHours: data.shiftHours,
           startDate: data.startDate,
@@ -460,9 +526,13 @@ export class StaffRequestsService {
       placement_type: placement?.placementType,
       shift_hours: placement?.shiftHours?.toString(),
       notes: `Replacement: ${rr.reason}`,
+      // A replacement is wanted soon: tomorrow 09:00 unless the RM says otherwise.
+      start_date: addDaysIso(todayIst(), 1),
+      start_time: '09:00',
       ...body,
     };
-    const fields = this.parseRequestBody(merged);
+    const fields = { ...this.parseRequestBody(merged) };
+    Object.assign(fields, await this.parseHandoff(fields, merged, rr.client_id));
 
     const created = await this.insert(
       {
@@ -642,6 +712,10 @@ export class StaffRequestsService {
       shift_hours: Number(r.shiftHours),
       start_date: r.startDate ? r.startDate.toISOString().slice(0, 10) : null,
       start_time: r.startTime,
+      visit_type: r.visitType,
+      duration_min: r.durationMin,
+      menu: r.menu,
+      care_needs: r.careNeeds,
       address: r.address,
       lat: r.lat !== null ? Number(r.lat) : null,
       lng: r.lng !== null ? Number(r.lng) : null,
@@ -975,10 +1049,50 @@ export class StaffRequestsService {
     });
     await this.recomputeStatus(requestId);
     await this.log(actorId, req, 'placed', { staff_id: staffId, placement_id: placementId });
-    const after = await this.prisma.staffRequest.findUniqueOrThrow({ where: { id: requestId } });
-    if (after.status === 'FULFILLED') {
-      await this.notify([await this.clientUserId(req.clientId)], 'Your staff is on the way', `${req.requestNo} is fulfilled — your trial starts as planned.`, 'STAFF_REQUEST_FULFILLED', { request_id: requestId, placement_id: placementId });
+
+    // The booking's details go straight to the staff app.
+    const startDate = req.startDate ? req.startDate.toISOString().slice(0, 10) : null;
+    if (req.clientId) {
+      await this.cook
+        .applyRequestMenu(placementId, req.clientId, req.visitType, startDate, (req.menu ?? null) as Record<string, unknown> | null, req.createdBy)
+        .catch((e) => this.logger.warn(`menu handoff ${req.requestNo}: ${e.message}`));
     }
+    if (req.careNeeds) {
+      await this.care
+        .createFromRequest(placementId, req.careNeeds as Record<string, unknown>, req.createdBy)
+        .catch((e) => this.logger.warn(`care plan handoff ${req.requestNo}: ${e.message}`));
+    }
+
+    const staff = await this.prisma.staffApplicant.findUnique({ where: { id: staffId }, select: { fullName: true } });
+    const when = [startDate, req.startTime].filter(Boolean).join(' ');
+    await this.notify(
+      [await this.clientUserId(req.clientId)],
+      'Booking confirmed',
+      `${staff?.fullName.split(' ')[0] ?? 'Your staff'} — ${when}${req.visitType === 'ONE_TIME' && req.durationMin ? ` for ${req.durationMin / 60} h` : ''} (${req.requestNo}).`,
+      'STAFF_REQUEST_CONFIRMED',
+      { request_id: requestId, placement_id: placementId },
+    );
+  }
+
+  /**
+   * One-time visits end on their day: after it, the placement is closed as
+   * EXITED / VISIT_DONE so it stops counting as active. Runs every morning.
+   */
+  @Cron(CronExpression.EVERY_DAY_AT_1AM)
+  async closeFinishedVisits() {
+    const today = todayIst();
+    const rows = await this.prisma.$queryRaw<{ id: string; trial_start_date: Date | null }[]>`
+      SELECT id, trial_start_date FROM placements
+       WHERE status IN ('TRIAL','CONFIRMED')
+         AND metadata->>'visit_type' = 'ONE_TIME'
+         AND trial_start_date < ${today}::date`;
+    for (const p of rows) {
+      await this.prisma.placement.update({
+        where: { id: p.id },
+        data: { status: 'EXITED', exitDate: p.trial_start_date, exitScenarioCode: 'VISIT_DONE' },
+      });
+    }
+    return rows.length;
   }
 
   /** For a placement made without the request (the old direct flow): link it afterwards. */

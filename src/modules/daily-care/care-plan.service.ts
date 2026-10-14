@@ -78,7 +78,7 @@ export class CarePlanService {
 
   // ── Plan ──────────────────────────────────────────────────────────────────
 
-  private async parsePlan(ctx: PlacementCtx, body: Record<string, unknown>, previous: CarePlan | null) {
+  private async parsePlan(target: { series: StaffSeries; placementId: string | null }, body: Record<string, unknown>, previous: CarePlan | null) {
     const prevIds = new Set<string>([
       ...((previous?.medications as Med[]) ?? []).map((m) => m.id),
       ...((previous?.vitals as Vital[]) ?? []).map((v) => v.id),
@@ -91,7 +91,7 @@ export class CarePlanService {
       return id && prevIds.has(id) ? id : randomUUID();
     };
 
-    const isUc = ctx.staff.series === StaffSeries.UNSKILLED_CARE;
+    const isUc = target.series === StaffSeries.UNSKILLED_CARE;
     const medsIn = Array.isArray(body.medications) ? (body.medications as Record<string, unknown>[]) : [];
     const vitalsIn = Array.isArray(body.vitals) ? (body.vitals as Record<string, unknown>[]) : [];
     // Same scope rule as the staff request: a UC may not give medicines or take vitals.
@@ -115,8 +115,11 @@ export class CarePlanService {
       const start = m.start_date ? parseDate(m.start_date, `${f}.start_date`) : undefined;
       const end = m.end_date ? parseDate(m.end_date, `${f}.end_date`) : undefined;
       if (start && end && end < start) throw new BadRequestException(`${f}: end_date is before start_date.`);
-      const [rx] = m.prescription_file_id
-        ? await this.files.assertOwned(ctx.placement.id, m.prescription_file_id, 'PRESCRIPTION')
+      if (m.prescription_file_id && !target.placementId) {
+        throw new BadRequestException(`${f}: attach the prescription after the booking is confirmed.`);
+      }
+      const [rx] = m.prescription_file_id && target.placementId
+        ? await this.files.assertOwned(target.placementId, m.prescription_file_id, 'PRESCRIPTION')
         : [undefined];
       medications.push({
         id: idFor(m.id),
@@ -281,10 +284,42 @@ export class CarePlanService {
     this.access.assertCare(ctx);
 
     const prev = await this.prisma.carePlan.findFirst({ where: { placementId, status: 'ACTIVE' } });
-    const parsed = await this.parsePlan(ctx, body, prev);
+    const parsed = await this.parsePlan({ series: ctx.staff.series, placementId }, body, prev);
     const changes = this.diff(prev, parsed);
     if (prev && !changes.length) return this.getPlan(user, placementId);
+    await this.writeVersion(ctx, parsed, changes, user.id);
+    return this.getPlan(user, placementId);
+  }
 
+  /**
+   * Checks care needs sent with a staff request, before there is a placement —
+   * the same rules as the care plan (UC: no medicines or vitals).
+   */
+  async validateCareNeeds(series: StaffSeries, body: Record<string, unknown>) {
+    return this.parsePlan({ series, placementId: null }, body, null);
+  }
+
+  /**
+   * The care needs from the request become care plan v1 when the RM places the
+   * staff — unless the placement already has a plan.
+   */
+  async createFromRequest(placementId: string, careNeeds: Record<string, unknown>, actorId: string | null) {
+    const ctx = await this.access.resolve({ id: '', role: 'ADMIN' }, placementId);
+    if (!CARE_SERIES.includes(ctx.staff.series)) return null;
+    const existing = await this.prisma.carePlan.findFirst({ where: { placementId }, select: { id: true } });
+    if (existing) return null;
+    const parsed = await this.parsePlan({ series: ctx.staff.series, placementId }, careNeeds, null);
+    const changes = [{ type: 'CREATED', text: 'Care plan from your booking' }];
+    return this.writeVersion(ctx, parsed, changes, actorId);
+  }
+
+  private async writeVersion(
+    ctx: PlacementCtx,
+    parsed: Awaited<ReturnType<CarePlanService['parsePlan']>>,
+    changes: { type: string; text: string; medical?: boolean }[],
+    actorId: string | null,
+  ) {
+    const placementId = ctx.placement.id;
     const created = await this.prisma.$transaction(async (tx) => {
       // One writer at a time per placement, so two saves can't both become ACTIVE.
       await tx.$queryRaw`SELECT id FROM placements WHERE id = ${placementId}::uuid FOR UPDATE`;
@@ -305,7 +340,7 @@ export class CarePlanService {
           dos: parsed.dos,
           donts: parsed.donts,
           changes: changes as unknown as Prisma.InputJsonValue,
-          createdBy: user.id,
+          createdBy: actorId,
           metadata: { medical_change: changes.some((c) => c.medical) } as Prisma.InputJsonValue,
         },
       });
@@ -325,7 +360,7 @@ export class CarePlanService {
       'CARE_PLAN_UPDATED',
       { placement_id: placementId, plan_id: created.id, version: created.version },
     );
-    return this.getPlan(user, placementId);
+    return created;
   }
 
   // ── Daily checklist ───────────────────────────────────────────────────────

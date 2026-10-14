@@ -507,15 +507,28 @@ export class CookService {
   async saveTemplate(userId: string, body: Record<string, unknown>) {
     const customer = await this.prisma.financeCustomer.findFirst({ where: { userId }, select: { id: true } });
     if (!customer) throw new BadRequestException('No client account is linked to this login.');
-    const raw = Array.isArray(body.items) ? (body.items as Record<string, unknown>[]) : [];
+    const items = await this.parseTemplateItems(customer.id, body.items, 'items');
+    const active = body.active === undefined ? true : body.active === true || body.active === 'true';
+    await this.prisma.menuTemplate.upsert({
+      where: { clientId: customer.id },
+      update: { items: items as unknown as Prisma.InputJsonValue, active, updatedBy: userId, updatedAt: new Date() },
+      create: { clientId: customer.id, items: items as unknown as Prisma.InputJsonValue, active, updatedBy: userId },
+    });
+    await this.applyTemplateNow(customer.id);
+    return this.getTemplate(userId);
+  }
+
+  /** Weekly-pattern items, checked: [{ dow, meal, dish_ids?, dishes?, meal_time?, special_instruction?, servings? }]. */
+  async parseTemplateItems(clientId: string, raw: unknown, field: string): Promise<TemplateItem[]> {
+    const list = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
     const items: TemplateItem[] = [];
-    for (const [i, it] of raw.entries()) {
-      const f = `items[${i}]`;
+    for (const [i, it] of list.entries()) {
+      const f = `${field}[${i}]`;
       const dow = s(it.dow).toUpperCase();
       if (!DOWS.includes(dow)) throw new BadRequestException(`${f}.dow must be one of ${DOWS.join(', ')}.`);
       const meal = mealOf(it.meal);
       if (items.some((x) => x.dow === dow && x.meal === meal)) throw new BadRequestException(`${f}: ${dow} ${meal} appears twice.`);
-      const { dishes, dishIds } = await this.catalog.resolveSlotDishes(customer.id, it, f);
+      const { dishes, dishIds } = await this.catalog.resolveSlotDishes(clientId, it, f);
       if (!dishes.length) continue;
       const servings = it.servings === undefined || it.servings === '' || it.servings === null ? null : Number(it.servings) || null;
       items.push({
@@ -528,12 +541,14 @@ export class CookService {
         servings,
       });
     }
-    const active = body.active === undefined ? true : body.active === true || body.active === 'true';
-    await this.prisma.menuTemplate.upsert({
-      where: { clientId: customer.id },
-      update: { items: items as unknown as Prisma.InputJsonValue, active, updatedBy: userId, updatedAt: new Date() },
-      create: { clientId: customer.id, items: items as unknown as Prisma.InputJsonValue, active, updatedBy: userId },
-    });
+    return items;
+  }
+
+  /** Applies the client's template to every cook placement of theirs for the next two weeks, and tells the cooks. */
+  private async applyTemplateNow(clientId: string) {
+    const customer = { id: clientId };
+    const tpl = await this.prisma.menuTemplate.findUnique({ where: { clientId } });
+    const items = (tpl?.items as unknown as TemplateItem[]) ?? [];
     // Apply it now for the next two weeks, so the cook sees it straight away.
     const today = istNow().date;
     const placements = await this.prisma.placement.findMany({
@@ -548,7 +563,88 @@ export class CookService {
       await this.syncTemplate(p.id, customer.id, today, addDays(today, 13));
     }
     await this.access.notify(cooks.map((c) => c.userId), 'Weekly menu updated', `${items.length} meal${items.length === 1 ? '' : 's'} a week from the family's template.`, 'MENU_UPDATED', {});
-    return this.getTemplate(userId);
+  }
+
+  // ── Menu from a staff request (docs/REQUEST_BOOKING_FLOW_PLAN.md) ─────────
+
+  /** How many dishes fit a one-time visit of this length. */
+  static dishCap(durationMin: number): number {
+    return durationMin <= 60 ? 3 : durationMin <= 90 ? 4 : durationMin <= 120 ? 5 : 7;
+  }
+
+  /** The meal a visit starting at HH:MM is most likely for. */
+  static mealForTime(t: string): string {
+    const h = Number(t.slice(0, 2));
+    return h < 11 ? 'BREAKFAST' : h < 16 ? 'LUNCH' : h < 19 ? 'SNACKS' : 'DINNER';
+  }
+
+  /**
+   * Checks the menu sent with a cook request.
+   *   ONE_TIME: { meal?, meal_time?, dish_ids?, dishes?, special_instruction? } — at least one dish, capped by duration
+   *   REGULAR:  { items: [weekly-pattern items] } — optional
+   * clientId null = a lead: only the common dish list.
+   */
+  async parseRequestMenu(
+    clientId: string | null,
+    visitType: 'ONE_TIME' | 'REGULAR',
+    raw: unknown,
+    opts: { durationMin: number | null; startTime: string | null },
+  ): Promise<Record<string, unknown> | null> {
+    const cid = clientId ?? '00000000-0000-0000-0000-000000000000';
+    const body = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    if (visitType === 'REGULAR') {
+      if (raw === undefined || raw === null) return null;
+      const items = await this.parseTemplateItems(cid, body.items, 'menu.items');
+      return items.length ? { items } : null;
+    }
+    const { dishes, dishIds } = await this.catalog.resolveSlotDishes(cid, body, 'menu');
+    if (!dishes.length) throw new BadRequestException('menu needs at least one dish for a one-time cook visit.');
+    const cap = CookService.dishCap(opts.durationMin ?? 60);
+    if (dishes.length > cap) {
+      throw new BadRequestException(`${opts.durationMin} minutes covers up to ${cap} dishes — pick fewer dishes or a longer visit.`);
+    }
+    const mealTime = this.parseTime(body.meal_time, 'menu.meal_time') ?? opts.startTime;
+    const meal = body.meal ? mealOf(body.meal) : CookService.mealForTime(mealTime ?? '12:00');
+    return { meal, meal_time: mealTime, dishes, dish_ids: dishIds, special_instruction: s(body.special_instruction) || null };
+  }
+
+  /**
+   * After the RM places a cook from a request: a one-time visit's dishes become
+   * that day's menu slot; a regular booking's weekly menu becomes the client's
+   * template if they don't have one yet. The cook is told either way.
+   */
+  async applyRequestMenu(placementId: string, clientId: string, visitType: string, startDate: string | null, menu: Record<string, unknown> | null, actorId: string | null) {
+    if (!menu) return;
+    if (visitType === 'ONE_TIME') {
+      if (!startDate) return;
+      const meal = String(menu.meal);
+      const key = { placementId_menuDate_meal: { placementId, menuDate: dbDate(startDate), meal } };
+      const cur = await this.prisma.menuPlan.findUnique({ where: key });
+      if (cur && cur.source === 'CLIENT' && ((cur.dishes as unknown[]) ?? []).length) return;
+      const data = {
+        dishes: menu.dishes as Prisma.InputJsonValue,
+        dishIds: (menu.dish_ids ?? []) as Prisma.InputJsonValue,
+        mealTime: (menu.meal_time as string | null) ?? null,
+        specialInstruction: (menu.special_instruction as string | null) ?? null,
+        status: 'PLANNED',
+        source: 'CLIENT',
+        createdBy: actorId,
+        createdByRole: 'CLIENT',
+        updatedAt: new Date(),
+      };
+      if (cur) await this.prisma.menuPlan.update({ where: { id: cur.id }, data: { ...data, version: cur.version + 1 } });
+      else await this.prisma.menuPlan.create({ data: { ...data, placementId, menuDate: dbDate(startDate), meal } });
+      const ctx = await this.access.resolve({ id: '', role: 'ADMIN' }, placementId);
+      await this.access.notify([ctx.staff.userId], 'Menu for your visit', `${startDate} ${meal.toLowerCase()}: ${(menu.dishes as { name: string }[]).map((d) => d.name).join(', ')}`, 'MENU_UPDATED', { placement_id: placementId });
+      return;
+    }
+    const items = (menu.items as TemplateItem[]) ?? [];
+    if (!items.length) return;
+    const tpl = await this.prisma.menuTemplate.findUnique({ where: { clientId } });
+    if (!tpl) {
+      await this.prisma.menuTemplate.create({ data: { clientId, items: items as unknown as Prisma.InputJsonValue, active: true, updatedBy: actorId } });
+    }
+    await this.applyTemplateNow(clientId);
   }
 
   /** Cook suggestions are switched off: only the family sets the menu. */
