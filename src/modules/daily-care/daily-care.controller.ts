@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Get, Param, Post, Put, Query, Req, Res, UploadedFile, UseInterceptors,
+  Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Req, Res, UploadedFile, UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
@@ -13,6 +13,8 @@ import { CookService } from './cook.service';
 import { InstructionsService } from './instructions.service';
 import { CareFilesService } from './care-files.service';
 import { ClientUpdatesService } from './client-updates.service';
+import { MenuCatalogService } from './menu-catalog.service';
+import { CheckinsService } from './checkins.service';
 
 type Req = { user: AuthUser };
 const ALL = [UserRole.CLIENT, UserRole.STAFF, UserRole.RM, UserRole.BM, UserRole.ADMIN];
@@ -86,9 +88,15 @@ export class PlacementCareController {
   }
 
   @Put('menu')
-  @ApiOperation({ summary: 'Client: set menu slots. items: [{ date, meal, dishes: ["Dal", {name, notes}], special_instruction?, servings? }]; dishes: [] clears a slot.' })
+  @ApiOperation({ summary: 'Client: set menu slots. items: [{ date, meal, dish_ids?: [], dishes?: ["Dal", {name, notes}], meal_time?: "08:30", special_instruction?, servings?, photo_file_ids?: [] }]; dish_ids and dishes both empty clears a slot.' })
   saveMenu(@Req() req: Req, @Param('pid') pid: string, @Body() body: Record<string, unknown>) {
     return this.cook.saveMenu(req.user, pid, body);
+  }
+
+  @Post('menu/copy-week')
+  @ApiOperation({ summary: 'Client: "same as last week". { from_week, to_week, overwrite? } — weeks as 2026-W42 or any date in the week' })
+  copyWeek(@Req() req: Req, @Param('pid') pid: string, @Body() body: Record<string, unknown>) {
+    return this.cook.copyWeek(req.user, pid, body);
   }
 
   @Get('meals')
@@ -156,7 +164,45 @@ export class ClientCareController {
   constructor(
     private readonly cook: CookService,
     private readonly instructions: InstructionsService,
+    private readonly catalog: MenuCatalogService,
+    private readonly checkins: CheckinsService,
   ) {}
+
+  @Post('dishes')
+  @ApiOperation({ summary: '"+ Add as my dish". { name, category, diet: VEG|EGG|NON_VEG, meals? }. Same name already on the list → that dish, existing: true.' })
+  addDish(@Req() req: Req, @Body() body: Record<string, unknown>) {
+    return this.catalog.addOwn(req.user.id, body);
+  }
+
+  @Get('dishes')
+  @ApiOperation({ summary: 'My own dishes' })
+  myDishes(@Req() req: Req) {
+    return this.catalog.listOwn(req.user.id);
+  }
+
+  @Delete('dishes/:id')
+  @ApiOperation({ summary: 'Remove one of my dishes from the dropdown (menus that use it keep the name)' })
+  removeDish(@Req() req: Req, @Param('id') id: string) {
+    return this.catalog.removeOwn(req.user.id, id);
+  }
+
+  @Get('menu-template')
+  @ApiOperation({ summary: 'The weekly menu template' })
+  getTemplate(@Req() req: Req) {
+    return this.cook.getTemplate(req.user.id);
+  }
+
+  @Put('menu-template')
+  @ApiOperation({ summary: 'Weekly template: { items: [{ dow: MON..SUN, meal, dish_ids?, dishes?, meal_time?, special_instruction?, servings? }], active? }. Fills empty slots from today on; never overwrites a slot you set.' })
+  saveTemplate(@Req() req: Req, @Body() body: Record<string, unknown>) {
+    return this.cook.saveTemplate(req.user.id, body);
+  }
+
+  @Put('home-location')
+  @ApiOperation({ summary: 'Set my home on the map: { lat, lng }. Used to check staff check-ins are at the house.' })
+  homeLocation(@Req() req: Req, @Body() body: Record<string, unknown>) {
+    return this.checkins.setOwnHome(req.user.id, body);
+  }
 
   @Get('food-profile')
   @ApiOperation({ summary: "This household's food profile + suggestions from repeated meal feedback" })
@@ -166,7 +212,7 @@ export class ClientCareController {
 
   @Put('food-profile')
   @ApiOperation({ summary: 'Write the food profile. Every cook working here is notified with what changed.' })
-  @ApiBody({ schema: { type: 'object', example: { diet_type: 'VEG', allergies: ['Peanuts'], spice_level: 2, salt: 'LOW', oil: 'LOW', health_conditions: ['DIABETIC'], cuisines: ['North Indian'], dislikes: 'Karela', family_size: 4, notes: '' } } })
+  @ApiBody({ schema: { type: 'object', example: { diet_type: 'VEG', allergies: ['Peanuts'], spice_level: 2, salt: 'LOW', oil: 'LOW', health_conditions: ['DIABETIC'], cuisines: ['North Indian'], dislikes: 'Karela', family_size: 4, notes: '', meal_times: { BREAKFAST: '08:30', LUNCH: '13:00', DINNER: '20:30' } } } })
   saveProfile(@Req() req: Req, @Body() body: Record<string, unknown>) {
     return this.cook.saveProfile(req.user.id, body);
   }
@@ -240,9 +286,9 @@ export class StaffCareController {
   }
 
   @Post('cook/menu-suggestions')
-  @ApiOperation({ summary: 'Cook: suggest menu items. { placement_id, items: [{ date, meal, dishes[], notes? }] }' })
-  suggest(@Req() req: Req, @Body() body: Record<string, unknown>) {
-    return this.cook.suggestMenu(req.user, body);
+  @ApiOperation({ summary: 'Switched off — only the family sets the menu (always 403).' })
+  suggest() {
+    return this.cook.suggestMenu();
   }
 
   @Post('cook/meals')
@@ -323,5 +369,49 @@ export class RmCareController {
   @ApiOperation({ summary: '{ decision: UPHELD (staff was right) | OVERTURNED (part of the job), note }' })
   decide(@Req() req: Req, @Param('id') id: string, @Body() body: Record<string, unknown>) {
     return this.instructions.decide(req.user, id, body);
+  }
+}
+
+/** The dish dropdown — search the list (and, for a client, their own dishes). */
+@ApiTags('Daily Care')
+@ApiBearerAuth()
+@Roles(...ALL)
+@Controller({ path: 'care/dishes', version: '1' })
+export class DishesController {
+  constructor(private readonly catalog: MenuCatalogService) {}
+
+  @Get()
+  @ApiOperation({ summary: 'Search dishes. A client gets only what their food-profile diet allows, their regions and the asked meal first. can_add=true → offer "+ Add as my dish".' })
+  @ApiQuery({ name: 'q', required: false, description: 'Part of the name' })
+  @ApiQuery({ name: 'meal', required: false, enum: ['BREAKFAST', 'LUNCH', 'SNACKS', 'DINNER'] })
+  @ApiQuery({ name: 'category', required: false })
+  @ApiQuery({ name: 'diet', required: false, enum: ['VEG', 'EGG', 'NON_VEG'] })
+  @ApiQuery({ name: 'region', required: false })
+  @ApiQuery({ name: 'limit', required: false, description: 'Default 50, max 100' })
+  search(@Req() req: Req, @Query() q: { q?: string; meal?: string; category?: string; diet?: string; region?: string; limit?: string }) {
+    return this.catalog.search(req.user, q);
+  }
+}
+
+/** Where staff checked in/out, on a map. */
+@ApiTags('RM Operations', 'Daily Care')
+@ApiBearerAuth()
+@Roles(UserRole.RM, UserRole.BM, UserRole.ADMIN)
+@Controller({ path: 'rm', version: '1' })
+export class RmCheckinsController {
+  constructor(private readonly checkins: CheckinsService) {}
+
+  @Get('checkins')
+  @ApiOperation({ summary: 'Check-ins/outs of one day (IST, default today) with distance from the client home; far = over 300 m' })
+  @ApiQuery({ name: 'date', required: false, example: '2026-10-14' })
+  @ApiQuery({ name: 'branch_id', required: false, description: 'Admin only' })
+  list(@Req() req: Req, @Query() q: { date?: string; branch_id?: string }) {
+    return this.checkins.list(req.user, q);
+  }
+
+  @Patch('clients/:id/home-location')
+  @ApiOperation({ summary: 'Set the home of a client on the map: { lat, lng }' })
+  setHome(@Req() req: Req, @Param('id') id: string, @Body() body: Record<string, unknown>) {
+    return this.checkins.setClientHome(req.user, id, body);
   }
 }

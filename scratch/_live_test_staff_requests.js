@@ -96,8 +96,12 @@ const UC_BODY = {
   start_date: inDays(3),
   language: 'Hindi',
   gender_pref: 'ANY',
+  // Budget is no longer asked for; sent anyway, it must be ignored.
   budget_min: 15000,
   budget_max: 20000,
+  address: '22 Green Park, New Delhi',
+  lat: 28.5592,
+  lng: 77.2066,
   requirements: { patient_age: 78, mobility: 'ASSISTED', conditions: ['diabetes'], night_care: true },
   notes: 'Father needs help walking',
 };
@@ -161,9 +165,13 @@ async function main() {
     await bad('MAID refused (paused series)', { ...UC_BODY, series: 'MAID' }, /not being taken on/i);
     await bad('UC asked for injections → told to ask for SC', { ...UC_BODY, requirements: { ...UC_BODY.requirements, medical_needs: ['INJECTION'] } }, /Skilled Caretaker/i);
     await bad('care request without mobility refused', { ...UC_BODY, requirements: { patient_age: 70 } }, /mobility/i);
-    await bad('cook request without diet_type refused', { series: 'CK', requirements: { family_size: 4, meals_per_day: ['LUNCH'] } }, /diet_type/i);
+    await bad('cook request without diet_type refused', { series: 'CK', address: '22 Green Park, New Delhi', requirements: { family_size: 4, meals_per_day: ['LUNCH'] } }, /diet_type/i);
     await bad('start_date in the past refused', { ...UC_BODY, start_date: '2020-01-01' }, /past/i);
-    await bad('budget_min > budget_max refused', { ...UC_BODY, budget_min: 30000, budget_max: 10000 }, /budget/i);
+    const noAddr = { ...UC_BODY }; delete noAddr.address;
+    await bad('address is required', noAddr, /address is required/i);
+    await bad('lat without lng refused', { ...UC_BODY, lng: undefined }, /lat and lng together/i);
+    await bad('start_time without start_date refused', { ...UC_BODY, start_date: undefined, start_time: '09:00' }, /start_date/i);
+    await bad('start_time not HH:MM refused', { ...UC_BODY, start_time: '9am' }, /HH:MM/i);
 
     // ── create ───────────────────────────────────────────────────────────────
     console.log('\nClient raises a request');
@@ -178,20 +186,29 @@ async function main() {
     check('client gets the client view (no client_id, branch, SLA)', sr.client_id === undefined && sr.branch_id === undefined && sr.sla_breached === undefined, Object.keys(sr));
     check('…but does see who their RM is', !!sr.rm?.name && !!sr.rm?.phone, sr.rm);
     check('series stored as UNSKILLED_CARE, shown as UC', sr.series_db === 'UNSKILLED_CARE' && sr.series === 'UC');
-    check('address defaulted from the client account', sr.address === '1 Test Lane, New Delhi', sr.address);
+    check('address is the one the client gave (not the account default)', sr.address === '22 Green Park, New Delhi', sr.address);
+    check('budget not stored or returned', sr.budget_min === undefined && sr.budget_max === undefined, Object.keys(sr));
+    const { rows: [srRow] } = await db.query(`SELECT budget_min, start_time, lat::float, lng::float FROM staff_requests WHERE id = $1`, [sr.id]);
+    check('budget column left empty', srRow.budget_min === null, srRow);
+    check('pin stored', Math.abs(srRow.lat - 28.5592) < 1e-6 && Math.abs(srRow.lng - 77.2066) < 1e-6, srRow);
+    const { rows: [home] } = await db.query(`SELECT lat::float, lng::float FROM finance_customers WHERE id = $1`, [cust.customerId]);
+    check("first pin became the client's home", Math.abs(home.lat - 28.5592) < 1e-6, home);
+    const timed = await req('POST', '/client/staff-requests', { token: clientToken, body: { ...UC_BODY, start_date: inDays(2), start_time: '09:30' } });
+    check('start date + time accepted and returned', ok2xx(timed) && timed.body?.start_time === '09:30' && timed.body?.start_date === inDays(2), { status: timed.status, msg: msg(timed), t: timed.body?.start_time });
+    if (timed.body?.id) requestIds.push(timed.body.id);
     check('requirements normalised (conditions upper-cased)', JSON.stringify(sr.requirements?.conditions) === '["DIABETES"]', sr.requirements);
     const { rows: rmNotes } = await db.query(`SELECT template FROM notifications WHERE user_id = $1 AND payload->>'request_id' = $2`, [rm.id, sr.id]);
     check('RM got an in-app notification', rmNotes.some((n) => n.template === 'STAFF_REQUEST_ASSIGNED'), rmNotes);
 
     const cook = await req('POST', '/client/staff-requests', {
       token: clientToken,
-      body: { series: 'CK', requirements: { diet_type: 'veg', family_size: 4, meals_per_day: ['lunch', 'dinner'], health_conditions: ['diabetic'] } },
+      body: { series: 'CK', address: '22 Green Park, New Delhi', requirements: { diet_type: 'veg', family_size: 4, meals_per_day: ['lunch', 'dinner'], health_conditions: ['diabetic'] } },
     });
     check('cook request accepted', ok2xx(cook) && cook.body?.series === 'CK', { status: cook.status, msg: msg(cook) });
     if (cook.body?.id) requestIds.push(cook.body.id);
 
     const mine = await req('GET', '/client/staff-requests', { token: clientToken });
-    check('client lists their 2 requests', mine.body?.total === 2, mine.body?.total);
+    check('client lists their 3 requests', mine.body?.total === 3, mine.body?.total);
     const theirs = await req('GET', `/client/staff-requests/${sr.id}`, { token: otherToken });
     check("another client can't open it (404)", theirs.status === 404, theirs.status);
 

@@ -25,6 +25,7 @@
     "render:start": "node scratch/render_pre_migrate.js && npx prisma db push --accept-data-loss && node scratch/apply_security_triggers.js && node scratch/seed_users_now.js && node dist/main",
     "test:hr": "node scratch/_live_test_hr_pipeline.js && node -e \"console.log('cooling down for the auth rate limit (5 logins/60s)...');setTimeout(()=>{},65000)\" && node scratch/_live_test_attendance_projection.js && node -e \"console.log('cooling down for the auth rate limit (5 logins/60s)...');setTimeout(()=>{},65000)\" && node scratch/_live_test_employee_profile.js && node -e \"console.log('cooling down for the auth rate limit (5 logins/60s)...');setTimeout(()=>{},65000)\" && node scratch/_live_test_staff_checkin_visibility.js",
     "test:care": "node scratch/_live_test_daily_care.js && npx nest build && node scratch/_live_test_care_crons.js",
+    "test:menu": "node scratch/_live_test_menu_checkins.js",
     "test:requests": "node scratch/_live_test_staff_requests.js",
     "test:series": "node scratch/_live_test_series_phase_a.js",
     "test:rm": "node scratch/_live_test_rm_pipeline.js && node scratch/_live_test_rm_placement.js && node scratch/_live_test_rm_holds.js && node scratch/_live_test_f2_placement_type.js && node scratch/_live_test_rm_hold_deploy_gate.js && node scratch/_live_test_rm_hold_video_cert.js",

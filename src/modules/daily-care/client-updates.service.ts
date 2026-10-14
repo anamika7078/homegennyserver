@@ -92,7 +92,7 @@ export class ClientUpdatesService {
           const dto = this.cook.menuDto(m);
           const dishes = ((m.dishes as { name: string }[]) ?? []).map((d) => d.name).join(', ');
           const what =
-            m.status === 'APPROVED' ? `approved: ${dishes}` : m.status === 'REJECTED' ? `declined — ${m.rejectReason ?? ''}` : dishes;
+            m.status === 'APPROVED' ? `approved: ${dishes}` : m.status === 'REJECTED' ? `declined — ${m.rejectReason ?? ''}` : dishes || 'cleared';
           items.push({
             ...base, type: 'MENU', id: m.id, version: m.version, at: m.updatedAt,
             title: `${dateStr(m.menuDate)} ${m.meal.toLowerCase()}: ${what}`.slice(0, 200),

@@ -1297,6 +1297,9 @@ model FinanceCustomer {
   city                            String?                           @db.VarChar(100)
   state                           String?                           @db.VarChar(100)
   pincode                         String?                           @db.VarChar(20)
+  /// The client's home, for the check-in distance on the RM map
+  lat                             Decimal?                          @db.Decimal(10, 7)
+  lng                             Decimal?                          @db.Decimal(10, 7)
   panCard                         String                            @map("pan_card") @db.VarChar(20)
   gstn                            String?                           @db.VarChar(20)
   billNoPrefix                    String                            @map("bill_no_prefix") @db.VarChar(30)
@@ -2275,6 +2278,10 @@ model StaffRequest {
   placementType        String                  @default("PERMANENT") @map("placement_type") @db.VarChar(20)
   shiftHours           Decimal                 @default(8) @map("shift_hours") @db.Decimal(4, 1)
   startDate            DateTime?               @map("start_date") @db.Date
+  /// HH:MM, IST
+  startTime            String?                 @map("start_time") @db.VarChar(5)
+  lat                  Decimal?                @db.Decimal(10, 7)
+  lng                  Decimal?                @db.Decimal(10, 7)
   address              String?
   language             String?                 @db.VarChar(50)
   genderPref           String                  @default("ANY") @map("gender_pref") @db.VarChar(10)
@@ -2430,6 +2437,8 @@ model FoodProfile {
   dislikes         String?
   familySize       Int?     @map("family_size")
   notes            String?
+  /// Default time per meal, e.g. { "BREAKFAST": "08:30", "LUNCH": "13:00" }
+  mealTimes        Json     @default("{}") @map("meal_times")
   /// The version before this one, for the staff app to show what changed.
   previous         Json?
   updatedBy        String?  @map("updated_by") @db.Uuid
@@ -2453,6 +2462,14 @@ model MenuPlan {
   version            Int       @default(1)
   previous           Json?
   rejectReason       String?   @map("reject_reason")
+  /// HH:MM, IST — when this meal should be ready
+  mealTime           String?   @map("meal_time") @db.VarChar(5)
+  /// Client photos for the cook (care_files ids)
+  photoFileIds       Json      @default("[]") @map("photo_file_ids")
+  /// dishes.id of each dish picked from the list (dishes JSON keeps the names)
+  dishIds            Json      @default("[]") @map("dish_ids")
+  /// CLIENT (set by the client) | TEMPLATE (filled from the weekly template)
+  source             String    @default("CLIENT") @db.VarChar(20)
   createdBy          String?   @map("created_by") @db.Uuid
   createdByRole      String?   @map("created_by_role") @db.VarChar(20)
   createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -2569,4 +2586,45 @@ model CareFile {
 
   @@index([placementId], map: "idx_care_files_placement")
   @@map("care_files")
+}
+
+// ── Client menu: dish list + weekly template ────────────────────────────────
+// docs/MENU_TRACKING_REQUEST_CHANGES_PLAN.md; tables made by
+// scratch/_menu_request_changes_migration.js, common dishes by scratch/_dishes_seed.js.
+
+/// A dish for the menu dropdown. client_id NULL = the common list; set = a
+/// client's own dish, which only that client sees.
+model Dish {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  clientId  String?  @map("client_id") @db.Uuid
+  name      String   @db.VarChar(120)
+  /// lower-case, single-spaced name — what "the same dish" is checked on
+  nameKey   String   @map("name_key") @db.VarChar(120)
+  /// BREAKFAST | DAL | SABZI | ROTI_PARATHA | RICE | SNACK | SALAD | SWEET | DRINK | OTHER
+  category  String   @db.VarChar(20)
+  /// VEG | EGG | NON_VEG
+  diet      String   @db.VarChar(10)
+  jainOk    Boolean  @default(false) @map("jain_ok")
+  region    String   @default("OTHER") @db.VarChar(20)
+  meals     String[] @default([])
+  active    Boolean  @default(true)
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([nameKey], map: "idx_dishes_name_key")
+  @@index([clientId], map: "idx_dishes_client")
+  @@map("dishes")
+}
+
+/// One weekly menu pattern per client; fills the empty slots of upcoming weeks.
+model MenuTemplate {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  clientId  String   @unique(map: "menu_templates_client_id_key") @map("client_id") @db.Uuid
+  items     Json     @default("[]")
+  active    Boolean  @default(true)
+  updatedBy String?  @map("updated_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("menu_templates")
 }

@@ -7,17 +7,18 @@ import { StaffRequestsService } from './staff-requests.service';
 const REQUEST_BODY = {
   schema: {
     type: 'object',
-    required: ['series', 'requirements'],
+    required: ['series', 'address', 'requirements'],
     properties: {
       series: { type: 'string', enum: ['UC', 'SC', 'CK'], description: 'Active series only — see GET /meta/series' },
       placement_type: { type: 'string', enum: ['PERMANENT', 'TEMPORARY'], default: 'PERMANENT' },
       shift_hours: { type: 'number', example: 8 },
       start_date: { type: 'string', example: '2026-10-20', description: 'YYYY-MM-DD, not in the past' },
-      address: { type: 'string', description: "Defaults to the client's address" },
+      start_time: { type: 'string', example: '09:00', description: 'HH:MM IST; needs start_date' },
+      address: { type: 'string', description: 'Required — where the staff will work' },
+      lat: { type: 'number', example: 28.5355, description: 'Map pin (send with lng)' },
+      lng: { type: 'number', example: 77.391 },
       language: { type: 'string', example: 'Hindi' },
       gender_pref: { type: 'string', enum: ['ANY', 'FEMALE', 'MALE'], default: 'ANY' },
-      budget_min: { type: 'number' },
-      budget_max: { type: 'number' },
       headcount: { type: 'integer', default: 1, minimum: 1, maximum: 20 },
       notes: { type: 'string' },
       requirements: {

@@ -313,11 +313,15 @@ async function main() {
     check('cook told the menu changed', (await notes(ck.userId, 'MENU_UPDATED')).length === 1);
     const pastMenu = await req('PUT', `/care/placements/${pCK}/menu`, { token: clientT, body: { items: [{ date: addDays(today(), -1), meal: 'LUNCH', dishes: ['x'] }] } });
     check('menu for yesterday refused', pastMenu.status === 400, pastMenu.status);
-    const sugClash = await req('POST', '/staff/care/cook/menu-suggestions', { token: ckT, body: { placement_id: pCK, items: [{ date: today(), meal: 'DINNER', dishes: ['Chole'] }] } });
-    check("cook can't overwrite the family's own dinner", sugClash.status === 400, msg(sugClash));
+    // Only the family sets the menu now (2026-10-14): the cook's suggestion route is off.
     const sug = await req('POST', '/staff/care/cook/menu-suggestions', { token: ckT, body: { placement_id: pCK, items: [{ date: addDays(today(), 1), meal: 'BREAKFAST', dishes: ['Poha'] }] } });
-    const bf = sug.body?.items?.find((i) => i.meal === 'BREAKFAST');
-    check('cook suggests breakfast → SUGGESTED', bf?.status === 'SUGGESTED' && bf?.suggested_by_cook === true, msg(sug));
+    check('cook menu suggestions are switched off (403)', sug.status === 403, { status: sug.status, msg: msg(sug) });
+    // A suggestion made before the switch can still be answered.
+    const { rows: [bf] } = await db.query(
+      `INSERT INTO menu_plans (placement_id, menu_date, meal, dishes, status, created_by_role)
+       VALUES ($1, $2, 'BREAKFAST', '[{"name":"Poha"}]', 'SUGGESTED', 'STAFF') RETURNING id`,
+      [pCK, addDays(today(), 1)],
+    );
     const rj0 = await req('POST', `/client/menu/${bf?.id}/reject`, { token: clientT, body: {} });
     check('decline needs a reason', rj0.status === 400, rj0.status);
     const ap = await req('POST', `/client/menu/${bf?.id}/approve`, { token: clientT });

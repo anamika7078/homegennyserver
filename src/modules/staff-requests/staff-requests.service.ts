@@ -96,13 +96,30 @@ export class StaffRequestsService {
       throw new BadRequestException('start_date cannot be in the past.');
     }
 
+    // Start time is optional; when the start is today it can't already have passed.
+    const startTime = str(body.start_time);
+    if (startTime !== undefined) {
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)) throw new BadRequestException('start_time must be HH:MM (24-hour).');
+      if (!startDate) throw new BadRequestException('Give start_date along with start_time.');
+      const nowIst = new Date(Date.now() + 330 * 60_000).toISOString();
+      if (startDate.toISOString().slice(0, 10) === todayIst() && startTime < nowIst.slice(11, 16)) {
+        throw new BadRequestException('start_time has already passed today.');
+      }
+    }
+
     const genderPref = (str(body.gender_pref) ?? 'ANY').toUpperCase();
     if (!GENDERS.includes(genderPref)) throw new BadRequestException(`gender_pref must be one of ${GENDERS.join(', ')}.`);
 
-    const budgetMin = num(body.budget_min, 'budget_min');
-    const budgetMax = num(body.budget_max, 'budget_max');
-    if (budgetMin !== undefined && budgetMax !== undefined && budgetMin > budgetMax) {
-      throw new BadRequestException('budget_min cannot be more than budget_max.');
+    // Address is required on every request — the client confirms where the staff
+    // will work instead of it being assumed from the account. Budget is no longer
+    // asked for (budget_min/max are ignored if sent).
+    const address = str(body.address);
+    if (!address || address.length < 5) throw new BadRequestException('address is required — where will the staff work?');
+    const lat = num(body.lat, 'lat');
+    const lng = num(body.lng, 'lng');
+    if ((lat === undefined) !== (lng === undefined)) throw new BadRequestException('Send lat and lng together.');
+    if (lat !== undefined && (lat < -90 || lat > 90 || lng! < -180 || lng! > 180)) {
+      throw new BadRequestException('lat/lng are not a real location.');
     }
 
     const headcount = num(body.headcount, 'headcount') ?? 1;
@@ -115,11 +132,12 @@ export class StaffRequestsService {
       placementType,
       shiftHours,
       startDate,
-      address: str(body.address),
+      startTime,
+      address,
+      lat,
+      lng,
       language: str(body.language),
       genderPref,
-      budgetMin,
-      budgetMax,
       headcount,
       requirements: this.parseRequirements(series, (body.requirements ?? {}) as Record<string, unknown>),
       notes: str(body.notes),
@@ -301,13 +319,20 @@ export class StaffRequestsService {
     const created = await this.insert(
       {
         ...fields,
-        address: fields.address ?? customer.address,
         clientId: customer.id,
         branchId,
         source: 'CLIENT_APP',
       },
       userId,
     );
+    // The first pin a client drops becomes their home location (used by the
+    // RM's check-in map); a home they or the RM already set is left alone.
+    if (fields.lat !== undefined && fields.lng !== undefined) {
+      await this.prisma.financeCustomer.updateMany({
+        where: { id: customer.id, lat: null },
+        data: { lat: fields.lat, lng: fields.lng },
+      });
+    }
     // The client gets the client view — never the RM's (staff phones, branch, SLA).
     return this.getForClient(userId, created.id);
   }
@@ -337,7 +362,6 @@ export class StaffRequestsService {
     return this.insert(
       {
         ...fields,
-        address: fields.address ?? customer?.address,
         clientId: customer?.id ?? null,
         leadName: customer ? undefined : leadName,
         leadPhone: customer ? undefined : leadPhone,
@@ -383,11 +407,12 @@ export class StaffRequestsService {
           placementType: data.placementType,
           shiftHours: data.shiftHours,
           startDate: data.startDate,
+          startTime: data.startTime,
           address: data.address,
+          lat: data.lat,
+          lng: data.lng,
           language: data.language,
           genderPref: data.genderPref,
-          budgetMin: data.budgetMin,
-          budgetMax: data.budgetMax,
           headcount: data.headcount,
           requirements: data.requirements as Prisma.InputJsonValue,
           notes: data.notes,
@@ -427,20 +452,21 @@ export class StaffRequestsService {
       rr.staff_id ? this.prisma.staffApplicant.findUnique({ where: { id: rr.staff_id }, select: { series: true } }) : null,
       rr.placement_id ? this.prisma.placement.findUnique({ where: { id: rr.placement_id }, select: { placementType: true, shiftHours: true } }) : null,
     ]);
+    const home = await this.prisma.financeCustomer.findUnique({ where: { id: rr.client_id }, select: { address: true } });
     const merged: Record<string, unknown> = {
       series: staff?.series,
+      // Same house as the staff being replaced, unless the RM says otherwise.
+      address: home?.address,
       placement_type: placement?.placementType,
       shift_hours: placement?.shiftHours?.toString(),
       notes: `Replacement: ${rr.reason}`,
       ...body,
     };
     const fields = this.parseRequestBody(merged);
-    const customer = await this.prisma.financeCustomer.findUnique({ where: { id: rr.client_id }, select: { address: true } });
 
     const created = await this.insert(
       {
         ...fields,
-        address: fields.address ?? customer?.address,
         clientId: rr.client_id,
         branchId: rr.branch_id ?? user.branchId ?? null,
         source: 'REPLACEMENT',
@@ -615,11 +641,12 @@ export class StaffRequestsService {
       placement_type: r.placementType,
       shift_hours: Number(r.shiftHours),
       start_date: r.startDate ? r.startDate.toISOString().slice(0, 10) : null,
+      start_time: r.startTime,
       address: r.address,
+      lat: r.lat !== null ? Number(r.lat) : null,
+      lng: r.lng !== null ? Number(r.lng) : null,
       language: r.language,
       gender_pref: r.genderPref,
-      budget_min: r.budgetMin !== null ? Number(r.budgetMin) : null,
-      budget_max: r.budgetMax !== null ? Number(r.budgetMax) : null,
       headcount: r.headcount,
       requirements: r.requirements,
       notes: r.notes,

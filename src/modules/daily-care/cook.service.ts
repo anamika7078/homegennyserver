@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { FoodProfile, MealLog, MenuPlan, Prisma, StaffSeries } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuthUser } from '../../common/guards/branch-scope.util';
@@ -15,6 +15,18 @@ import {
   stableJson,
 } from './care-access.service';
 import { CareFilesService } from './care-files.service';
+import { MenuCatalogService, dietsAllowed } from './menu-catalog.service';
+
+const DOWS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+export interface TemplateItem {
+  dow: string;
+  meal: string;
+  dishes: { name: string; notes?: string; dish_id?: string; diet?: string; jain_ok?: boolean; category?: string }[];
+  dish_ids: string[];
+  meal_time: string | null;
+  special_instruction: string | null;
+  servings: number | null;
+}
 
 /**
  * Phase D — the household's food profile, the week's menu, what the cook made,
@@ -80,6 +92,7 @@ export class CookService {
     private readonly prisma: PrismaService,
     private readonly access: CareAccessService,
     private readonly files: CareFilesService,
+    private readonly catalog: MenuCatalogService,
   ) {}
 
   // ── Food profile ──────────────────────────────────────────────────────────
@@ -97,6 +110,7 @@ export class CookService {
       dislikes: p.dislikes,
       family_size: p.familySize,
       notes: p.notes,
+      meal_times: p.mealTimes,
     };
   }
 
@@ -113,8 +127,12 @@ export class CookService {
     const label: Record<string, string> = {
       diet_type: 'Diet', allergies: 'Allergies', spice_level: 'Spice level', salt: 'Salt', oil: 'Oil',
       health_conditions: 'Health', cuisines: 'Cuisines', dislikes: 'Dislikes', family_size: 'People', notes: 'Notes',
+      meal_times: 'Meal times',
     };
-    const show = (v: unknown) => (Array.isArray(v) ? (v.length ? v.join(', ') : '—') : v === null || v === undefined || v === '' ? '—' : String(v));
+    const show = (v: unknown) =>
+      Array.isArray(v) ? (v.length ? v.join(', ') : '—')
+      : v && typeof v === 'object' ? Object.entries(v as Record<string, string>).map(([k, t]) => `${k.toLowerCase()} ${t}`).join(', ') || '—'
+      : v === null || v === undefined || v === '' ? '—' : String(v);
     return Object.keys(label)
       .filter((k) => stableJson(prev[k] ?? null) !== stableJson((cur as Record<string, unknown>)[k] ?? null))
       .map((k) => `${label[k]}: ${show(prev[k])} → ${show((cur as Record<string, unknown>)[k])}`);
@@ -141,7 +159,17 @@ export class CookService {
     const family = body.family_size === undefined || body.family_size === '' || body.family_size === null ? null : Number(body.family_size);
     if (family !== null && (!Number.isInteger(family) || family < 1 || family > 50)) throw new BadRequestException('family_size must be a whole number.');
 
+    const mealTimes: Record<string, string> = {};
+    const mt = (body.meal_times ?? {}) as Record<string, unknown>;
+    if (typeof mt !== 'object' || Array.isArray(mt)) throw new BadRequestException('meal_times must be { BREAKFAST: "08:30", ... }.');
+    for (const [k, v] of Object.entries(mt)) {
+      const meal = k.toUpperCase();
+      if (!MEALS.includes(meal)) throw new BadRequestException(`meal_times: ${k} is not one of ${MEALS.join(', ')}.`);
+      const t = this.parseTime(v, `meal_times.${meal}`);
+      if (t) mealTimes[meal] = t;
+    }
     const data = {
+      mealTimes: mealTimes as Prisma.InputJsonValue,
       dietType: diet,
       allergies: textList(body.allergies) as Prisma.InputJsonValue,
       spiceLevel: spice,
@@ -193,52 +221,128 @@ export class CookService {
   }
 
   // ── Menu ──────────────────────────────────────────────────────────────────
+  // Only the client writes the menu (docs/MENU_TRACKING_REQUEST_CHANGES_PLAN.md):
+  // dishes picked from the list or typed, a time per meal, a note and photos for
+  // the cook, and a weekly template that fills the slots they leave empty.
 
-  private dishList(v: unknown, field: string): { name: string; notes?: string }[] {
-    const arr = Array.isArray(v) ? v : [];
-    const out = arr
-      .map((d) => (typeof d === 'string' ? { name: d.trim() } : { name: s((d as Record<string, unknown>).name), notes: s((d as Record<string, unknown>).notes) || undefined }))
-      .filter((d) => d.name);
-    if (!out.length) throw new BadRequestException(`${field} needs at least one dish.`);
+  /** Warnings for one slot: a dish against the profile's diet, or against a health condition. */
+  private slotWarnings(dishes: { name: string; diet?: string; jain_ok?: boolean }[], profile: FoodProfile | null): string[] {
+    const out: string[] = [];
+    const diet = (profile?.dietType ?? '').toUpperCase();
+    const { diets, jainOnly } = dietsAllowed(diet);
+    for (const d of dishes) {
+      if (d.diet && !diets.includes(d.diet)) out.push(`${d.name} is ${d.diet === 'EGG' ? 'egg' : 'non-veg'} — the profile says ${diet.toLowerCase()}`);
+      else if (jainOnly && d.diet && d.jain_ok === false) out.push(`${d.name} may not be Jain`);
+    }
+    const names = dishes.map((d) => d.name.toLowerCase()).join(' ');
+    for (const hc of (profile?.healthConditions as string[]) ?? []) {
+      const hits = (HEALTH_CLASHES[hc] ?? []).filter((w) => names.includes(w));
+      if (hits.length) out.push(`${hc.replace(/_/g, ' ').toLowerCase()}: ${hits.join(', ')}`);
+    }
     return out;
   }
 
-  menuDto(m: MenuPlan, healthConditions: string[] = []) {
-    const names = ((m.dishes as { name: string }[]) ?? []).map((d) => d.name.toLowerCase()).join(' ');
-    const warnings: string[] = [];
-    for (const hc of healthConditions) {
-      const hits = (HEALTH_CLASHES[hc] ?? []).filter((w) => names.includes(w));
-      if (hits.length) warnings.push(`${hc.replace(/_/g, ' ').toLowerCase()}: ${hits.join(', ')}`);
-    }
-    const prev = m.previous as { dishes?: { name: string }[]; special_instruction?: string } | null;
+  menuDto(m: MenuPlan, profile: FoodProfile | null = null) {
+    const dishes = (m.dishes as { name: string; diet?: string; jain_ok?: boolean }[]) ?? [];
+    const prev = m.previous as { dishes?: { name: string }[]; special_instruction?: string; meal_time?: string } | null;
     const changes: string[] = [];
     if (prev) {
       const a = (prev.dishes ?? []).map((d) => d.name).join(', ');
-      const b = ((m.dishes as { name: string }[]) ?? []).map((d) => d.name).join(', ');
-      if (a !== b) changes.push(`${a || '—'} → ${b}`);
-      if ((prev.special_instruction ?? '') !== (m.specialInstruction ?? '')) changes.push(`Instruction: ${m.specialInstruction ?? '—'}`);
+      const b = dishes.map((d) => d.name).join(', ');
+      if (a !== b) changes.push(`${a || '—'} → ${b || '—'}`);
+      if ((prev.special_instruction ?? '') !== (m.specialInstruction ?? '')) changes.push(`Note: ${m.specialInstruction ?? '—'}`);
+      if ((prev.meal_time ?? '') !== (m.mealTime ?? '')) changes.push(`Time: ${prev.meal_time ?? '—'} → ${m.mealTime ?? '—'}`);
     }
+    const defaultTime = ((profile?.mealTimes ?? {}) as Record<string, string>)[m.meal] ?? null;
     return {
       id: m.id,
       date: dateStr(m.menuDate),
       meal: m.meal,
-      dishes: m.dishes,
+      // The time this slot should be ready: its own, else the profile default.
+      meal_time: m.mealTime ?? defaultTime,
+      meal_time_is_default: !m.mealTime && !!defaultTime,
+      dishes,
+      dish_ids: m.dishIds,
       special_instruction: m.specialInstruction,
       servings: m.servings,
+      photo_file_ids: m.photoFileIds,
+      source: m.source,
       status: m.status,
       version: m.version,
       reject_reason: m.rejectReason,
       suggested_by_cook: m.createdByRole === 'STAFF',
       changes,
-      health_warnings: warnings,
+      health_warnings: this.slotWarnings(dishes, profile),
       updated_at: m.updatedAt,
     };
+  }
+
+  private parseTime(v: unknown, field: string): string | null {
+    const t = s(v);
+    if (!t) return null;
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(t)) throw new BadRequestException(`${field} must be HH:MM (24-hour).`);
+    return t;
+  }
+
+  /**
+   * Brings the TEMPLATE rows of a date range in line with the client's weekly
+   * template: fills empty slots, updates stale template rows, removes template
+   * rows the template no longer has. Never touches a slot the client set (or
+   * cleared) by hand. Only today and later.
+   */
+  async syncTemplate(placementId: string, clientId: string, from: string, to: string) {
+    const today = istNow().date;
+    const start = from < today ? today : from;
+    if (start > to) return;
+    const tpl = await this.prisma.menuTemplate.findUnique({ where: { clientId } });
+    const items = tpl?.active ? ((tpl.items as unknown as TemplateItem[]) ?? []) : [];
+    const rows = await this.prisma.menuPlan.findMany({ where: { placementId, menuDate: { gte: dbDate(start), lte: dbDate(to) } } });
+    for (let d = start; d <= to; d = addDays(d, 1)) {
+      const dow = DOWS[(new Date(`${d}T00:00:00Z`).getUTCDay() + 6) % 7];
+      for (const meal of MEALS) {
+        const want = items.find((t) => t.dow === dow && t.meal === meal);
+        const row = rows.find((r) => dateStr(r.menuDate) === d && r.meal === meal);
+        if (row && row.source !== 'TEMPLATE') continue;
+        if (!want) {
+          if (row) await this.prisma.menuPlan.delete({ where: { id: row.id } });
+          continue;
+        }
+        const data = {
+          dishes: want.dishes as unknown as Prisma.InputJsonValue,
+          dishIds: want.dish_ids as unknown as Prisma.InputJsonValue,
+          mealTime: want.meal_time ?? null,
+          specialInstruction: want.special_instruction ?? null,
+          servings: want.servings ?? null,
+        };
+        if (!row) {
+          await this.prisma.menuPlan.create({
+            data: { ...data, placementId, menuDate: dbDate(d), meal, status: 'PLANNED', source: 'TEMPLATE', createdBy: tpl?.updatedBy, createdByRole: 'CLIENT' },
+          });
+        } else if (
+          stableJson(row.dishes) !== stableJson(want.dishes) ||
+          (row.mealTime ?? null) !== (want.meal_time ?? null) ||
+          (row.specialInstruction ?? null) !== (want.special_instruction ?? null) ||
+          (row.servings ?? null) !== (want.servings ?? null)
+        ) {
+          await this.prisma.menuPlan.update({
+            where: { id: row.id },
+            data: {
+              ...data,
+              version: row.version + 1,
+              previous: { dishes: row.dishes, special_instruction: row.specialInstruction, meal_time: row.mealTime } as Prisma.InputJsonValue,
+              updatedAt: new Date(),
+            },
+          });
+        }
+      }
+    }
   }
 
   async getMenu(user: AuthUser, placementId: string, week?: string) {
     const ctx = await this.access.resolve(user, placementId);
     this.access.assertCook(ctx);
     const { start, end } = weekRange(week);
+    if (ctx.active) await this.syncTemplate(placementId, ctx.client.id, start, end);
     const [rows, profile] = await Promise.all([
       this.prisma.menuPlan.findMany({
         where: { placementId, menuDate: { gte: dbDate(start), lte: dbDate(end) } },
@@ -246,62 +350,89 @@ export class CookService {
       }),
       this.prisma.foodProfile.findUnique({ where: { clientId: ctx.client.id } }),
     ]);
-    const hc = (profile?.healthConditions as string[]) ?? [];
     const order = (m: string) => MEALS.indexOf(m);
     return {
       placement_id: placementId,
       week_start: start,
       week_end: end,
-      items: rows.sort((a, b) => a.menuDate.getTime() - b.menuDate.getTime() || order(a.meal) - order(b.meal)).map((m) => this.menuDto(m, hc)),
+      meal_times: (profile?.mealTimes ?? {}) as Record<string, string>,
+      // A slot the client cleared by hand is kept (so the template doesn't refill
+      // it) but has no dishes; it isn't part of the menu.
+      items: rows
+        .filter((m) => ((m.dishes as unknown[]) ?? []).length > 0)
+        .sort((a, b) => a.menuDate.getTime() - b.menuDate.getTime() || order(a.meal) - order(b.meal))
+        .map((m) => this.menuDto(m, profile)),
     };
   }
 
   /**
-   * The client sets the menu for any number of date/meal slots at once.
-   * `items: [{ date, meal, dishes: [..], special_instruction?, servings? }]`;
-   * an item with `dishes: []` clears that slot.
+   * The client sets any number of slots at once:
+   * `items: [{ date, meal, dish_ids?: [..], dishes?: ["Dal", {name, notes}], meal_time?, special_instruction?, servings?, photo_file_ids? }]`.
+   * `dish_ids: [], dishes: []` clears a slot — and keeps it clear, even if the template has it.
    */
   async saveMenu(user: AuthUser, placementId: string, body: Record<string, unknown>) {
     const ctx = await this.access.resolve(user, placementId, { write: true });
-    if (ctx.role !== 'CLIENT') throw new BadRequestException('Only the client sets the menu — the cook can suggest one.');
+    if (ctx.role !== 'CLIENT') throw new BadRequestException('Only the client sets the menu.');
     this.access.assertCook(ctx);
     const items = Array.isArray(body.items) ? (body.items as Record<string, unknown>[]) : [];
-    if (!items.length) throw new BadRequestException('items is required — [{ date, meal, dishes }].');
+    if (!items.length) throw new BadRequestException('items is required — [{ date, meal, dish_ids or dishes }].');
     const today = istNow().date;
     const touched: string[] = [];
     for (const [i, it] of items.entries()) {
-      const date = parseDate(it.date, `items[${i}].date`);
-      if (date < today) throw new BadRequestException(`items[${i}]: ${date} is in the past.`);
+      const f = `items[${i}]`;
+      const date = parseDate(it.date, `${f}.date`);
+      if (date < today) throw new BadRequestException(`${f}: ${date} is in the past.`);
       const meal = mealOf(it.meal);
-      const key = { placementId_menuDate_meal: { placementId, menuDate: dbDate(date), meal } };
-      if (Array.isArray(it.dishes) && !it.dishes.length) {
-        await this.prisma.menuPlan.deleteMany({ where: { placementId, menuDate: dbDate(date), meal } });
-        touched.push(`${date} ${meal}: cleared`);
-        continue;
+      const { dishes, dishIds } = await this.catalog.resolveSlotDishes(ctx.client.id, it, f);
+      const clearing = dishes.length === 0;
+      if (clearing && !Array.isArray(it.dishes) && !Array.isArray(it.dish_ids)) {
+        throw new BadRequestException(`${f} needs dish_ids or dishes (send both empty to clear the slot).`);
       }
-      const dishes = this.dishList(it.dishes, `items[${i}].dishes`);
-      const servings = it.servings === undefined || it.servings === '' ? null : Number(it.servings) || null;
+      const mealTime = this.parseTime(it.meal_time, `${f}.meal_time`);
+      const photos = clearing ? [] : await this.files.assertOwned(placementId, it.photo_file_ids, 'PHOTO');
+      if (photos.length > 5) throw new BadRequestException(`${f}: at most 5 photos per meal.`);
+      const servings = it.servings === undefined || it.servings === '' || it.servings === null ? null : Number(it.servings) || null;
+      const key = { placementId_menuDate_meal: { placementId, menuDate: dbDate(date), meal } };
       const cur = await this.prisma.menuPlan.findUnique({ where: key });
       const data = {
-        dishes: dishes as Prisma.InputJsonValue,
-        specialInstruction: s(it.special_instruction) || null,
-        servings,
+        dishes: dishes as unknown as Prisma.InputJsonValue,
+        dishIds: dishIds as Prisma.InputJsonValue,
+        mealTime: clearing ? null : mealTime,
+        specialInstruction: clearing ? null : s(it.special_instruction) || null,
+        servings: clearing ? null : servings,
+        photoFileIds: photos as Prisma.InputJsonValue,
         status: 'PLANNED',
+        source: 'CLIENT',
         rejectReason: null,
         createdBy: user.id,
         createdByRole: 'CLIENT',
         updatedAt: new Date(),
       };
       if (cur) {
-        if (stableJson(cur.dishes) === stableJson(dishes) && (cur.specialInstruction ?? null) === data.specialInstruction && cur.servings === servings && cur.status === 'PLANNED') continue;
+        const same =
+          stableJson(cur.dishes) === stableJson(dishes) &&
+          (cur.mealTime ?? null) === data.mealTime &&
+          (cur.specialInstruction ?? null) === data.specialInstruction &&
+          cur.servings === data.servings &&
+          stableJson(cur.photoFileIds) === stableJson(photos) &&
+          cur.status === 'PLANNED' &&
+          cur.source === 'CLIENT';
+        if (same) continue;
         await this.prisma.menuPlan.update({
           where: { id: cur.id },
-          data: { ...data, version: cur.version + 1, previous: { dishes: cur.dishes, special_instruction: cur.specialInstruction } as Prisma.InputJsonValue },
+          data: {
+            ...data,
+            version: cur.version + 1,
+            previous: { dishes: cur.dishes, special_instruction: cur.specialInstruction, meal_time: cur.mealTime } as Prisma.InputJsonValue,
+          },
         });
+      } else if (!clearing) {
+        await this.prisma.menuPlan.create({ data: { ...data, placementId, menuDate: dbDate(date), meal } });
       } else {
+        // Clearing an empty slot: remember it, so the template doesn't fill it.
         await this.prisma.menuPlan.create({ data: { ...data, placementId, menuDate: dbDate(date), meal } });
       }
-      touched.push(`${date} ${meal.toLowerCase()}: ${dishes.map((d) => d.name).join(', ')}`);
+      touched.push(`${date} ${meal.toLowerCase()}: ${clearing ? 'cleared' : dishes.map((d) => d.name).join(', ')}`);
     }
     if (touched.length) {
       await this.access.notify([ctx.staff.userId], 'Menu updated by the family', touched.slice(0, 3).join(' · ') + (touched.length > 3 ? ` · +${touched.length - 3} more` : ''), 'MENU_UPDATED', { placement_id: placementId });
@@ -309,33 +440,120 @@ export class CookService {
     return this.getMenu(user, placementId, body.week ? String(body.week) : (items[0]?.date as string));
   }
 
-  /** The cook proposes; nothing on the client's own PLANNED/APPROVED slots is overwritten. */
-  async suggestMenu(user: AuthUser, body: Record<string, unknown>) {
-    const placementId = s(body.placement_id);
-    if (!placementId) throw new BadRequestException('placement_id is required.');
+  /** "Same as last week": copies one week's slots onto another. The client's own slots there stay unless overwrite. */
+  async copyWeek(user: AuthUser, placementId: string, body: Record<string, unknown>) {
     const ctx = await this.access.resolve(user, placementId, { write: true });
-    if (ctx.role !== 'STAFF') throw new BadRequestException('Only the cook suggests a menu.');
+    if (ctx.role !== 'CLIENT') throw new BadRequestException('Only the client sets the menu.');
     this.access.assertCook(ctx);
-    const items = Array.isArray(body.items) ? (body.items as Record<string, unknown>[]) : [];
-    if (!items.length) throw new BadRequestException('items is required — [{ date, meal, dishes }].');
+    const from = weekRange(s(body.from_week) || undefined);
+    const to = weekRange(s(body.to_week) || addDays(from.start, 7));
+    if (from.start === to.start) throw new BadRequestException('from_week and to_week are the same week.');
+    const overwrite = body.overwrite === true || body.overwrite === 'true';
+    const shift = Math.round((Date.parse(to.start) - Date.parse(from.start)) / 86_400_000);
     const today = istNow().date;
-    let n = 0;
-    for (const [i, it] of items.entries()) {
-      const date = parseDate(it.date, `items[${i}].date`);
-      if (date < today) throw new BadRequestException(`items[${i}]: ${date} is in the past.`);
-      const meal = mealOf(it.meal);
-      const dishes = this.dishList(it.dishes, `items[${i}].dishes`);
-      const cur = await this.prisma.menuPlan.findUnique({ where: { placementId_menuDate_meal: { placementId, menuDate: dbDate(date), meal } } });
-      if (cur && ['PLANNED', 'APPROVED'].includes(cur.status)) {
-        throw new BadRequestException(`${date} ${meal.toLowerCase()} is already set by the family.`);
+    const src = await this.prisma.menuPlan.findMany({ where: { placementId, menuDate: { gte: dbDate(from.start), lte: dbDate(from.end) } } });
+    let copied = 0;
+    let kept = 0;
+    for (const r of src) {
+      if (!((r.dishes as unknown[]) ?? []).length) continue;
+      const date = addDays(dateStr(r.menuDate), shift);
+      if (date < today) continue;
+      const key = { placementId_menuDate_meal: { placementId, menuDate: dbDate(date), meal: r.meal } };
+      const cur = await this.prisma.menuPlan.findUnique({ where: key });
+      if (cur && cur.source === 'CLIENT' && ((cur.dishes as unknown[]) ?? []).length && !overwrite) { kept++; continue; }
+      const data = {
+        dishes: r.dishes as Prisma.InputJsonValue,
+        dishIds: r.dishIds as Prisma.InputJsonValue,
+        mealTime: r.mealTime,
+        specialInstruction: r.specialInstruction,
+        servings: r.servings,
+        photoFileIds: r.photoFileIds as Prisma.InputJsonValue,
+        status: 'PLANNED',
+        source: 'CLIENT',
+        rejectReason: null,
+        createdBy: user.id,
+        createdByRole: 'CLIENT',
+        updatedAt: new Date(),
+      };
+      if (cur) {
+        await this.prisma.menuPlan.update({
+          where: { id: cur.id },
+          data: { ...data, version: cur.version + 1, previous: { dishes: cur.dishes, special_instruction: cur.specialInstruction, meal_time: cur.mealTime } as Prisma.InputJsonValue },
+        });
+      } else {
+        await this.prisma.menuPlan.create({ data: { ...data, placementId, menuDate: dbDate(date), meal: r.meal } });
       }
-      const data = { dishes: dishes as Prisma.InputJsonValue, specialInstruction: s(it.notes) || null, status: 'SUGGESTED', rejectReason: null, createdBy: user.id, createdByRole: 'STAFF', updatedAt: new Date() };
-      if (cur) await this.prisma.menuPlan.update({ where: { id: cur.id }, data: { ...data, version: cur.version + 1 } });
-      else await this.prisma.menuPlan.create({ data: { ...data, placementId, menuDate: dbDate(date), meal } });
-      n++;
+      copied++;
     }
-    await this.access.notify([ctx.client.userId], 'Your cook suggested a menu', `${n} meal${n === 1 ? '' : 's'} waiting for your OK.`, 'MENU_SUGGESTED', { placement_id: placementId });
-    return this.getMenu(user, placementId, String(items[0].date));
+    if (copied) {
+      await this.access.notify([ctx.staff.userId], 'Menu updated by the family', `${copied} meal${copied === 1 ? '' : 's'} set for the week of ${to.start}.`, 'MENU_UPDATED', { placement_id: placementId });
+    }
+    return { copied, kept_existing: kept, menu: await this.getMenu(user, placementId, to.start) };
+  }
+
+  // ── Weekly template ───────────────────────────────────────────────────────
+
+  async getTemplate(userId: string) {
+    const customer = await this.prisma.financeCustomer.findFirst({ where: { userId }, select: { id: true } });
+    if (!customer) throw new BadRequestException('No client account is linked to this login.');
+    const t = await this.prisma.menuTemplate.findUnique({ where: { clientId: customer.id } });
+    return { active: t?.active ?? false, items: (t?.items as unknown as TemplateItem[]) ?? [], updated_at: t?.updatedAt ?? null };
+  }
+
+  /**
+   * One week's pattern: `items: [{ dow: MON..SUN, meal, dish_ids?, dishes?, meal_time?, special_instruction?, servings? }]`.
+   * It fills the empty slots of every cook placement of this client, from today on.
+   */
+  async saveTemplate(userId: string, body: Record<string, unknown>) {
+    const customer = await this.prisma.financeCustomer.findFirst({ where: { userId }, select: { id: true } });
+    if (!customer) throw new BadRequestException('No client account is linked to this login.');
+    const raw = Array.isArray(body.items) ? (body.items as Record<string, unknown>[]) : [];
+    const items: TemplateItem[] = [];
+    for (const [i, it] of raw.entries()) {
+      const f = `items[${i}]`;
+      const dow = s(it.dow).toUpperCase();
+      if (!DOWS.includes(dow)) throw new BadRequestException(`${f}.dow must be one of ${DOWS.join(', ')}.`);
+      const meal = mealOf(it.meal);
+      if (items.some((x) => x.dow === dow && x.meal === meal)) throw new BadRequestException(`${f}: ${dow} ${meal} appears twice.`);
+      const { dishes, dishIds } = await this.catalog.resolveSlotDishes(customer.id, it, f);
+      if (!dishes.length) continue;
+      const servings = it.servings === undefined || it.servings === '' || it.servings === null ? null : Number(it.servings) || null;
+      items.push({
+        dow,
+        meal,
+        dishes,
+        dish_ids: dishIds,
+        meal_time: this.parseTime(it.meal_time, `${f}.meal_time`),
+        special_instruction: s(it.special_instruction) || null,
+        servings,
+      });
+    }
+    const active = body.active === undefined ? true : body.active === true || body.active === 'true';
+    await this.prisma.menuTemplate.upsert({
+      where: { clientId: customer.id },
+      update: { items: items as unknown as Prisma.InputJsonValue, active, updatedBy: userId, updatedAt: new Date() },
+      create: { clientId: customer.id, items: items as unknown as Prisma.InputJsonValue, active, updatedBy: userId },
+    });
+    // Apply it now for the next two weeks, so the cook sees it straight away.
+    const today = istNow().date;
+    const placements = await this.prisma.placement.findMany({
+      where: { clientId: customer.id, status: { in: ACTIVE_PLACEMENT as never } },
+      select: { id: true, staffId: true },
+    });
+    const cooks = await this.prisma.staffApplicant.findMany({
+      where: { id: { in: placements.map((p) => p.staffId) }, series: StaffSeries.COOK },
+      select: { id: true, userId: true },
+    });
+    for (const p of placements.filter((x) => cooks.some((c) => c.id === x.staffId))) {
+      await this.syncTemplate(p.id, customer.id, today, addDays(today, 13));
+    }
+    await this.access.notify(cooks.map((c) => c.userId), 'Weekly menu updated', `${items.length} meal${items.length === 1 ? '' : 's'} a week from the family's template.`, 'MENU_UPDATED', {});
+    return this.getTemplate(userId);
+  }
+
+  /** Cook suggestions are switched off: only the family sets the menu. */
+  async suggestMenu() {
+    throw new ForbiddenException('Only the family sets the menu — menu suggestions are switched off.');
   }
 
   async decideSuggestion(user: AuthUser, menuId: string, approve: boolean, reason?: string) {
@@ -503,20 +721,21 @@ export class CookService {
     const placements = await this.access.activePlacementsForStaff(staff.id);
     const out: Record<string, unknown>[] = [];
     for (const { placement, client } of placements) {
+      await this.syncTemplate(placement.id, placement.clientId, today, today);
       const [menu, logs, profile] = await Promise.all([
         this.prisma.menuPlan.findMany({ where: { placementId: placement.id, menuDate: dbDate(today) } }),
         this.prisma.mealLog.findMany({ where: { placementId: placement.id, mealDate: dbDate(today) }, include: { feedback: true } }),
         this.prisma.foodProfile.findUnique({ where: { clientId: placement.clientId } }),
       ]);
-      const hc = (profile?.healthConditions as string[]) ?? [];
       out.push({
         placement_id: placement.id,
         client: { id: placement.clientId, name: client?.customerName ?? null, address: client?.address ?? null },
         food_profile: this.profileDto(profile),
+        // In meal order, each with its time; a slot cleared by the client counts as no menu.
         meals: MEALS.map((meal) => {
-          const m = menu.find((x) => x.meal === meal);
+          const m = menu.find((x) => x.meal === meal && ((x.dishes as unknown[]) ?? []).length > 0);
           const l = logs.find((x) => x.meal === meal);
-          return { meal, menu: m ? this.menuDto(m, hc) : null, log: l ? this.mealDto(l) : null };
+          return { meal, menu: m ? this.menuDto(m, profile) : null, log: l ? this.mealDto(l) : null };
         }).filter((x) => x.menu || x.log),
         rating: await this.ratingStats(placement.id),
       });
