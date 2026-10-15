@@ -20,12 +20,6 @@ interface PayrollLine {
   management_fee: string;
   /** What payroll actually charged this client. Preferred over the above. */
   billed_fee: string | null;
-  /**
-   * Relieving, LWF and uniform as agreed on the placement's wage terms, as
-   * payroll recorded them for this period. Part of the cost sheet's CTC that
-   * the invoice used to leave out entirely.
-   */
-  other_charges: string | null;
   /** Days billed, despite the name. */
   shift_days: number | null;
   placement_type: 'PERMANENT' | 'TEMPORARY' | null;
@@ -108,7 +102,6 @@ export class ConsolidatedInvoiceService {
               -- an hourly placement nothing at all, since an hourly placement
               -- has no monthly fee — it has a fee per hour.
               pr.management_fee AS billed_fee,
-              pr.other_charges,
               pr.placement_type, pr.hours_worked, pr.hourly_rate,
               p.management_fee
        FROM payroll_records pr
@@ -123,7 +116,7 @@ export class ConsolidatedInvoiceService {
 
     const supplier = await this.supplierIdentity();
 
-    let salaryTotal = 0, esicTotal = 0, pfTotal = 0, feeTotal = 0, otherTotal = 0;
+    let salaryTotal = 0, esicTotal = 0, pfTotal = 0, feeTotal = 0;
     const items: {
       staff_id: string; staff_name: string; placement_id: string;
       description: string; amount: number; is_taxable: boolean; sort_order: number;
@@ -141,13 +134,7 @@ export class ConsolidatedInvoiceService {
         ? round2(parseFloat(l.billed_fee))
         : this.proratedFeeFor(l, month, year);
 
-      // Relieving, LWF and uniform, as agreed on the placement's wage terms.
-      // Recorded on the payroll row rather than re-derived from the placement
-      // now, so editing the wage terms later cannot change an invoice already
-      // raised.
-      const other = round2(parseFloat(l.other_charges ?? '0'));
-
-      salaryTotal += salary; esicTotal += esic; pfTotal += pf; feeTotal += fee; otherTotal += other;
+      salaryTotal += salary; esicTotal += esic; pfTotal += pf; feeTotal += fee;
 
       const base = { staff_id: l.staff_id, staff_name: l.staff_name, placement_id: l.placement_id };
       // Every line is taxable now. Marking the wage lines exempt was the old
@@ -161,19 +148,12 @@ export class ConsolidatedInvoiceService {
       if (esic > 0) items.push({ ...base, description: `${l.staff_name} — Employer ESIC`, amount: esic, is_taxable: true, sort_order: order++ });
       if (pf > 0) items.push({ ...base, description: `${l.staff_name} — Employer PF`, amount: pf, is_taxable: true, sort_order: order++ });
       items.push({ ...base, description: `${l.staff_name} — Management Fee`, amount: fee, is_taxable: true, sort_order: order++ });
-      if (other > 0) {
-        items.push({
-          ...base,
-          description: `${l.staff_name} — Agreed charges (relieving, LWF, uniform)`,
-          amount: other, is_taxable: true, sort_order: order++,
-        });
-      }
     }
 
     // The whole consideration is taxable — wages, employer ESIC and PF, and
     // the fee. Manpower supply is not a pure-agent reimbursement, so charging
     // on the fee alone under-collects the tax. See computeGst.
-    const taxableValue = round2(salaryTotal + esicTotal + pfTotal + feeTotal + otherTotal);
+    const taxableValue = round2(salaryTotal + esicTotal + pfTotal + feeTotal);
 
     const gst = computeGst({
       taxableValue,
@@ -193,7 +173,7 @@ export class ConsolidatedInvoiceService {
       });
     }
 
-    const total = round2(salaryTotal + esicTotal + pfTotal + feeTotal + otherTotal + gst.totalTax);
+    const total = round2(salaryTotal + esicTotal + pfTotal + feeTotal + gst.totalTax);
     const itemsTotal = round2(items.reduce((s, i) => s + i.amount, 0));
 
     return {
@@ -215,7 +195,6 @@ export class ConsolidatedInvoiceService {
         employer_esic: round2(esicTotal),
         employer_pf: round2(pfTotal),
         management_fee: round2(feeTotal),
-        other_charges: round2(otherTotal),
         taxable_value: gst.taxableValue,
         cgst: gst.cgst, sgst: gst.sgst, igst: gst.igst,
         gst_total: gst.totalTax,

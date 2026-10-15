@@ -34,8 +34,6 @@ export interface PayrollCalculation {
   pfEmployer: number;
   netSalary: number;
   managementFee: number;
-  /** Relieving, LWF and uniform — agreed with the client, not paid to staff. */
-  otherCharges: number;
   gstOnFee: number;
   clientTotalCharge: number;
   /** Rates actually applied — falls back to statutory defaults when the placement has no wage_config. */
@@ -98,28 +96,6 @@ function pfBaseFromPlacementMetadata(metadata: unknown): number | null {
   const raw = breakup.pfBase;
   const n = typeof raw === 'number' ? raw : parseFloat(String(raw ?? ''));
   return Number.isFinite(n) && n > 0 ? n : null;
-}
-
-/**
- * What the client owes beyond wages, employer PF/ESIC and the management fee:
- * relieving charges, LWF and the uniform allowance.
- *
- * The cost sheet's CTC is gross + employer PF + employer ESIC + these + fee.
- * They were priced at quotation time and then went nowhere — the invoice added
- * only the other four — so a placement created from the wage form was billed
- * around 21% under what was agreed with the client. A placement with no wage
- * breakup carries no such charges and bills none.
- */
-function otherChargesFromPlacementMetadata(metadata: unknown): number {
-  if (!metadata || typeof metadata !== 'object') return 0;
-  const breakup = (metadata as { wage_breakup?: Record<string, unknown> }).wage_breakup;
-  if (!breakup || typeof breakup !== 'object') return 0;
-  const sum = ['relieving', 'lwf', 'uniform'].reduce((total, key) => {
-    const raw = breakup[key];
-    const n = typeof raw === 'number' ? raw : parseFloat(String(raw ?? ''));
-    return total + (Number.isFinite(n) && n > 0 ? n : 0);
-  }, 0);
-  return round2(sum);
 }
 
 interface ShiftCountRow { shift_days: string; }
@@ -229,16 +205,12 @@ export class PayrollService {
    * @param pfBase The base PF is computed on. Defaults to gross, which is
    *               correct only when the wage carries no separately agreed
    *               base — see pfBaseFromPlacementMetadata and F-20.
-   * @param otherCharges Relieving, LWF and uniform for the period. Billed to
-   *               the client on top of wages, statutory and fee; see
-   *               otherChargesFromPlacementMetadata.
    */
   calculatePayrollWithAbsoluteFee(
     grossSalary: number,
     managementFee: number,
     rates?: WageConfigRates,
     pfBase?: number,
-    otherCharges = 0,
   ): PayrollCalculation {
     const esic = calculateEsic(grossSalary, rates?.employee_esic_pct, rates?.employer_esic_pct);
     const pf = calculatePfFlat(pfBase ?? grossSalary, rates?.employee_pf_pct, rates?.employer_pf_pct, rates?.employer_pf_max);
@@ -246,7 +218,7 @@ export class PayrollService {
     // GST is on the whole consideration, not the fee — see
     // calculateGstOnClientCharge. `gstOnFee` keeps its name so the field the
     // apps read does not move under them; what it holds is the full tax.
-    const taxableValue = round2(grossSalary + esic.employer + pf.employer + managementFee + otherCharges);
+    const taxableValue = round2(grossSalary + esic.employer + pf.employer + managementFee);
     const gstOnFee = calculateGstOnClientCharge(taxableValue, rates?.gst_pct);
     const clientTotalCharge = round2(taxableValue + gstOnFee);
 
@@ -258,7 +230,6 @@ export class PayrollService {
       pfEmployer: pf.employer,
       netSalary,
       managementFee: round2(managementFee),
-      otherCharges: round2(otherCharges),
       gstOnFee,
       clientTotalCharge,
       ratesUsed: {
@@ -302,9 +273,7 @@ export class PayrollService {
     return {
       grossSalary, esicEmployee: esic.employee, esicEmployer: esic.employer,
       pfEmployee: pf.employee, pfEmployer: pf.employer, netSalary,
-      // No wage breakup reaches this percentage-fee path, so there are no
-      // separately agreed charges to bill.
-      managementFee, otherCharges: 0, gstOnFee, clientTotalCharge,
+      managementFee, gstOnFee, clientTotalCharge,
       ratesUsed: {
         pfEmployeePct: PF_RATE_DEFAULT,
         pfEmployerPct: PF_RATE_DEFAULT,
@@ -377,26 +346,20 @@ export class PayrollService {
       const proratedPfBase = agreedPfBase != null
         ? this.calculateProratedGross(agreedPfBase, shiftDays, dim)
         : undefined;
-      // Relieving, LWF and uniform belong to the agreed CTC, so they are
-      // billed with the wage and pro-rated the same way.
-      const proratedOther = this.calculateProratedGross(
-        otherChargesFromPlacementMetadata(p.metadata), shiftDays, dim,
-      );
-      const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee, ratesFromPlacementMetadata(p.metadata), proratedPfBase, proratedOther);
+      const calc = this.calculatePayrollWithAbsoluteFee(proratedGross, proratedFee, ratesFromPlacementMetadata(p.metadata), proratedPfBase);
 
       const [payroll] = await manager.query<Record<string, unknown>[]>(
         `INSERT INTO payroll_records
            (id, placement_id, staff_id, period_month, period_year, shift_days,
             gross_salary, deductions, net_salary,
-            esic_employer, esic_employee, pf_employer, pf_employee, other_charges)
-         VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+            esic_employer, esic_employee, pf_employer, pf_employee)
+         VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
         [
           placementId, p.staff_id, month, year, shiftDays,
           calc.grossSalary,
           JSON.stringify({ esic: calc.esicEmployee, pf: calc.pfEmployee }),
           calc.netSalary,
           calc.esicEmployer, calc.esicEmployee, calc.pfEmployer, calc.pfEmployee,
-          calc.otherCharges,
         ],
       );
 
@@ -591,15 +554,6 @@ export class PayrollService {
       : agreedPfBase != null
         ? this.calculateProratedGross(agreedPfBase, summary.billable_days, summary.days_in_month)
         : undefined;
-    // An hourly placement is priced per hour and has no monthly breakup, so
-    // there is nothing to pro-rate into these charges.
-    const proratedOther = isHourly
-      ? 0
-      : this.calculateProratedGross(
-          otherChargesFromPlacementMetadata(p.metadata),
-          summary.billable_days,
-          summary.days_in_month,
-        );
     const rates = ratesFromPlacementMetadata(p.metadata);
 
     // Statutory once on the month's whole earnings, then this client's share.
@@ -610,7 +564,7 @@ export class PayrollService {
       : 1;
 
     let calc = this.calculatePayrollWithAbsoluteFee(
-      proratedGross, proratedFee, rates, proratedPfBase, proratedOther,
+      proratedGross, proratedFee, rates, proratedPfBase,
     );
 
     // Only worth recomputing when the staff member actually works elsewhere —
@@ -782,10 +736,9 @@ export class PayrollService {
          (id, placement_id, staff_id, period_month, period_year, shift_days,
           gross_salary, deductions, net_salary,
           esic_employer, esic_employee, pf_employer, pf_employee,
-          placement_type, hours_worked, hourly_rate, hourly_fee, management_fee,
-          other_charges)
+          placement_type, hours_worked, hourly_rate, hourly_fee, management_fee)
        VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-               $13,$14,$15,$16,$17,$18) RETURNING *`,
+               $13,$14,$15,$16,$17) RETURNING *`,
       [
         placementId,
         staffId,
@@ -804,7 +757,6 @@ export class PayrollService {
         isHourly ? preview.hourly_rate : null,
         isHourly ? preview.hourly_fee : null,
         preview.prorated_management_fee ?? calc.managementFee,
-        calc.otherCharges,
       ],
     );
   }

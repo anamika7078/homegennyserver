@@ -131,16 +131,7 @@ export class PlacementService {
     if (wageConfig && typeof wageConfig === 'object') {
       const breakup = computeWageBreakup(wageConfig as WageConfigInput);
       return {
-        // What the staff member earns before their own PF and ESIC come off
-        // it — payroll deducts those and lands on the cost sheet's net.
-        //
-        // This used to store `netSalary`, the figure *after* those deductions.
-        // Payroll then treated it as gross and took them a second time, so the
-        // staff member was paid around ₹1,800/month short of the agreed net;
-        // and because the invoice is built from this number too, the client
-        // was billed roughly 21% under the agreed CTC. Checked against the
-        // rate card by scratch/_check_rate_card_to_invoice.js.
-        staffSalary: Math.round(breakup.grossEarnings * 100) / 100,
+        staffSalary: Math.round(breakup.netSalary * 100) / 100,
         managementFee: Math.round(breakup.managementFee * 100) / 100,
         metadataPatch: { wage_config: wageConfig, wage_breakup: breakup },
       };

@@ -17,11 +17,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const bcrypt = require('bcryptjs');
 const { Client } = require('pg');
-
-/** What the demo client signs in with — the script prints the login at the end. */
-const CLIENT_PASSWORD = 'HomeGenny@2024';
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
 const FINANCE_PHONE = '9800000004';
@@ -157,16 +153,10 @@ async function main() {
     // ── 2 · a client ───────────────────────────────────────────────────────
     let cust = (await db.query(`SELECT id FROM finance_customers WHERE unit_code = $1`, [UNIT])).rows[0];
     if (!cust) {
-      // With a real password, because a client account that cannot log in is
-      // indistinguishable from one that can to every other suite — the mobile
-      // suite picks "a client with a login" and signs in as them, and a demo
-      // client created without a password broke it. Fully formed, or not
-      // created at all.
       const user = await db.query(
-        `INSERT INTO users (id, role, full_name, phone, password_hash, is_active, updated_at)
-         VALUES (gen_random_uuid(), 'CLIENT', $1, $2, $3, true, now())
-         RETURNING id`,
-        [CLIENT_NAME, CLIENT_PHONE, await bcrypt.hash(CLIENT_PASSWORD, 10)],
+        `INSERT INTO users (id, role, full_name, phone, is_active, updated_at)
+         VALUES (gen_random_uuid(), 'CLIENT', $1, $2, true, now())
+         RETURNING id`, [CLIENT_NAME, CLIENT_PHONE],
       );
       cust = (await db.query(
         `INSERT INTO finance_customers
