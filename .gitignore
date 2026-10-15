@@ -51,3 +51,6 @@ scratch/_removed_*.json
 scratch/_demo_invoice*.html
 scratch/_live_server_invoice.html
 scratch/_demo_payslip*.pdf
+
+# written by DUMP=1 node scratch/_live_test_staff_tracking.js
+scratch/_staff_tracking_samples.json

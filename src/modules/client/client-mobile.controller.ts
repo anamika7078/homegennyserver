@@ -11,33 +11,11 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, UserRole } from '../auth/decorators/roles.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { IncidentsService, MAX_COMPLAINT_PHOTOS, MAX_COMPLAINT_PHOTO_BYTES } from '../incidents/incidents.service';
+import { TrackingService } from '../tracking/tracking.service';
+import { sendStoredFile } from '../../common/storage/send-file.util';
 import { FinanceInvoiceService } from '../finance/invoice/invoice.service';
 import { CLIENT_VISIBLE_INVOICE_STATUSES } from '../../common/finance/invoice-status';
 import { buildServiceLines, periodRange } from '../../common/finance/service-lines.util';
-
-/**
- * Same series-based required-track logic used in staff-mobile.controller.ts, so a
- * client sees the same "verified" signal staff/RM do — kept as a local copy since
- * these are file-local consts there too (not currently exported/shared).
- *
- * Keyed by the StaffSeries enum values stored on staff.series
- * (MAID/SKILLED_CARE/UNSKILLED_CARE/DRIVER) — NOT the DR/SC/UC short codes the
- * mobile app displays. Keying this by the short codes previously made every lookup
- * below miss for non-MAID series, silently returning `requiredTracks: []` and making
- * `isVerified` true for staff with zero verification tracks on record.
- */
-const REQUIRED_VERIFICATION_TRACKS: Record<string, string[]> = {
-  DRIVER: ['AADHAAR_EKYC', 'SARATHI_API', 'ECHALLAN_API', 'HEALTH_SCREENING'],
-  SKILLED_CARE: ['AADHAAR_EKYC', 'HEALTH_SCREENING'],
-  UNSKILLED_CARE: ['AADHAAR_EKYC'],
-  MAID: ['AADHAAR_EKYC'],
-  COOK: ['AADHAAR_EKYC', 'HEALTH_SCREENING'],
-};
-
-function isPvClear(seriesShort: string, pvStatus: string): boolean {
-  if (seriesShort === 'MAID') return pvStatus !== 'ADVERSE';
-  return pvStatus === 'CLEAR';
-}
 
 // ⚠️ IncidentType enum currently only has 6 values (CLIENT_COMPLAINT, STAFF_MISCONDUCT,
 // SAFETY_ISSUE, ATTENDANCE_FRAUD, DRIVING_VIOLATION, LATE_EXIT) — a migration to add
@@ -62,6 +40,7 @@ export class ClientMobileController {
     // The same renderer Finance uses, so the client downloads the very
     // document the office sees rather than a second version of it.
     private readonly financeInvoices: FinanceInvoiceService,
+    private readonly tracking: TrackingService,
   ) {}
 
   private async resolveCustomer(userId: string) {
@@ -135,10 +114,9 @@ export class ClientMobileController {
 
     let todayAttendanceStatus: string | null = null;
     if (placement) {
-      const today = new Date();
-      today.setUTCHours(0, 0, 0, 0);
-      const shift = await this.prisma.shiftLog.findUnique({
-        where: { staffId_shiftDate: { staffId: placement.staffId, shiftDate: today } },
+      const today = new Date(`${new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10)}T00:00:00.000Z`);
+      const shift = await this.prisma.shiftLog.findFirst({
+        where: { staffId: placement.staffId, placementId: placement.id, shiftDate: today },
       });
       todayAttendanceStatus = shift?.checkOutAt ? 'CHECKED_OUT' : shift?.checkInAt ? 'CHECKED_IN' : 'NOT_CHECKED_IN';
     }
@@ -191,81 +169,53 @@ export class ClientMobileController {
   }
 
   @Get('staff/:id/profile')
-  @ApiOperation({ summary: 'Detailed view of assigned staff profile & verification status' })
-  async getStaffDetail(@Param('id') id: string, @Req() req: any) {
-    const customer = await this.resolveCustomer(req.user.id);
-    if (customer) {
-      const placement = await this.prisma.placement.findFirst({ where: { clientId: customer.id, staffId: id } });
-      if (!placement) throw new BadRequestException('This staff member is not deployed to your placement');
-    }
+  @ApiOperation({
+    summary: 'Who is working in my home — full profile',
+    description:
+      'Only staff placed at this home (now or before); 403 otherwise. Photo (photo_url, load with the token), ' +
+      'name, phone, age, gender, language tier, city/hometown, experience, emergency contact name, verification ' +
+      'badges, the placement and the RM. Never Aadhaar, address, bank or documents.',
+  })
+  getStaffDetail(@Param('id') id: string, @Req() req: any) {
+    return this.tracking.profileForClient(req.user, id);
+  }
 
-    const staff = await this.prisma.staffApplicant.findUnique({
-      where: { id },
-      include: { verificationTracks: true },
-    });
-    if (!staff) throw new BadRequestException('Staff record not found');
+  @Get('staff/:id/photo')
+  @ApiOperation({ summary: "The staff member's photo (image stream). 404 when none is on file — show initials." })
+  async getStaffPhoto(@Param('id') id: string, @Req() req: any, @Res() res: Response) {
+    const { stream, mimeType, originalName } = await this.tracking.photoForClient(req.user, id);
+    sendStoredFile(res, stream, mimeType, 'inline', originalName);
+  }
 
-    const requiredTracks = REQUIRED_VERIFICATION_TRACKS[staff.series] ?? [];
-    const tracksClear = requiredTracks.every((t) => staff.verificationTracks.some((v) => v.trackType === t && v.status === 'CLEAR'));
-
-    return {
-      staffId: staff.id,
-      staffCode: staff.staffCode,
-      fullName: staff.fullName,
-      series: staff.series,
-      isVerified: tracksClear && isPvClear(staff.series, staff.pvStatus),
-      pvStatus: staff.pvStatus,
-      videoCertAvailable: !!staff.videoCertId,
-    };
+  @Get('staff/:id/location')
+  @ApiOperation({
+    summary: 'Where the staff member is now (map)',
+    description:
+      'Only while checked in at this home: last point (at, lat, lng, distance_m, at_home, label, stale), today\'s ' +
+      'trail and the home pin. Outside the shift last is null and trail is empty. Refresh every next_refresh_sec.',
+  })
+  getStaffLocation(@Param('id') id: string, @Req() req: any) {
+    return this.tracking.locationForClient(req.user, id);
   }
 
   @Get('attendance/today')
-  @ApiOperation({ summary: "Real-time check-in/out status of assigned staff" })
-  async getTodayAttendance(@Req() req: any) {
-    const customer = await this.resolveCustomer(req.user.id);
-    const placement = customer ? await this.resolveActivePlacement(customer.id) : null;
-    if (!placement) return { staffCode: null, todayStatus: 'NO_ACTIVE_PLACEMENT' };
-
-    const staff = await this.prisma.staffApplicant.findUnique({ where: { id: placement.staffId } });
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-    const shift = await this.prisma.shiftLog.findUnique({
-      where: { staffId_shiftDate: { staffId: placement.staffId, shiftDate: today } },
-    });
-
-    return {
-      staffCode: staff?.staffCode ?? null,
-      staffName: staff?.fullName ?? null,
-      todayStatus: shift?.checkOutAt ? 'CHECKED_OUT' : shift?.checkInAt ? 'PRESENT' : 'NOT_CHECKED_IN',
-      checkInTime: shift?.checkInAt?.toISOString() ?? null,
-      checkOutTime: shift?.checkOutAt?.toISOString() ?? null,
-      gpsVerified: !!(shift?.checkInLat && shift?.checkInLng),
-    };
+  @ApiOperation({
+    summary: 'Today for every staff member working at my home',
+    description:
+      'staff[]: one entry per active placement — status (NOT_CHECKED_IN | PRESENT | CHECKED_OUT), check-in/out, ' +
+      'last_location. The top-level fields describe the first staff member, as before.',
+  })
+  getTodayAttendance(@Req() req: any) {
+    return this.tracking.todayForClient(req.user);
   }
 
   @Get('attendance/history')
-  @ApiOperation({ summary: 'Attendance history for the assigned staff' })
-  async getAttendanceHistory(@Req() req: any) {
-    const customer = await this.resolveCustomer(req.user.id);
-    const placement = customer ? await this.resolveActivePlacement(customer.id) : null;
-    if (!placement) return { totalPresent: 0, totalAbsent: 0, history: [] };
-
-    const shifts = await this.prisma.shiftLog.findMany({
-      where: { staffId: placement.staffId },
-      orderBy: { shiftDate: 'desc' },
-      take: 30,
-    });
-
-    return {
-      totalPresent: shifts.filter((s) => s.checkInAt).length,
-      totalAbsent: shifts.filter((s) => !s.checkInAt).length,
-      history: shifts.map((s) => ({
-        date: s.shiftDate.toISOString().slice(0, 10),
-        status: s.checkInAt ? 'PRESENT' : 'ABSENT',
-        checkIn: s.checkInAt?.toISOString() ?? null,
-        checkOut: s.checkOutAt?.toISOString() ?? null,
-      })),
-    };
+  @ApiOperation({ summary: 'Days worked at my home (default the last 30). ?staff_id=&from=&to= (YYYY-MM-DD, max 3 months)' })
+  @ApiQuery({ name: 'staff_id', required: false })
+  @ApiQuery({ name: 'from', required: false })
+  @ApiQuery({ name: 'to', required: false })
+  getAttendanceHistory(@Req() req: any, @Query() q: { staff_id?: string; from?: string; to?: string }) {
+    return this.tracking.historyForClient(req.user, q);
   }
 
   @Post('attendance/raise-issue')

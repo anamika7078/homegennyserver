@@ -14,6 +14,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { EmployeePayslipService } from '../employees/employee-payslip.service';
 import { DocumentsService, MAX_DOCUMENT_BYTES, REJECTED, normalizeStaffDocumentType } from '../documents/documents.service';
 import { isStage25Enabled } from '../../common/config/active-series';
+import { TrackingService } from '../tracking/tracking.service';
 
 const PIPELINE_STAGE_LABELS: Record<string, string> = {
   S1_INTAKE: 'Stage 1 - Intake',
@@ -101,6 +102,7 @@ export class StaffMobileController {
     private readonly prisma: PrismaService,
     private readonly payslips: EmployeePayslipService,
     private readonly documents: DocumentsService,
+    private readonly tracking: TrackingService,
   ) {}
 
   /**
@@ -338,137 +340,74 @@ export class StaffMobileController {
     };
   }
 
+  @Get('placements')
+  @ApiOperation({
+    summary: 'Where I can check in today — for the check-in picker',
+    description:
+      'Trial and confirmed placements; a one-time visit only on its day. Each has the client name, address, ' +
+      'home pin and today\'s state (NOT_CHECKED_IN | CHECKED_IN | CHECKED_OUT). checked_in_at = the placement ' +
+      'with an open shift. location_interval_sec = how often to send the location while checked in.',
+  })
+  placements(@Req() req: any) {
+    return this.tracking.placementsForStaff(req.user.id);
+  }
+
   @Post('attendance/check-in')
   @ApiOperation({
-    summary: 'Submit staff check-in with GPS',
+    summary: 'Check in with GPS',
     description:
-      'Requires a CONFIRMED placement — writes a real ShiftLog row (same table RM\'s /rm/shifts review ' +
-      'reads) and is immediately billable: attendance is staff-owned, so this auto-approves and syncs ' +
-      'straight to StaffDailyAttendance rather than waiting on RM review. RM can still retroactively ' +
-      'reject a fraudulent/incorrect day via PATCH /rm/shifts/:id/review, which un-syncs it.',
+      'Trial and confirmed placements (a one-time visit only on its day). With several houses send placement_id; ' +
+      'without it the house nearest to the GPS point is used. One open shift at a time — check out first. ' +
+      'Checking in again at the same house the same day reopens the day. Billable at once (staff_daily_attendance). ' +
+      'The client is notified; the RM too if it is over 300 m from the home. Start sending ' +
+      'POST /staff/attendance/location every location_interval_sec seconds.',
   })
   @ApiBody({
     schema: {
       type: 'object',
       properties: {
         latitude: { type: 'number', example: 28.5355 },
-        longitude: { type: 'number', example: 77.3910 },
+        longitude: { type: 'number', example: 77.391 },
+        placement_id: { type: 'string', format: 'uuid', description: 'Which house — required when it can not be told from the GPS point' },
       },
     },
   })
-  async checkIn(@Req() req: any, @Body() body: any) {
-    const staff = await this.prisma.staffApplicant.findFirst({ where: { userId: req.user.id } });
-    if (!staff) throw new BadRequestException('No staff record linked to this account');
-
-    const placement = await this.prisma.placement.findFirst({
-      where: { staffId: staff.id, status: 'CONFIRMED' },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (!placement) throw new BadRequestException('No confirmed placement — cannot check in yet');
-
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-
-    const shift = await this.prisma.shiftLog.upsert({
-      where: { staffId_shiftDate: { staffId: staff.id, shiftDate: today } },
-      create: {
-        staffId: staff.id,
-        placementId: placement.id,
-        shiftDate: today,
-        checkInAt: new Date(),
-        checkInLat: body.latitude,
-        checkInLng: body.longitude,
-        status: 'APPROVED',
-      },
-      update: {
-        checkInAt: new Date(),
-        checkInLat: body.latitude,
-        checkInLng: body.longitude,
-        status: 'APPROVED',
-      },
-    });
-
-    // Same sync reviewShift() does on APPROVED — attendance is billable the
-    // moment staff checks in, no RM action required.
-    // Keyed by placement too — a maid can check in at a second house the same
-    // day, and each day belongs to the client whose invoice will carry it.
-    // See docs/HOURLY_MULTI_CLIENT_PLAN.md §S1.
-    await this.prisma.staffDailyAttendance.upsert({
-      where: {
-        staffId_placementId_attendanceDate: {
-          staffId: staff.id, placementId: placement.id, attendanceDate: today,
-        },
-      },
-      create: {
-        staffId: staff.id,
-        placementId: placement.id,
-        branchId: placement.branchId,
-        attendanceDate: today,
-        status: 'PRESENT',
-        markedBy: req.user.id,
-      },
-      update: {
-        status: 'PRESENT',
-        branchId: placement.branchId,
-        markedBy: req.user.id,
-      },
-    }).catch(() => undefined);
-
-    return {
-      success: true,
-      attendanceId: shift.id,
-      status: 'CHECKED_IN',
-      latitude: body.latitude ?? null,
-      longitude: body.longitude ?? null,
-      timestamp: shift.checkInAt?.toISOString(),
-    };
+  checkIn(@Req() req: any, @Body() body: any) {
+    return this.tracking.checkIn(req.user.id, body ?? {});
   }
 
   @Post('attendance/check-out')
   @ApiOperation({
-    summary: 'Submit staff check-out with GPS',
-    description: 'Updates today\'s real ShiftLog row (requires a prior check-in today).',
+    summary: 'Check out with GPS',
+    description:
+      'Closes the open shift. An hourly placement gets the hours worked on its attendance day (what it is billed on). ' +
+      'The client is notified. Stop sending the location.',
   })
   @ApiBody({
     schema: {
       type: 'object',
       properties: {
         latitude: { type: 'number', example: 28.5355 },
-        longitude: { type: 'number', example: 77.3910 },
+        longitude: { type: 'number', example: 77.391 },
+        placement_id: { type: 'string', format: 'uuid', description: 'Optional — the open shift is found without it' },
       },
     },
   })
-  async checkOut(@Req() req: any, @Body() body: any) {
-    const staff = await this.prisma.staffApplicant.findFirst({ where: { userId: req.user.id } });
-    if (!staff) throw new BadRequestException('No staff record linked to this account');
+  checkOut(@Req() req: any, @Body() body: any) {
+    return this.tracking.checkOut(req.user.id, body ?? {});
+  }
 
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-
-    const existing = await this.prisma.shiftLog.findUnique({
-      where: { staffId_shiftDate: { staffId: staff.id, shiftDate: today } },
-    });
-    if (!existing || !existing.checkInAt) {
-      throw new BadRequestException('No check-in found for today — check in before checking out');
-    }
-
-    const shift = await this.prisma.shiftLog.update({
-      where: { staffId_shiftDate: { staffId: staff.id, shiftDate: today } },
-      data: {
-        checkOutAt: new Date(),
-        checkOutLat: body.latitude,
-        checkOutLng: body.longitude,
-      },
-    });
-
-    return {
-      success: true,
-      attendanceId: shift.id,
-      status: 'CHECKED_OUT',
-      latitude: body.latitude ?? null,
-      longitude: body.longitude ?? null,
-      timestamp: shift.checkOutAt?.toISOString(),
-    };
+  @Post('attendance/location')
+  @ApiOperation({
+    summary: 'Location while checked in (about every 5 minutes)',
+    description:
+      'Only while checked in. { points: [{ latitude, longitude, accuracy?, battery?, recorded_at? }] } — up to 50, ' +
+      'so points collected offline can be sent together; or one point at the top level. Points closer than 2 minutes ' +
+      'apart are dropped. Returns { accepted, dropped, next_in_sec }. Two points in a row over 300 m from the home ' +
+      'tell the client and the RM once.',
+  })
+  location(@Req() req: any, @Body() body: any) {
+    return this.tracking.addLocation(req.user.id, body ?? {});
   }
 
   @Get('attendance/history')

@@ -871,9 +871,30 @@ model ShiftLog {
   updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
   staff       StaffApplicant @relation(fields: [staffId], references: [id])
 
-  @@unique([staffId, shiftDate])
+  /// Was [staffId, shiftDate]: one check-in a day, so a staff member could not
+  /// check in at a second house. See docs/STAFF_TRACKING_AND_CLIENT_VISIBILITY_PLAN.md.
+  @@unique([staffId, placementId, shiftDate])
   @@index([status])
   @@map("shift_logs")
+}
+
+/// Where a checked-in staff member is, about every 5 minutes, for the client's map.
+/// Kept 30 days. docs/STAFF_TRACKING_AND_CLIENT_VISIBILITY_PLAN.md
+model StaffLocationPing {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  staffId     String   @map("staff_id") @db.Uuid
+  placementId String   @map("placement_id") @db.Uuid
+  shiftLogId  String   @map("shift_log_id") @db.Uuid
+  lat         Decimal  @db.Decimal(10, 7)
+  lng         Decimal  @db.Decimal(10, 7)
+  accuracyM   Int?     @map("accuracy_m")
+  batteryPct  Int?     @map("battery_pct")
+  recordedAt  DateTime @map("recorded_at") @db.Timestamptz(6)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([placementId, recordedAt])
+  @@index([shiftLogId, recordedAt])
+  @@map("staff_location_pings")
 }
 
 model StaffDailyAttendance {

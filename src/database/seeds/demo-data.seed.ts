@@ -378,7 +378,7 @@ export async function seedDemoData(prisma: PrismaClient) {
     for (const p of [PLACEMENTS.maid, PLACEMENTS.dr, PLACEMENTS.sc]) {
       const staffId = placementRows.find((r) => r.id === p)!.staffId;
       await prisma.shiftLog.upsert({
-        where: { staffId_shiftDate: { staffId, shiftDate } },
+        where: { staffId_placementId_shiftDate: { staffId, placementId: p, shiftDate } },
         create: {
           staffId,
           placementId: p,

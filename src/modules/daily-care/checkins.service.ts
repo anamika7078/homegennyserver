@@ -6,10 +6,11 @@ import { istNow, parseDate } from './care-access.service';
 
 /**
  * Where staff checked in and out, for the RM's map —
- * docs/MENU_TRACKING_REQUEST_CHANGES_PLAN.md §3. No live tracking: these are
- * the GPS points the staff app already sends with check-in/check-out
- * (shift_logs). Each one is measured against the client's home; more than
- * FAR_METERS away is flagged.
+ * docs/MENU_TRACKING_REQUEST_CHANGES_PLAN.md §3: the GPS points of check-in and
+ * check-out (shift_logs), plus the location the staff app sends about every
+ * 5 minutes while checked in (staff_location_pings,
+ * docs/STAFF_TRACKING_AND_CLIENT_VISIBILITY_PLAN.md). Each point is measured
+ * against the client's home; more than FAR_METERS away is flagged.
  */
 
 export const FAR_METERS = 300;
@@ -93,6 +94,20 @@ export class CheckinsService {
        LIMIT 1000`;
 
     const num = (v: string | null) => (v === null ? null : Number(v));
+    // The day's trail per shift, thinned to at most ~100 points each for the map.
+    const pings = rows.length
+      ? await this.prisma.staffLocationPing.findMany({
+          where: { shiftLogId: { in: rows.map((r) => r.shift_id) } },
+          orderBy: { recordedAt: 'asc' },
+          select: { shiftLogId: true, lat: true, lng: true, recordedAt: true },
+        })
+      : [];
+    const trailOf = new Map<string, { at: Date; lat: number; lng: number }[]>();
+    for (const p of pings) {
+      const list = trailOf.get(p.shiftLogId) ?? [];
+      list.push({ at: p.recordedAt, lat: Number(p.lat), lng: Number(p.lng) });
+      trailOf.set(p.shiftLogId, list);
+    }
     const items = rows.map((r) => {
       // The client's saved home, else the pin from the staff request this placement filled.
       const home =
@@ -117,6 +132,17 @@ export class CheckinsService {
         home,
         check_in: point(r.check_in_lat, r.check_in_lng, r.check_in_at),
         check_out: point(r.check_out_lat, r.check_out_lng, r.check_out_at),
+        ...(() => {
+          const all = trailOf.get(r.shift_id) ?? [];
+          const step = Math.max(1, Math.ceil(all.length / 100));
+          const last = all[all.length - 1];
+          const lastPoint = last ? point(String(last.lat), String(last.lng), last.at) : null;
+          return {
+            // Only while still checked in; after check-out the check-out point says where they left from.
+            last_location: r.check_in_at && !r.check_out_at ? lastPoint : null,
+            trail: all.filter((_, i) => i % step === 0 || i === all.length - 1),
+          };
+        })(),
       };
     });
     const far = (i: (typeof items)[number]) => !!(i.check_in?.far || i.check_out?.far);

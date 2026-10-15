@@ -362,10 +362,11 @@ async function cleanup() {
   console.log('\n[7] HR cannot silently overwrite the staff member own GPS check-in');
   const GUARD_DATE = '2026-08-12';
   state.GUARD_DATE = GUARD_DATE;
+  // A shift is one row per staff, placement and day now; this one names no placement.
+  await db.query(`DELETE FROM shift_logs WHERE staff_id = $1 AND shift_date = $2 AND placement_id IS NULL`, [target.id, GUARD_DATE]);
   await db.query(
     `INSERT INTO shift_logs (id, staff_id, shift_date, check_in_at, status, created_at, updated_at)
-     VALUES (gen_random_uuid(), $1, $2, now(), 'APPROVED', now(), now())
-     ON CONFLICT (staff_id, shift_date) DO UPDATE SET status = 'APPROVED'`,
+     VALUES (gen_random_uuid(), $1, $2, now(), 'APPROVED', now(), now())`,
     [target.id, GUARD_DATE],
   );
   const blocked = await req('POST', '/attendance/mark', {

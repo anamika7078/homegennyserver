@@ -110,8 +110,10 @@ export class StaffAttendanceMirrorService {
     // Same rule RM's PUT /rm/attendance enforces: a live self-submission is the
     // staff member's own GPS-backed record of the day and must be reviewed, not
     // silently overwritten from a desk.
-    const ownShift = await this.prisma.shiftLog.findUnique({
-      where: { staffId_shiftDate: { staffId, shiftDate: attendanceDate } },
+    // Any house that day: a live self-check-in anywhere is the staff member's own record.
+    const ownShift = await this.prisma.shiftLog.findFirst({
+      where: { staffId, shiftDate: attendanceDate, ...(params.placementId ? { placementId: params.placementId } : {}) },
+      orderBy: { updatedAt: 'desc' },
       select: { status: true },
     });
     if (ownShift && ownShift.status !== 'REJECTED' && !params.overrideSelfCheckIn) {

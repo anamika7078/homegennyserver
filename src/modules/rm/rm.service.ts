@@ -1083,8 +1083,10 @@ export class RmService {
     // this date is still live (PENDING or APPROVED) or FLAGGED for review,
     // RM must go through the proper review action instead of silently
     // overwriting it here.
-    const ownShift = await this.prisma.shiftLog.findUnique({
-      where: { staffId_shiftDate: { staffId: body.staff_id, shiftDate: attendanceDate } },
+    // This house's shift that day (or one from before shifts named their house).
+    const ownShift = await this.prisma.shiftLog.findFirst({
+      where: { staffId: body.staff_id, shiftDate: attendanceDate, OR: [{ placementId: placement.id }, { placementId: null }] },
+      orderBy: { updatedAt: 'desc' },
       select: { status: true },
     });
     if (ownShift && ownShift.status !== 'REJECTED') {

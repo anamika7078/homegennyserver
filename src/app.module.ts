@@ -74,6 +74,7 @@ import { IncidentsModule } from './modules/incidents/incidents.module';
 import { RmPortalModule } from './modules/rm-portal/rm-portal.module';
 import { MapsController } from './modules/maps/maps.controller';
 import { ClientMobileController } from './modules/client/client-mobile.controller';
+import { TrackingModule } from './modules/tracking/tracking.module';
 
 import { StorageModule } from './common/storage/storage.module';
 import databaseConfig from './config/database.config';
@@ -126,6 +127,8 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     }),
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     ScheduleModule.forRoot(),
+    // Check-in/out + location; ClientMobileController (registered here) uses it.
+    TrackingModule,
     EventEmitterModule.forRoot(),
     PrismaModule,
     RbacModule,
