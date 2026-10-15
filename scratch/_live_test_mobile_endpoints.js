@@ -76,7 +76,13 @@ async function main() {
     const clientRow = await db.query(
       `SELECT fc.id, fc.customer_name, u.phone
          FROM finance_customers fc JOIN users u ON u.id = fc.user_id
-        WHERE u.role::text = 'CLIENT' AND u.is_active LIMIT 1`,
+        WHERE u.role::text = 'CLIENT' AND u.is_active
+          -- A client with no password cannot be signed in as, so picking one
+          -- fails this suite for a reason that has nothing to do with the
+          -- endpoints it tests. Demo data has produced exactly that.
+          AND u.password_hash IS NOT NULL
+        ORDER BY fc.created_at
+        LIMIT 1`,
     );
     if (!staffRow.rows.length || !clientRow.rows.length) {
       console.log('no staff or client login in this database — nothing to test against');

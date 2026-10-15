@@ -231,14 +231,24 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
       `/finance/invoices/consolidated/preview?customerId=${made.customerId}&month=${TEST_MONTH}&year=${TEST_YEAR}`,
       { token: finance })).body;
 
-    // Supplier in Delhi, customer in Delhi — intra-state, so CGST + SGST.
-    await setSupplier('Delhi');
+    // The fixture uses whatever customer the database already has, and that
+    // customer can be in any state — assuming Delhi made this pair of checks
+    // swap places the day a Haryana customer turned up. The supplier's state
+    // is set relative to the customer's instead: same state means CGST+SGST,
+    // a different one means IGST.
+    const customerState = String(cust.state ?? 'Delhi').trim() || 'Delhi';
+    const elsewhere = customerState.toLowerCase() === 'haryana' ? 'Delhi' : 'Haryana';
+
+    await setSupplier(customerState);
     const intra = await previewNow();
     const ti = intra?.totals ?? {};
     check('a registered supplier issues a Tax Invoice', intra?.document_type === 'TAX_INVOICE', intra?.document_type);
     check('nothing is reported missing', (intra?.missing_for_tax_invoice ?? []).length === 0, intra?.missing_for_tax_invoice);
 
-    const base = money(ti.staff_salary + ti.employer_esic + ti.employer_pf + ti.management_fee);
+    // other_charges carries relieving, LWF and uniform. It is zero unless the
+    // placement came from the wage form, which is why leaving it out of this
+    // sum went unnoticed.
+    const base = money(ti.staff_salary + ti.employer_esic + ti.employer_pf + ti.management_fee + (ti.other_charges ?? 0));
     check('the taxable value is still the whole consideration', money(ti.taxable_value) === base,
       { taxable_value: ti.taxable_value, base });
     check('GST is 18% of the whole consideration', money(ti.gst_total) === money(base * 0.18),
@@ -255,8 +265,8 @@ const money = (v) => Math.round(Number(v) * 100) / 100;
     check('the invoice total is the consideration plus its tax',
       money(ti.total) === money(base + money(ti.gst_total)), { total: ti.total, base, gst: ti.gst_total });
 
-    // Supplier in Haryana, customer in Delhi — inter-state, so IGST.
-    await setSupplier('Haryana');
+    // Supplier somewhere else — inter-state, so IGST.
+    await setSupplier(elsewhere);
     const inter = await previewNow();
     const te = inter?.totals ?? {};
     check('inter-state charges IGST and no CGST/SGST',
