@@ -193,7 +193,12 @@ export class CommercialService {
     const uniformAllowance = Number(config.uniform_allowance) || 275;
     const relievingPct = Number(config.relieving_pct) || 0;
     const managementPct = Number(config.management_pct) || 0;
-    const trainingCharges = Number(config.training_charges) || 0;
+    // A percentage, as the sheet has it. The old flat figure still works for
+    // configs saved before this existed: it is used only when no percentage is
+    // set, so nothing already quoted changes underneath anyone.
+    const trainingPct = Number(config.training_pct) || 0;
+    const trainingFlat = Number(config.training_charges) || 0;
+    const gratuityPct = Number(config.gratuity_pct) || 4.81;
     const gstPct = Number(config.gst_pct) || 18;
     const professionalTax = Number(config.professional_tax) || 0;
     const nfhVal = Number(config.nfh) || 0;
@@ -206,6 +211,8 @@ export class CommercialService {
     const lwfOn = config.lwf_applicable !== false;
     const uniformOn = config.uniform_applicable !== false;
     const relievingOn = config.relieving_applicable !== false;
+    // Off unless asked for — see wage-calculator.util.ts.
+    const gratuityOn = config.gratuity_applicable === true;
     const nfhOn = config.nfh_applicable === true;
 
     // ── Phase A: Gross Salary ──
@@ -258,10 +265,12 @@ export class CommercialService {
     const uniform = uniformOn ? uniformAllowance : 0;
 
     // ── Phase C: CTC ──
-    const subtotal3 = subtotal2 + employerPf + esic + bonus + leaveWages + nfh + lwf + uniform;
+    const gratuity = gratuityOn ? subtotal1 * (gratuityPct / 100) : 0;
+    const subtotal3 = subtotal2 + employerPf + esic + bonus + leaveWages + nfh + lwf + uniform + gratuity;
     const relieving = relievingOn ? subtotal3 * (relievingPct / 100) : 0;
     const subtotal4 = subtotal3 + relieving;
     const managementFee = subtotal4 * (managementPct / 100);
+    const trainingCharges = trainingPct > 0 ? subtotal4 * (trainingPct / 100) : trainingFlat;
     const monthlyCostPerResource = subtotal4 + managementFee + trainingCharges;
     const monthlyCost = monthlyCostPerResource * (noOfResources || 1);
     const dailyRate = monthlyCostPerResource / 30.45;
@@ -315,6 +324,7 @@ export class CommercialService {
       esic,
       lwf,
       uniform,
+      gratuity,
       nfh,
       subtotal3,
       relieving,

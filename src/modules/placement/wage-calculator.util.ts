@@ -19,6 +19,10 @@ export interface WageConfigInput {
   employer_esic_pct?: number;
   employee_esic_pct?: number;
   bonus_pct?: number;
+  /** Gratuity as a percentage of basic + DA. The sheet uses 4.81%. */
+  gratuity_pct?: number;
+  /** Training charges as a percentage of the sub-total the fee is taken from. */
+  training_pct?: number;
   leave_days?: number;
   lwf_amount?: number;
   uniform_allowance?: number;
@@ -29,6 +33,13 @@ export interface WageConfigInput {
   pf_applicable?: boolean;
   esic_applicable?: boolean;
   bonus_applicable?: boolean;
+  /**
+   * Off unless explicitly switched on — unlike every other toggle here, which
+   * defaults to true. Gratuity is payable after five years of service, so
+   * charging a client for it every month is a commercial decision rather than
+   * something that should happen by default.
+   */
+  gratuity_applicable?: boolean;
   bonus_frequency?: 'monthly' | 'yearly';
   lwf_applicable?: boolean;
   uniform_applicable?: boolean;
@@ -56,10 +67,12 @@ export interface WageBreakup {
   esicEmployer: number;
   lwf: number;
   uniform: number;
+  gratuity: number;
   subtotal3: number;
   relieving: number;
   subtotal4: number;
   managementFee: number;
+  trainingCharges: number;
   totalCTC: number;
   ratePerDay: number;
   ratePerHour: number;
@@ -80,6 +93,41 @@ export interface WageBreakup {
   totalGstAmount: number;
 }
 
+export interface NfhClaim {
+  /** Two days' wage for the one holiday worked. */
+  doublePay: number;
+  esic: number;
+  serviceCharge: number;
+  total: number;
+}
+
+/**
+ * What one national or festival holiday worked is billed at.
+ *
+ * The cost sheet bills these separately from the monthly cost — "charged at
+ * actuals", because nobody knows in advance who will work a holiday. A month's
+ * wage covers twenty-six duties, so a holiday worked is a twenty-seventh, paid
+ * at double: `subtotal2 / 26 × 2`. Employer ESIC is charged on that, and the
+ * service charge on the two together.
+ *
+ * Derived from the sheet and checked against all nine of its columns — the
+ * Lady Guard's 1,363.84 + 44.32 + 77.45 = 1,485.61 among them.
+ *
+ * This is what the *client* pays. What the staff member receives for working
+ * the holiday is a separate question, because our payroll pro-rates a monthly
+ * wage by days present rather than counting duties.
+ */
+export function nfhClaimPerDay(
+  subtotal2: number,
+  esicPct = 3.25,
+  serviceChargePct = 5.5,
+): NfhClaim {
+  const doublePay = (Number(subtotal2) || 0) / 26 * 2;
+  const esic = doublePay * (esicPct / 100);
+  const serviceCharge = (doublePay + esic) * (serviceChargePct / 100);
+  return { doublePay, esic, serviceCharge, total: doublePay + esic + serviceCharge };
+}
+
 export function computeWageBreakup(d: WageConfigInput): WageBreakup {
   const basic = Number(d.basic_wage) || 0;
   const da = Number(d.da) || 0;
@@ -92,6 +140,8 @@ export function computeWageBreakup(d: WageConfigInput): WageBreakup {
   const employerEsicPct = Number(d.employer_esic_pct) || 0;
   const employeeEsicPct = Number(d.employee_esic_pct) || 0;
   const bonusPct = Number(d.bonus_pct) || 0;
+  const gratuityPct = Number(d.gratuity_pct) || 4.81;
+  const trainingPct = Number(d.training_pct) || 0;
   const leaveDays = Number(d.leave_days) || 32;
   const lwfAmount = Number(d.lwf_amount) || 62;
   const uniformAllowance = Number(d.uniform_allowance) || 275;
@@ -137,12 +187,19 @@ export function computeWageBreakup(d: WageConfigInput): WageBreakup {
 
   const lwf = lwfOn ? lwfAmount : 0;
   const uniform = uniformOn ? uniformAllowance : 0;
+  // Gratuity sits in the sheet's statutory block, so it carries through
+  // relieving and the management fee the same way employer PF and ESIC do.
+  const gratuity = d.gratuity_applicable === true ? subtotal1 * (gratuityPct / 100) : 0;
 
-  const subtotal3 = subtotal2 + epfoEmployer + esicEmployer + bonusMonthly + leaveWages + lwf + uniform;
+  const subtotal3 = subtotal2 + epfoEmployer + esicEmployer + bonusMonthly + leaveWages + lwf + uniform + gratuity;
   const relieving = relievingOn ? subtotal3 * (relievingPct / 100) : 0;
   const subtotal4 = subtotal3 + relieving;
   const managementFee = subtotal4 * (managementPct / 100);
-  const totalCTC = subtotal4 + managementFee;
+  // Training is a percentage of the same sub-total the management fee is taken
+  // from, as the sheet has it. A flat figure is expressed as 0% here and added
+  // to the fee instead.
+  const trainingCharges = subtotal4 * (trainingPct / 100);
+  const totalCTC = subtotal4 + managementFee + trainingCharges;
   const ratePerDay = totalCTC / 30.45;
   const ratePerHour = ratePerDay / 8;
 
@@ -176,8 +233,8 @@ export function computeWageBreakup(d: WageConfigInput): WageBreakup {
 
   return {
     subtotal1, additionalHoursPct, additionalHours, subtotal2, bonusRaw, bonusMonthly, leaveWages,
-    pfBase, epfoEmployer, esicEmployer, lwf, uniform, subtotal3, relieving, subtotal4, managementFee,
-    totalCTC, ratePerDay, ratePerHour, grossEarnings, epfoEmployee, esicEmployee, totalDeductions, netSalary,
+    pfBase, epfoEmployer, esicEmployer, lwf, uniform, gratuity, subtotal3, relieving, subtotal4, managementFee,
+    trainingCharges, totalCTC, ratePerDay, ratePerHour, grossEarnings, epfoEmployee, esicEmployee, totalDeductions, netSalary,
     gstOn, gstType, gstRate, cgstPct, sgstPct, igstPct, cgstAmount, sgstAmount, igstAmount, totalGstAmount,
   };
 }

@@ -385,7 +385,12 @@ export class FinancePayrollService {
    * client mid-month must not be blocked by the first one already being done.
    * See docs/HOURLY_MULTI_CLIENT_PLAN.md §B4.
    */
-  async generateAttendanceByCode(code: string, month: number, year: number) {
+  async generateAttendanceByCode(
+    code: string,
+    month: number,
+    year: number,
+    nfh: { nfhDays?: number; placementId?: string } = {},
+  ) {
     const lookup = await this.resolveCode(code);
 
     if (!lookup.placement_id) {
@@ -398,9 +403,23 @@ export class FinancePayrollService {
     const runs: Record<string, unknown>[] = [];
     const skipped: { client_name: string | null; reason: string }[] = [];
 
+    // A holiday is worked at one client's premises. When a staff member is
+    // placed at several, the count has to say which — billing it to all of
+    // them would invent money, and splitting it would invent a rule.
+    const nfhDays = Math.max(0, Math.floor(Number(nfh.nfhDays) || 0));
+    if (nfhDays > 0 && placements.length > 1 && !nfh.placementId) {
+      throw new BadRequestException(
+        `${code} is placed with ${placements.length} clients. Say which one the ` +
+        `${nfhDays} national holiday(s) were worked at — send placement_id with the request.`,
+      );
+    }
+
     for (const p of placements) {
       try {
-        const result = await this.corePayroll.runAttendancePayroll(p.id, month, year);
+        const daysHere = nfhDays > 0 && (placements.length === 1 || p.id === nfh.placementId)
+          ? nfhDays
+          : 0;
+        const result = await this.corePayroll.runAttendancePayroll(p.id, month, year, daysHere);
         runs.push({
           placement_id: p.id,
           client_name: p.client_name,

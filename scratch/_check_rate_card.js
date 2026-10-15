@@ -178,5 +178,43 @@ for (const col of COLUMNS) {
   else console.log(`   all ${rows.length} rows within Rs.${TOLERANCE}`);
 }
 
+const expect = (label, got, want) => {
+  checked += 1;
+  const ok = Math.abs(Number(got) - Number(want)) <= 0.02;
+  if (!ok) offending += 1;
+  console.log(`  ${ok ? 'ok ' : 'OFF'}  ${label.padEnd(52)} ${Math.round(got * 100) / 100}  (want ${Math.round(want * 100) / 100})`);
+};
+
+// ── the identity payroll and the invoice depend on ─────────────────────────
+// The client's cost, decomposed the way the invoice has to put it back
+// together: the wage, the employer's statutory share, the agreed extras, and
+// the fee. The 21% under-billing happened because a part of this was simply
+// missing downstream, so the sum is worth asserting on its own.
+console.log('\n== CTC decomposes the way the invoice rebuilds it ==');
+for (const col of COLUMNS) {
+  const b = computeWageBreakup({ ...RATES, ...col.in });
+  const rebuilt = b.grossEarnings + b.epfoEmployer + b.esicEmployer + b.lwf + b.uniform
+    + b.gratuity + b.relieving + b.managementFee + b.trainingCharges;
+  expect(col.name, rebuilt, b.totalCTC);
+}
+
+// ── the two rows this sheet carries but leaves at zero ─────────────────────
+console.log('\n== Gratuity and training ==');
+const plain = computeWageBreakup({ ...RATES, ...COLUMNS[0].in });
+const withGratuity = computeWageBreakup({ ...RATES, ...COLUMNS[0].in, gratuity_applicable: true });
+const withTraining = computeWageBreakup({ ...RATES, ...COLUMNS[0].in, training_pct: 1 });
+
+expect('gratuity stays off unless switched on', plain.gratuity, 0);
+expect('gratuity is 4.81% of basic + DA', withGratuity.gratuity, plain.subtotal1 * 0.0481);
+// It belongs to the statutory block, so relieving and the fee are taken on it
+// too — charging it must raise the CTC by more than the gratuity itself.
+expect('and relieving and the fee are taken on it',
+  withGratuity.totalCTC, (plain.subtotal3 + plain.subtotal1 * 0.0481) * 1.1667 * 1.055);
+expect('training stays zero without a percentage', plain.trainingCharges, 0);
+expect('training is 1% of the pre-fee sub total',
+  withTraining.trainingCharges, withTraining.subtotal4 * 0.01);
+expect('and is added alongside the fee, not inside it',
+  withTraining.totalCTC, withTraining.subtotal4 + withTraining.managementFee + withTraining.subtotal4 * 0.01);
+
 console.log(`\n${checked} figures checked · ${offending} outside Rs.${TOLERANCE} · largest gap Rs.${Math.round(worst * 100) / 100}`);
 process.exitCode = offending ? 1 : 0;
