@@ -18,12 +18,12 @@ require('dotenv').config();
 const { Client } = require('pg');
 const { createCustomer } = require('./_fixtures');
 
-let computeWageBreakup, nfhClaimPerDay;
+let computeWageBreakup;
 try {
-  ({ computeWageBreakup, nfhClaimPerDay } = require('../dist/modules/placement/wage-calculator.util'));
+  ({ computeWageBreakup } = require('../dist/modules/placement/wage-calculator.util'));
 } catch {
   require('ts-node/register');
-  ({ computeWageBreakup, nfhClaimPerDay } = require('../src/modules/placement/wage-calculator.util'));
+  ({ computeWageBreakup } = require('../src/modules/placement/wage-calculator.util'));
 }
 
 const BASE = process.env.TEST_BASE || 'http://localhost:3001/api/v1';
@@ -80,7 +80,7 @@ async function login(phone) {
 (async () => {
   const db = new Client({ connectionString: process.env.DATABASE_URL });
   await db.connect();
-  const made = { customer: null, placementId: null, staffId: null, invoiceIds: [] };
+  const made = { customer: null, placementId: null, staffId: null, invoiceId: null };
 
   try {
     const rm = await login(RM_PHONE);
@@ -173,79 +173,27 @@ async function login(phone) {
       token: finance, body: { customer_id: made.customer.customerId, month: MONTH, year: YEAR },
     });
     check('the invoice is raised', gen.status === 200 || gen.status === 201, { status: gen.status, body: gen.body });
-    const invoiceId = (gen.body?.invoice ?? gen.body)?.id;
-    made.invoiceIds.push(invoiceId);
+    made.invoiceId = (gen.body?.invoice ?? gen.body)?.id;
 
     const inv = (await db.query(
-      `SELECT taxable_value, total_amount, gst_amount FROM client_invoices WHERE id = $1`, [invoiceId])).rows[0];
+      `SELECT taxable_value, total_amount, gst_amount FROM client_invoices WHERE id = $1`, [made.invoiceId])).rows[0];
     // This is the number the whole exercise is about.
     check('the client is billed the sheet CTC', near(inv?.taxable_value, SHEET.ctc),
       { billed: inv?.taxable_value, sheet: SHEET.ctc, short_by: Math.round(SHEET.ctc - Number(inv?.taxable_value ?? 0)) });
 
     const items = (await db.query(
-      `SELECT description, amount FROM invoice_items WHERE invoice_id = $1 ORDER BY sort_order`, [invoiceId])).rows;
+      `SELECT description, amount FROM invoice_items WHERE invoice_id = $1 ORDER BY sort_order`, [made.invoiceId])).rows;
     check('the agreed charges appear as their own line',
       items.some((i) => /Agreed charges/.test(i.description)), items.map((i) => i.description));
     const itemSum = Math.round(items.reduce((t, i) => t + Number(i.amount), 0) * 100) / 100;
     check('line items still reconcile to the invoice total', near(itemSum, inv?.total_amount),
       { itemSum, total: inv?.total_amount });
 
-
-    // ── holidays, billed at actuals ────────────────────────────────────────
-    // A holiday worked is a duty the monthly wage does not cover, so the sheet
-    // bills it separately: two days' wage, employer ESIC on that, and the
-    // service charge on the two together.
-    console.log('\n[5] A national holiday worked is billed at double');
-    const NFH_MONTH = MONTH + 1;
-    const nfhDim = new Date(YEAR, NFH_MONTH, 0).getDate();
-    for (let d = 1; d <= nfhDim; d++) {
-      await db.query(
-        `INSERT INTO staff_daily_attendance
-           (id, staff_id, placement_id, branch_id, attendance_date, status, marked_by, created_at, updated_at)
-         VALUES (gen_random_uuid(), $1, $2, $3, make_date($4,$5,$6), 'PRESENT', $1, now(), now())
-         ON CONFLICT (staff_id, placement_id, attendance_date) DO NOTHING`,
-        [free.id, made.placementId, branch.branch_id, YEAR, NFH_MONTH, d]);
-    }
-    const payNfh = await req('POST', '/finance/payroll/attendance-generate', {
-      token: finance,
-      body: { code: free.staff_code, month: NFH_MONTH, year: YEAR, nfh_days: 2 },
-    });
-    check('payroll runs with a holiday count', payNfh.status === 200 || payNfh.status === 201,
-      { status: payNfh.status, body: payNfh.body });
-
-    const claim = nfhClaimPerDay(want.subtotal2, 3.25, 5.5);
-    const prNfh = (await db.query(
-      `SELECT nfh_days, nfh_charges FROM payroll_records
-        WHERE placement_id = $1 AND period_month = $2 AND period_year = $3`,
-      [made.placementId, NFH_MONTH, YEAR])).rows[0];
-    check('the holidays are recorded on the payroll row', Number(prNfh?.nfh_days) === 2, prNfh?.nfh_days);
-    check('the charge follows the sheet formula', near(prNfh?.nfh_charges, claim.total * 2),
-      { got: prNfh?.nfh_charges, want: claim.total * 2, perDay: claim });
-
-    const genNfh = await req('POST', '/finance/invoices/consolidated/generate', {
-      token: finance, body: { customer_id: made.customer.customerId, month: NFH_MONTH, year: YEAR },
-    });
-    check('the invoice is raised', genNfh.status === 200 || genNfh.status === 201,
-      { status: genNfh.status, body: genNfh.body });
-    const nfhInvoiceId = (genNfh.body?.invoice ?? genNfh.body)?.id;
-    made.invoiceIds.push(nfhInvoiceId);
-
-    const invNfh = (await db.query(
-      `SELECT taxable_value FROM client_invoices WHERE id = $1`, [nfhInvoiceId])).rows[0];
-    check('the client is billed the CTC plus the holidays',
-      near(invNfh?.taxable_value, SHEET.ctc + claim.total * 2),
-      { billed: invNfh?.taxable_value, want: SHEET.ctc + claim.total * 2 });
-    const nfhItems = (await db.query(
-      `SELECT description FROM invoice_items WHERE invoice_id = $1`, [nfhInvoiceId])).rows;
-    check('the holidays appear as their own line',
-      nfhItems.some((i) => /National holidays/.test(i.description)),
-      nfhItems.map((i) => i.description));
-
     // ── the quotation side ─────────────────────────────────────────────────
     // The same sheet drives Finance's Commercial Calculator, through a second
     // copy of the formula that nothing was testing. What is quoted and what is
     // billed have to be the same number.
-    console.log('\n[6] The Commercial Calculator quotes the same sheet');
+    console.log('\n[5] The Commercial Calculator quotes the same sheet');
     const quote = await req('POST', '/finance/commercial/calculations/calculate', {
       token: finance,
       body: {
@@ -284,12 +232,11 @@ async function login(phone) {
   } finally {
     console.log('\ncleaning up…');
     try {
-      if (made.invoiceIds.length) {
-        const ids = made.invoiceIds;
-        await db.query(`UPDATE payroll_records SET client_invoice_id = NULL WHERE client_invoice_id = ANY($1::uuid[])`, [ids]);
-        await db.query(`DELETE FROM invoice_items WHERE invoice_id = ANY($1::uuid[])`, [ids]);
-        await db.query(`DELETE FROM payment_reminders WHERE invoice_id = ANY($1::uuid[])`, [ids]);
-        await db.query(`DELETE FROM client_invoices WHERE id = ANY($1::uuid[])`, [ids]);
+      if (made.invoiceId) {
+        await db.query(`UPDATE payroll_records SET client_invoice_id = NULL WHERE client_invoice_id = $1`, [made.invoiceId]);
+        await db.query(`DELETE FROM invoice_items WHERE invoice_id = $1`, [made.invoiceId]);
+        await db.query(`DELETE FROM payment_reminders WHERE invoice_id = $1`, [made.invoiceId]);
+        await db.query(`DELETE FROM client_invoices WHERE id = $1`, [made.invoiceId]);
       }
       if (made.placementId) {
         await db.query(`DELETE FROM staff_daily_attendance WHERE placement_id = $1`, [made.placementId]);

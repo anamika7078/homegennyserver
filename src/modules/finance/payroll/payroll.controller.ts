@@ -51,18 +51,9 @@ export class FinancePayrollController {
   @Post('attendance-generate')
   @ApiOperation({ summary: 'Generate attendance-based payroll / invoice by employee code' })
   generateAttendanceByCode(
-    @Body() body: {
-      code: string; month: number; year: number;
-      /** Holidays worked in the period — billed at actuals, so counted by hand. */
-      nfh_days?: number;
-      /** Required with nfh_days when the staff member is placed at more than one client. */
-      placement_id?: string;
-    },
+    @Body() body: { code: string; month: number; year: number },
   ) {
-    return this.service.generateAttendanceByCode(body.code, body.month, body.year, {
-      nfhDays: body.nfh_days,
-      placementId: body.placement_id,
-    });
+    return this.service.generateAttendanceByCode(body.code, body.month, body.year);
   }
 
   @Get('attendance-preview/download')

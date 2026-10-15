@@ -340,17 +340,12 @@ export class FinanceInvoiceService {
       staff_name: string; series: string | null; placement_type: string | null;
       shift_days: string | null; hours_worked: string | null; hourly_rate: string | null;
       shift_hours: string | null; amount: string | null;
-      nfh_days: number | null; nfh_charges: string | null;
     }[]>(
       `SELECT sa.full_name AS staff_name, sa.series::text AS series,
               pr.placement_type, pr.shift_days, pr.hours_worked, pr.hourly_rate,
               p.shift_hours,
-              pr.nfh_days, pr.nfh_charges,
-              -- Holidays come out of the per-staff figure because they are not
-              -- part of the monthly rate; they are added back as their own line.
               (SELECT COALESCE(SUM(ii.amount), 0) FROM invoice_items ii
-                WHERE ii.invoice_id = $1 AND ii.staff_id = pr.staff_id)
-                - COALESCE(pr.nfh_charges, 0) AS amount
+                WHERE ii.invoice_id = $1 AND ii.staff_id = pr.staff_id) AS amount
          FROM payroll_records pr
          JOIN placements p ON p.id = pr.placement_id
          JOIN staff_applicants sa ON sa.id = pr.staff_id
@@ -361,7 +356,7 @@ export class FinanceInvoiceService {
     if (!rows.length) return null;
 
     const { days } = periodRange(month, year);
-    const lines = buildServiceLines(
+    return buildServiceLines(
       rows.map((r) => ({
         staff_name: r.staff_name,
         series: r.series,
@@ -374,21 +369,6 @@ export class FinanceInvoiceService {
       })),
       days,
     );
-
-    // A holiday is charged at actuals on top of the month, so it gets its own
-    // line. Folding it into a staff member's line would push up the rate per
-    // duty shown beside it and invite exactly the argument the working is
-    // there to prevent.
-    const nfhDays = rows.reduce((t, r) => t + Number(r.nfh_days ?? 0), 0);
-    const nfhAmount = rows.reduce((t, r) => t + Number(r.nfh_charges ?? 0), 0);
-    if (nfhAmount > 0) {
-      lines.push({
-        strength: rows.filter((r) => Number(r.nfh_days ?? 0) > 0).length,
-        description: `National & festival holidays worked — ${nfhDays} day${nfhDays === 1 ? '' : 's'} at double rate`,
-        amount: Math.round(nfhAmount * 100) / 100,
-      });
-    }
-    return lines;
   }
 
   /**

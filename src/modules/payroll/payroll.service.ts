@@ -13,7 +13,6 @@ import {
   PF_RATE_DEFAULT,
   PF_WAGE_CEILING,
 } from '../../common/finance/statutory-calc.util';
-import { nfhClaimPerDay } from '../placement/wage-calculator.util';
 import { StatutoryTaxService } from '../finance/tax/statutory-tax.service';
 import { ConsolidatedInvoiceService } from '../finance/invoice/consolidated-invoice.service';
 
@@ -37,10 +36,6 @@ export interface PayrollCalculation {
   managementFee: number;
   /** Relieving, LWF and uniform — agreed with the client, not paid to staff. */
   otherCharges: number;
-  /** National and festival holidays worked, as Finance counted them. */
-  nfhDays: number;
-  /** What those holidays are billed at. See nfhClaimPerDay. */
-  nfhCharges: number;
   gstOnFee: number;
   clientTotalCharge: number;
   /** Rates actually applied — falls back to statutory defaults when the placement has no wage_config. */
@@ -62,8 +57,6 @@ interface WageConfigRates {
   employer_esic_pct?: number;
   employee_esic_pct?: number;
   gst_pct?: number;
-  /** The service charge a holiday claim carries — the same rate as the fee. */
-  management_pct?: number;
 }
 
 interface PlacementRow {
@@ -109,8 +102,7 @@ function pfBaseFromPlacementMetadata(metadata: unknown): number | null {
 
 /**
  * What the client owes beyond wages, employer PF/ESIC and the management fee:
- * relieving charges, LWF, the uniform allowance, gratuity where it is charged,
- * and training.
+ * relieving charges, LWF and the uniform allowance.
  *
  * The cost sheet's CTC is gross + employer PF + employer ESIC + these + fee.
  * They were priced at quotation time and then went nowhere — the invoice added
@@ -122,29 +114,12 @@ function otherChargesFromPlacementMetadata(metadata: unknown): number {
   if (!metadata || typeof metadata !== 'object') return 0;
   const breakup = (metadata as { wage_breakup?: Record<string, unknown> }).wage_breakup;
   if (!breakup || typeof breakup !== 'object') return 0;
-  const sum = ['relieving', 'lwf', 'uniform', 'gratuity', 'trainingCharges'].reduce((total, key) => {
+  const sum = ['relieving', 'lwf', 'uniform'].reduce((total, key) => {
     const raw = breakup[key];
     const n = typeof raw === 'number' ? raw : parseFloat(String(raw ?? ''));
     return total + (Number.isFinite(n) && n > 0 ? n : 0);
   }, 0);
   return round2(sum);
-}
-
-/**
- * The wage a holiday's double pay is reckoned against.
- *
- * The cost sheet uses Sub Total 2 — the wage before the statutory block. A
- * placement priced with a flat salary has no breakup to read, and then the
- * monthly wage itself is the closest honest equivalent.
- */
-function nfhBasisFromPlacementMetadata(metadata: unknown, monthlyWage: number): number {
-  if (metadata && typeof metadata === 'object') {
-    const breakup = (metadata as { wage_breakup?: Record<string, unknown> }).wage_breakup;
-    const raw = breakup && typeof breakup === 'object' ? breakup.subtotal2 : undefined;
-    const n = typeof raw === 'number' ? raw : parseFloat(String(raw ?? ''));
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  return Number.isFinite(monthlyWage) && monthlyWage > 0 ? monthlyWage : 0;
 }
 
 interface ShiftCountRow { shift_days: string; }
@@ -264,8 +239,6 @@ export class PayrollService {
     rates?: WageConfigRates,
     pfBase?: number,
     otherCharges = 0,
-    nfhDays = 0,
-    nfhCharges = 0,
   ): PayrollCalculation {
     const esic = calculateEsic(grossSalary, rates?.employee_esic_pct, rates?.employer_esic_pct);
     const pf = calculatePfFlat(pfBase ?? grossSalary, rates?.employee_pf_pct, rates?.employer_pf_pct, rates?.employer_pf_max);
@@ -273,7 +246,7 @@ export class PayrollService {
     // GST is on the whole consideration, not the fee — see
     // calculateGstOnClientCharge. `gstOnFee` keeps its name so the field the
     // apps read does not move under them; what it holds is the full tax.
-    const taxableValue = round2(grossSalary + esic.employer + pf.employer + managementFee + otherCharges + nfhCharges);
+    const taxableValue = round2(grossSalary + esic.employer + pf.employer + managementFee + otherCharges);
     const gstOnFee = calculateGstOnClientCharge(taxableValue, rates?.gst_pct);
     const clientTotalCharge = round2(taxableValue + gstOnFee);
 
@@ -286,8 +259,6 @@ export class PayrollService {
       netSalary,
       managementFee: round2(managementFee),
       otherCharges: round2(otherCharges),
-      nfhDays,
-      nfhCharges: round2(nfhCharges),
       gstOnFee,
       clientTotalCharge,
       ratesUsed: {
@@ -333,7 +304,7 @@ export class PayrollService {
       pfEmployee: pf.employee, pfEmployer: pf.employer, netSalary,
       // No wage breakup reaches this percentage-fee path, so there are no
       // separately agreed charges to bill.
-      managementFee, otherCharges: 0, nfhDays: 0, nfhCharges: 0, gstOnFee, clientTotalCharge,
+      managementFee, otherCharges: 0, gstOnFee, clientTotalCharge,
       ratesUsed: {
         pfEmployeePct: PF_RATE_DEFAULT,
         pfEmployerPct: PF_RATE_DEFAULT,
@@ -557,7 +528,7 @@ export class PayrollService {
     };
   }
 
-  async previewAttendancePayroll(placementId: string, month: number, year: number, nfhDays = 0) {
+  async previewAttendancePayroll(placementId: string, month: number, year: number) {
     const placements = await this.dataSource.query<
       (PlacementRow & {
         placement_type: string;
@@ -638,20 +609,8 @@ export class PayrollService {
       ? proratedGross / monthEarnings.totalGross
       : 1;
 
-    // Holidays are billed at actuals — there is no holiday calendar to read,
-    // so the count comes from Finance when payroll is run, and the rate comes
-    // from the placement's own wage terms.
-    const nfh = nfhDays > 0
-      ? nfhClaimPerDay(
-          nfhBasisFromPlacementMetadata(p.metadata, Number(p.staff_salary) || 0),
-          rates?.employer_esic_pct,
-          rates?.management_pct,
-        )
-      : null;
-    const nfhCharges = nfh ? round2(nfh.total * nfhDays) : 0;
-
     let calc = this.calculatePayrollWithAbsoluteFee(
-      proratedGross, proratedFee, rates, proratedPfBase, proratedOther, nfhDays, nfhCharges,
+      proratedGross, proratedFee, rates, proratedPfBase, proratedOther,
     );
 
     // Only worth recomputing when the staff member actually works elsewhere —
@@ -751,7 +710,6 @@ export class PayrollService {
     placementId: string,
     month: number,
     year: number,
-    nfhDays = 0,
   ): Promise<Record<string, unknown>> {
     const already = await this.dataSource.query<{ id: string }[]>(
       `SELECT id FROM payroll_records
@@ -765,7 +723,7 @@ export class PayrollService {
       );
     }
 
-    const preview = await this.previewAttendancePayroll(placementId, month, year, nfhDays);
+    const preview = await this.previewAttendancePayroll(placementId, month, year);
     // What makes a period billable depends on how the placement is priced:
     // days for a permanent one, hours for an hourly one. A four-hour visit is
     // one day and would otherwise be judged the same as a full month.
@@ -825,9 +783,9 @@ export class PayrollService {
           gross_salary, deductions, net_salary,
           esic_employer, esic_employee, pf_employer, pf_employee,
           placement_type, hours_worked, hourly_rate, hourly_fee, management_fee,
-          other_charges, nfh_days, nfh_charges)
+          other_charges)
        VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-               $13,$14,$15,$16,$17,$18,$19,$20) RETURNING *`,
+               $13,$14,$15,$16,$17,$18) RETURNING *`,
       [
         placementId,
         staffId,
@@ -847,8 +805,6 @@ export class PayrollService {
         isHourly ? preview.hourly_fee : null,
         preview.prorated_management_fee ?? calc.managementFee,
         calc.otherCharges,
-        calc.nfhDays,
-        calc.nfhCharges,
       ],
     );
   }
@@ -857,7 +813,6 @@ export class PayrollService {
     placementId: string,
     month: number,
     year: number,
-    nfhDays = 0,
   ): Promise<Record<string, unknown>> {
     // Keyed off payroll, not off the invoice: a consolidated invoice covers a
     // whole client and carries no placement_id, so "has this placement already
@@ -874,7 +829,7 @@ export class PayrollService {
       );
     }
 
-    const preview = await this.previewAttendancePayroll(placementId, month, year, nfhDays);
+    const preview = await this.previewAttendancePayroll(placementId, month, year);
     // What makes a period billable depends on how the placement is priced:
     // days for a permanent one, hours for an hourly one. A four-hour visit is
     // one day and would otherwise be judged the same as a full month.
