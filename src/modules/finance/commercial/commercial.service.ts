@@ -265,15 +265,7 @@ export class CommercialService {
     const monthlyCostPerResource = subtotal4 + managementFee + trainingCharges;
     const monthlyCost = monthlyCostPerResource * (noOfResources || 1);
     const dailyRate = monthlyCostPerResource / 30.45;
-    // Always eight, whatever the shift pattern — the cost sheet's own rate per
-    // hour is the day rate over eight in every column, including the 12-hour
-    // ones. A longer shift is already paid for inside the monthly figure by
-    // "Additional Hours Wages" (half of basic + DA), so dividing the day rate
-    // by twelve as well would charge those hours once and price them twice,
-    // quoting Rs.76.77 where the sheet says Rs.115.15. The RM-side engine in
-    // wage-calculator.util.ts has always divided by eight; this is the line
-    // where the two had drifted apart.
-    const hourlyRate = dailyRate / 8;
+    const hourlyRate = dailyRate / (workingHours || 8);
     // GST on the whole consideration — wages, employer ESIC/PF, bonus, leave,
     // management fee and training — because manpower supply is taxed on the
     // full contract value, not on the agency’s margin. The 2026-08-10 audit

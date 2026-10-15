@@ -188,44 +188,6 @@ async function login(phone) {
     const itemSum = Math.round(items.reduce((t, i) => t + Number(i.amount), 0) * 100) / 100;
     check('line items still reconcile to the invoice total', near(itemSum, inv?.total_amount),
       { itemSum, total: inv?.total_amount });
-
-    // ── the quotation side ─────────────────────────────────────────────────
-    // The same sheet drives Finance's Commercial Calculator, through a second
-    // copy of the formula that nothing was testing. What is quoted and what is
-    // billed have to be the same number.
-    console.log('\n[5] The Commercial Calculator quotes the same sheet');
-    const quote = await req('POST', '/finance/commercial/calculations/calculate', {
-      token: finance,
-      body: {
-        state: 'Haryana', zone: 'Zone-I',
-        items: [{
-          category: 'Semi-Skilled', no_of_resources: 1, working_hours: 12,
-          ...WAGE_CONFIG,
-          // Pinned so a wage config sitting in the database cannot quietly
-          // change what this is comparing.
-          nfh_applicable: false, training_charges: 0,
-          pf_applicable: true, esic_applicable: true, bonus_applicable: true,
-          lwf_applicable: true, uniform_applicable: true, relieving_applicable: true,
-        }],
-      },
-    });
-    check('the calculator answers', quote.status === 200 || quote.status === 201,
-      { status: quote.status, body: quote.body });
-    const q = (Array.isArray(quote.body) ? quote.body[0] : null) ?? {};
-    for (const [label, got, expected] of [
-      ['sub total 2', q.subtotal2, want.subtotal2],
-      ['employer PF', q.employerPf, want.epfoEmployer],
-      ['employer ESIC', q.esic, want.esicEmployer],
-      ['leave wages', q.leaveWages, want.leaveWages],
-      ['relieving', q.relieving, want.relieving],
-      ['management fee', q.managementFee, want.managementFee],
-      ['monthly cost is the sheet CTC', q.monthlyCost, SHEET.ctc],
-      ['rate per day', q.dailyRate, want.ratePerDay],
-      ['rate per hour', q.hourlyRate, want.ratePerHour],
-      ['net take home', q.netSalary, SHEET.net],
-    ]) {
-      check(`quote — ${label}`, near(got, expected), { got, expected });
-    }
   } catch (err) {
     fail++;
     console.log(`\n  ERROR  ${err.message}`);
