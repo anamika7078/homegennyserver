@@ -20,6 +20,17 @@ const TRIAL_DAYS_BY_SERIES: Record<string, number> = {
 };
 const DEFAULT_TRIAL_DAYS = 7;
 
+/** HH:MM, 24 h (IST). Blank → undefined (not given). */
+export function parseShiftStart(v: unknown): string | undefined {
+  if (v === undefined || v === null || String(v).trim() === '') return undefined;
+  const s = String(v).trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) {
+    throw new BadRequestException(`shift_start must be HH:MM (24 h), not "${s}".`);
+  }
+  return `${m[1].padStart(2, '0')}:${m[2]}`;
+}
+
 export interface PlacementList {
   items: PlacementRow[];
   total: number;
@@ -34,6 +45,8 @@ export interface PlacementRow {
   management_fee: string | number | null;
   placement_type?: 'PERMANENT' | 'TEMPORARY';
   shift_hours?: number | null;
+  /** HH:MM (IST) the shift starts; null = not known (never shown as late). */
+  shift_start?: string | null;
   hourly_rate?: number | null;
   hourly_fee?: number | null;
   trial_start_date: Date | string | null;
@@ -63,6 +76,7 @@ export class PlacementService {
     managementFee: unknown;
     placementType?: string | null;
     shiftHours?: unknown;
+    shiftStart?: string | null;
     hourlyRate?: unknown;
     hourlyFee?: unknown;
     trialStartDate: Date | null;
@@ -84,6 +98,7 @@ export class PlacementService {
       // hours; the placement list needs it to say what kind of placement it is.
       placement_type: (p.placementType as 'PERMANENT' | 'TEMPORARY' | null) ?? 'PERMANENT',
       shift_hours: p.shiftHours != null ? Number(p.shiftHours) : null,
+      shift_start: p.shiftStart ?? null,
       hourly_rate: p.hourlyRate != null ? Number(p.hourlyRate) : null,
       hourly_fee: p.hourlyFee != null ? Number(p.hourlyFee) : null,
       trial_start_date: p.trialStartDate,
@@ -204,6 +219,8 @@ export class PlacementService {
       data = {
         placement_type: sr.placementType,
         shift_hours: Number(sr.shiftHours),
+        // The booking's start time is when the shift starts — what "late" is measured from.
+        ...(sr.startTime ? { shift_start: sr.startTime } : {}),
         // A one-time visit is that one day.
         ...(sr.visitType === 'ONE_TIME' && visitDate ? { trial_start_date: visitDate, trial_end_date: visitDate } : {}),
         ...data,
@@ -274,6 +291,7 @@ export class PlacementService {
     const hourlyRate = data.hourly_rate != null ? Number(data.hourly_rate) : null;
     const hourlyFee = data.hourly_fee != null ? Number(data.hourly_fee) : null;
     const shiftHours = data.shift_hours != null ? Number(data.shift_hours) : 8;
+    const shiftStart = parseShiftStart(data.shift_start);
 
     if (isHourly && !(hourlyRate != null && hourlyRate > 0)) {
       throw new BadRequestException(
@@ -303,6 +321,7 @@ export class PlacementService {
         confirmedAt: directConfirm ? new Date() : undefined,
         placementType,
         shiftHours,
+        shiftStart: shiftStart ?? null,
         staffSalary: wageTerms.staffSalary,
         managementFee: wageTerms.managementFee,
         hourlyRate: isHourly ? hourlyRate : null,
@@ -360,13 +379,15 @@ export class PlacementService {
    */
   async updateTerms(
     id: string,
-    data: { staff_salary?: unknown; management_fee?: unknown; wage_config?: unknown },
+    data: { staff_salary?: unknown; management_fee?: unknown; wage_config?: unknown; shift_start?: unknown },
     actorId?: string,
   ) {
     const existing = await this.prisma.placement.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Placement not found');
 
     const wageTerms = this.resolveWageTerms(data);
+    // '' or null clears it (no start time → never late); absent leaves it alone.
+    const shiftStart = data.shift_start === undefined ? undefined : parseShiftStart(data.shift_start) ?? null;
     const existingMetadata = (existing.metadata as Record<string, unknown> | null) ?? {};
 
     const row = await this.prisma.placement.update({
@@ -374,6 +395,7 @@ export class PlacementService {
       data: {
         ...(wageTerms.staffSalary != null ? { staffSalary: wageTerms.staffSalary } : {}),
         ...(wageTerms.managementFee != null ? { managementFee: wageTerms.managementFee } : {}),
+        ...(shiftStart !== undefined ? { shiftStart } : {}),
         ...(Object.keys(wageTerms.metadataPatch).length
           ? { metadata: { ...existingMetadata, ...wageTerms.metadataPatch } as Prisma.InputJsonValue }
           : {}),
@@ -385,7 +407,7 @@ export class PlacementService {
       action: AuditAction.DEPLOYMENT_ACTION,
       entityType: 'placement',
       entityId: row.id,
-      metadata: { action: 'terms_updated', staff_salary: wageTerms.staffSalary, management_fee: wageTerms.managementFee, via_wage_config: !!data.wage_config },
+      metadata: { action: 'terms_updated', staff_salary: wageTerms.staffSalary, management_fee: wageTerms.managementFee, via_wage_config: !!data.wage_config, ...(shiftStart !== undefined ? { shift_start: shiftStart } : {}) },
     });
 
     const [staff, client] = await Promise.all([this.getStaffMeta(row.staffId), this.getClientMeta(row.clientId)]);

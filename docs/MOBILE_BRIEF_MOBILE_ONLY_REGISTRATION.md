@@ -2,6 +2,8 @@
 
 **21 Oct 2026 · For the Flutter app (checked against `homegennyapp` main @ `fc9f9d3`).**
 
+> **Update, same day:** §5–§7 (staff "under review", the client's name inside the first request, client profile screens) are **replaced** by *Login, Then "Complete Your Profile"* (`MOBILE_BRIEF_ONBOARDING.md`). The staff now fill in their own profile, and the client completes the profile before any request. §1–§4 (OTP login, what to remove, routing) still apply.
+
 The client asked that **a new app user only enters their mobile number**. Everything else becomes part of their
 profile and is filled in later:
 - **Staff:** the RM calls them and fills in the rest ("Complete S1" on the RM web).

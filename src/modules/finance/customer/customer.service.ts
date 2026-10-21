@@ -661,12 +661,23 @@ export class FinanceCustomerService implements OnModuleInit {
   }
 
   /** What a client still has to give before they can ask for staff. */
-  static missingProfileFields(c: { customer_name?: string | null; address?: string | null; metadata?: unknown }): string[] {
+  /**
+   * What a client who signed up from the app still has to give before they
+   * can ask for staff (docs/REGISTRATION_ONBOARDING_PLAN.md §A6). A customer
+   * Finance or an RM created is never held back by this — they were set up
+   * by hand and have no app profile to finish.
+   */
+  static missingProfileFields(c: {
+    customer_name?: string | null; address?: string | null; city?: string | null; pincode?: string | null; metadata?: unknown;
+  }): string[] {
     const meta = (c.metadata ?? {}) as Record<string, unknown>;
+    if (meta.self_registered !== true) return [];
     const missing: string[] = [];
     // Until then customer_name holds the placeholder "New client <phone>".
     if (meta.name_pending === true || !c.customer_name?.trim()) missing.push('name');
     if (!c.address?.trim()) missing.push('address');
+    if (!c.city?.trim()) missing.push('city');
+    if (!c.pincode?.trim()) missing.push('pincode');
     return missing;
   }
 

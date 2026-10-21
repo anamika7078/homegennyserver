@@ -48,6 +48,9 @@ import { ScenarioModule } from './modules/scenario/scenario.module';
 import { EnterpriseCronModule } from './modules/cron/cron.module';
 import { SeriesModule } from './modules/series/series.module';
 import { StaffRequestsModule } from './modules/staff-requests/staff-requests.module';
+import { SnapshotModule } from './modules/snapshot/snapshot.module';
+import { OnboardingModule } from './modules/onboarding/onboarding.module';
+import { ProfileGateGuard } from './modules/onboarding/profile-gate.guard';
 import { DailyCareModule } from './modules/daily-care/daily-care.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { HealthModule } from './modules/health/health.module';
@@ -151,6 +154,8 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     EnterpriseCronModule,
     SeriesModule,
     StaffRequestsModule,
+    SnapshotModule,
+    OnboardingModule,
     DailyCareModule,
     RealtimeModule,
     HealthModule,
@@ -198,6 +203,8 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     // see RolesGuard for the fail-closed rationale.
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    // After auth: an app user who hasn't finished their profile can read but not act.
+    { provide: APP_GUARD, useClass: ProfileGateGuard },
   ],
 })
 export class AppModule {}

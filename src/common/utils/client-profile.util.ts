@@ -1,11 +1,12 @@
 import { BadRequestException } from '@nestjs/common';
+import { OTHER_CITY, ServiceableCity, resolveCity } from '../../modules/staff/staff-profile.rules';
 
 /**
  * A client profile edit, checked — shared by PATCH /client/profile (the
  * client) and PATCH /rm/client-leads/:id (the RM on a call). Every field is
  * optional; blank means "leave as is".
  */
-export function parseClientProfileBody(body: Record<string, unknown>) {
+export function parseClientProfileBody(body: Record<string, unknown>, cities: ServiceableCity[]) {
   const str = (v: unknown, max: number, field: string) => {
     if (v === undefined || v === null) return undefined;
     const t = String(v).trim();
@@ -32,10 +33,19 @@ export function parseClientProfileBody(body: Record<string, unknown>) {
   if (lat !== undefined && (!Number.isFinite(lat) || !Number.isFinite(lng!) || Math.abs(lat) > 90 || Math.abs(lng!) > 180)) {
     throw new BadRequestException('lat/lng are not a real location.');
   }
+  // One of the cities HomeGenny works in (GET /meta/cities), or "Other" —
+  // it picks the branch a request goes to.
+  const cityRaw = str(body.city, 100, 'city');
+  let city: string | undefined;
+  if (cityRaw !== undefined) {
+    const c = resolveCity(cityRaw, cities);
+    if (!c) throw new BadRequestException(`city must be one of ${[...cities.map((x) => x.city), OTHER_CITY].join(', ')} (GET /meta/cities).`);
+    city = c.city;
+  }
   return {
     name,
     address,
-    city: str(body.city, 100, 'city'),
+    city,
     state: str(body.state, 100, 'state'),
     pincode,
     pan_card: pan,

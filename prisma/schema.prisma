@@ -454,6 +454,8 @@ model Placement {
   placementType    String          @default("PERMANENT") @map("placement_type") @db.VarChar(20)
   /// 8 or 12 — lifted out of metadata.wage_config, where the 12-hour uplift already read it.
   shiftHours       Decimal         @default(8) @map("shift_hours") @db.Decimal(4, 1)
+  /// HH:MM (IST) the shift starts — what "late" is measured from. Null = not known, never late.
+  shiftStart       String?         @map("shift_start") @db.VarChar(5)
   staffSalary      Decimal?        @map("staff_salary") @db.Decimal(10, 2)
   managementFee    Decimal?        @map("management_fee") @db.Decimal(10, 2)
   /// TEMPORARY only — what the staff member earns per hour at this client.

@@ -17,6 +17,7 @@ import { PayrollService } from '../payroll/payroll.service';
 import { UserProvisioningService } from '../auth/user-provisioning.service';
 import { FinanceCustomerService } from '../finance/customer/customer.service';
 import { parseClientProfileBody } from '../../common/utils/client-profile.util';
+import { activeServiceableCities, staffProfileMissing } from '../staff/staff-profile.rules';
 import {
   BRANCH_AREA_CONFIG,
   DELHI_BRANCH_ID,
@@ -406,7 +407,11 @@ export class RmService {
       where: { assignedRmId: null, deletedAt: null, pipelineStage: { not: 'TERMINAL' } },
       orderBy: { createdAt: 'asc' },
     });
-    return rows.map(toStaffDto);
+    // profile_missing: every S1 field the staff hasn't filled in yet (the app profile's list).
+    return rows.map((r) => ({
+      ...toStaffDto(r),
+      profile_missing: r.pipelineStage === 'S1_INTAKE' ? staffProfileMissing(r) : [],
+    }));
   }
 
   /**
@@ -558,7 +563,7 @@ export class RmService {
     });
     const out = rows.map((c) => {
       const missing = FinanceCustomerService.missingProfileFields({
-        customer_name: c.customerName, address: c.address, metadata: c.metadata,
+        customer_name: c.customerName, address: c.address, city: c.city, pincode: c.pincode, metadata: c.metadata,
       });
       const meta = (c.metadata ?? {}) as Record<string, unknown>;
       return {
@@ -591,7 +596,7 @@ export class RmService {
   async updateClientLead(user: AuthUser, customerId: string, body: Record<string, unknown>) {
     const c = await this.prisma.financeCustomer.findUnique({ where: { id: customerId } });
     if (!c) throw new NotFoundException('Client not found.');
-    const p = parseClientProfileBody(body ?? {});
+    const p = parseClientProfileBody(body ?? {}, await activeServiceableCities(this.prisma));
     if (p.email !== undefined && c.userId) {
       const taken = await this.prisma.user.findFirst({ where: { email: p.email, NOT: { id: c.userId } }, select: { id: true } });
       if (taken) throw new BadRequestException('Another account already uses this email.');

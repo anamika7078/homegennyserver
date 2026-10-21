@@ -8,6 +8,7 @@ import {
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { AuditAction, Prisma, StaffRequest, StaffSeries } from '@prisma/client';
 import { FinanceCustomerService } from '../finance/customer/customer.service';
+import { resolveCity, serviceableCities } from '../staff/staff-profile.rules';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuthUser } from '../../common/guards/branch-scope.util';
@@ -84,7 +85,6 @@ export class StaffRequestsService {
     private readonly audit: AuditService,
     private readonly cook: CookService,
     private readonly care: CarePlanService,
-    private readonly customers: FinanceCustomerService,
   ) {}
 
   // ── Validation ─────────────────────────────────────────────────────────────
@@ -241,6 +241,12 @@ export class StaffRequestsService {
         select: { id: true },
       });
       if (b) return b.id;
+      // The profile's city is a branch region ("Delhi NCR"), not a branch's own city ("New Delhi").
+      const region = resolveCity(city, serviceableCities());
+      if (region?.branch_id) {
+        const active = await this.prisma.branch.findFirst({ where: { id: region.branch_id, isActive: true }, select: { id: true } });
+        if (active) return active.id;
+      }
     }
     return null;
   }
@@ -374,43 +380,27 @@ export class StaffRequestsService {
   /**
    * From the client app — the client is whoever is logged in.
    *
-   * A client who signed up with a mobile number only has no name or address
-   * yet; their first request is where those come in. `profile` (full_name,
-   * city, state, pincode, address) fills the gaps, and the request's own
-   * address stands in for a missing home address. Nothing is saved unless the
-   * request itself is valid, and a request is refused while a gap remains.
+   * A client who signed up from the app must finish their profile (name,
+   * address, city, pincode — PATCH /client/profile) before asking for staff:
+   * docs/REGISTRATION_ONBOARDING_PLAN.md §A6. The city is what routes the
+   * request to a branch and its RM.
    */
   async createFromClient(userId: string, body: Record<string, unknown>) {
-    let customer = await this.resolveCustomer(userId);
-    const fields = { ...this.parseRequestBody(body) };
-    Object.assign(fields, await this.parseHandoff(fields, body, customer.id));
-
+    const customer = await this.resolveCustomer(userId);
     const missing = FinanceCustomerService.missingProfileFields({
-      customer_name: customer.customerName, address: customer.address, metadata: customer.metadata,
+      customer_name: customer.customerName, address: customer.address, city: customer.city,
+      pincode: customer.pincode, metadata: customer.metadata,
     });
     if (missing.length) {
-      const profile = (body.profile && typeof body.profile === 'object' ? body.profile : {}) as Record<string, unknown>;
-      const name = str(profile.full_name);
-      if (missing.includes('name') && (!name || name.length < 2)) {
-        throw new BadRequestException({
-          statusCode: 400,
-          error: 'PROFILE_INCOMPLETE',
-          message: 'Your name is needed for the first request — send profile.full_name.',
-          profile_missing: missing,
-        });
-      }
-      await this.customers.completeProfile(customer.id, {
-        name: missing.includes('name') ? name : undefined,
-        address: str(profile.address) ?? (missing.includes('address') ? fields.address : undefined),
-        city: str(profile.city),
-        state: str(profile.state),
-        pincode: str(profile.pincode),
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'PROFILE_INCOMPLETE',
+        message: `Complete your profile first — ${missing.join(', ')} missing.`,
+        missing,
       });
-      if (name && missing.includes('name')) {
-        await this.prisma.user.update({ where: { id: userId }, data: { fullName: name } }).catch(() => undefined);
-      }
-      customer = await this.resolveCustomer(userId);
     }
+    const fields = { ...this.parseRequestBody(body) };
+    Object.assign(fields, await this.parseHandoff(fields, body, customer.id));
 
     const branchId = await this.resolveBranch(customer.id, customer.city);
     const created = await this.insert(
@@ -1087,6 +1077,10 @@ export class StaffRequestsService {
     });
     await this.recomputeStatus(requestId);
     await this.log(actorId, req, 'placed', { staff_id: staffId, placement_id: placementId });
+    // A placement linked to the request after the fact gets the booking's start time too.
+    if (req.startTime) {
+      await this.prisma.placement.updateMany({ where: { id: placementId, shiftStart: null }, data: { shiftStart: req.startTime } });
+    }
 
     // The booking's details go straight to the staff app.
     const startDate = req.startDate ? req.startDate.toISOString().slice(0, 10) : null;

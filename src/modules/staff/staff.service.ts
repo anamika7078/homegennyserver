@@ -1,11 +1,14 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
-import { Prisma, PipelineStage, LanguageTier } from '@prisma/client';
+import { Prisma, PipelineStage, LanguageTier, StaffApplicant } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '@prisma/client';
 import * as crypto from 'crypto';
 import { mapSeriesFromShort, parseCreateStaffBody, toStaffDto, mapSeriesToShort } from '../../common/mappers/staff.mapper';
 import { assertSeriesActive } from '../../common/config/active-series';
+import {
+  MAX_AGE, MIN_AGE, STAFF_LOCKED_AFTER_S1, StaffProfilePatch, activeServiceableCities, ageOn, parseStaffProfile, staffProfileMissing,
+} from './staff-profile.rules';
 
 @Injectable()
 export class StaffService {
@@ -125,10 +128,77 @@ export class StaffService {
     return row;
   }
 
+  /** Cities HomeGenny works in, limited to active branches — what the profile's city must be. */
+  cities() {
+    return activeServiceableCities(this.prisma);
+  }
+
+  /** The staff row linked to a login, or 404. */
+  async forUser(userId: string) {
+    const staff = await this.prisma.staffApplicant.findFirst({ where: { userId, deletedAt: null } });
+    if (!staff) throw new NotFoundException('No staff record is linked to this login.');
+    return staff;
+  }
+
   /**
-   * "Complete S1" — the RM fills in what an app sign-up left out. Writes the
-   * S1 fields only (the stage move to S2 is the caller's); a staff code made
-   * before there was a name is replaced with one from the name.
+   * Save what the staff app (or RM) sent, as a draft: any subset, each field
+   * checked. Name, DOB, gender and category are locked once S2 has started —
+   * S2 checks them against Aadhaar — so after S1 they go through the RM.
+   */
+  async saveProfile(staffId: string, body: Record<string, unknown>, opts: { allowLocked?: boolean } = {}) {
+    const staff = await this.prisma.staffApplicant.findFirst({ where: { id: staffId, deletedAt: null } });
+    if (!staff) throw new NotFoundException(`Staff ${staffId} not found`);
+    const patch = parseStaffProfile(body, { ownMobile: staff.mobile, cities: await this.cities() });
+    if (staff.pipelineStage !== PipelineStage.S1_INTAKE && !opts.allowLocked) {
+      const field: Record<string, keyof StaffProfilePatch> = {
+        full_name: 'fullName', date_of_birth: 'dateOfBirth', gender: 'gender', series: 'series',
+      };
+      const locked = STAFF_LOCKED_AFTER_S1.filter((k) => patch[field[k]] !== undefined);
+      if (locked.length) {
+        throw new BadRequestException(`${locked.join(', ')} can't be changed after verification has started — ask your RM.`);
+      }
+    }
+    return this.writeProfile(staff, patch);
+  }
+
+  private async writeProfile(staff: StaffApplicant, patch: StaffProfilePatch, extra: Record<string, unknown> = {}) {
+    const meta = (staff.metadata ?? {}) as Record<string, unknown>;
+    const metaPatch: Record<string, unknown> = { ...extra };
+    if (patch.gender !== undefined) metaPatch.gender = patch.gender;
+    if (patch.city !== undefined) metaPatch.city = patch.city;
+    if (patch.area !== undefined) metaPatch.area = patch.area;
+    if (patch.pincode !== undefined) metaPatch.pincode = patch.pincode;
+    if (patch.languages !== undefined) metaPatch.languages = patch.languages;
+    if (patch.alternatePhone !== undefined) metaPatch.alternate_phone = patch.alternatePhone;
+    if (patch.experienceYears !== undefined) metaPatch.experience_years = patch.experienceYears;
+    const updated = await this.prisma.staffApplicant.update({
+      where: { id: staff.id },
+      data: {
+        ...(patch.fullName !== undefined ? { fullName: patch.fullName } : {}),
+        ...(patch.dateOfBirth !== undefined ? { dateOfBirth: patch.dateOfBirth } : {}),
+        ...(patch.series !== undefined ? { series: patch.series } : {}),
+        ...(patch.address !== undefined ? { address: patch.address } : {}),
+        ...(patch.email !== undefined ? { email: patch.email } : {}),
+        ...(patch.emergencyContactName !== undefined ? { emergencyContactName: patch.emergencyContactName } : {}),
+        ...(patch.emergencyContactMobile !== undefined ? { emergencyContactMobile: patch.emergencyContactMobile } : {}),
+        // The branch follows the city until an RM has taken them on.
+        ...(patch.branchId !== undefined && !staff.assignedRmId ? { branchId: patch.branchId } : {}),
+        ...(Object.keys(metaPatch).length ? { metadata: { ...meta, ...metaPatch } as Prisma.InputJsonValue } : {}),
+      },
+    });
+    // The login shows this name in the app header.
+    if (patch.fullName && updated.userId) {
+      await this.prisma.user.update({ where: { id: updated.userId }, data: { fullName: patch.fullName } }).catch(() => undefined);
+    }
+    return updated;
+  }
+
+  /**
+   * S1 done — from the staff app's "Submit" or the RM's "Complete S1"; one set
+   * of rules for both (docs/REGISTRATION_ONBOARDING_PLAN.md §A4). Saves what
+   * was sent, then every S1 field must be filled. Runs the restricted-list
+   * check (phone, and Aadhaar when the RM gives one). Writes the fields only:
+   * the move to S2 and the RM are the caller's.
    */
   async completeIntake(staffId: string, body: Record<string, unknown>, actorId: string) {
     const staff = await this.prisma.staffApplicant.findFirst({ where: { id: staffId, deletedAt: null } });
@@ -136,87 +206,76 @@ export class StaffService {
     if (staff.pipelineStage !== PipelineStage.S1_INTAKE) {
       throw new BadRequestException(`S1 is already done — this staff member is at ${staff.pipelineStage}.`);
     }
+    const patch = parseStaffProfile(body, { ownMobile: staff.mobile, cities: await this.cities() });
 
+    // RM-only extras on the intake form.
     const str = (v: unknown) => (v === undefined || v === null || String(v).trim() === '' ? undefined : String(v).trim());
-    const fullName = str(body.full_name) ?? staff.fullName ?? undefined;
-    const dob = str(body.date_of_birth);
-    const address = str(body.address) ?? staff.address ?? undefined;
-    const seriesRaw = str(body.series);
-    const missing = [
-      !fullName && 'full_name',
-      !dob && !staff.dateOfBirth && 'date_of_birth',
-      !address && 'address',
-      !seriesRaw && !staff.series && 'series',
-    ].filter(Boolean);
-    if (missing.length) throw new BadRequestException(`Required to complete S1: ${missing.join(', ')}`);
-    if (fullName!.length < 2) throw new BadRequestException('full_name is too short.');
-    let dateOfBirth: Date | undefined;
-    if (dob) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(dob) || Number.isNaN(Date.parse(`${dob}T00:00:00Z`))) {
-        throw new BadRequestException('date_of_birth must be YYYY-MM-DD.');
-      }
-      // UTC midnight — a @db.Date column stores the day meant (this server runs IST).
-      dateOfBirth = new Date(`${dob}T00:00:00.000Z`);
-    }
-    let series = staff.series;
-    if (seriesRaw) {
-      series = mapSeriesFromShort(seriesRaw);
-      if (series !== staff.series) assertSeriesActive(series);
-    }
-
     const aadhaar = str(body.aadhaar_number);
     if (aadhaar && !/^\d{12}$/.test(aadhaar)) throw new BadRequestException('aadhaar_number must be 12 digits.');
-    const hit = await this.checkRestrictedList(aadhaar ?? '', staff.mobile);
-
-    const meta = (staff.metadata ?? {}) as Record<string, unknown>;
-    const extra: Record<string, unknown> = {};
-    for (const k of ['gender', 'alternate_phone', 'city', 'state', 'pincode', 'hometown', 'referral_source', 'intake_notes']) {
-      const v = str(body[k]);
-      if (v !== undefined) extra[k] = k === 'gender' ? v.toUpperCase() : v;
-    }
-    if (extra.gender !== undefined && !['MALE', 'FEMALE', 'OTHER'].includes(String(extra.gender))) {
-      throw new BadRequestException('gender must be MALE, FEMALE or OTHER.');
-    }
     const languageTier = str(body.language_tier);
     if (languageTier && !['T1', 'T2', 'T3', 'T4'].includes(languageTier)) {
       throw new BadRequestException('language_tier must be T1, T2, T3 or T4.');
     }
-    const email = str(body.email);
+    const notes: Record<string, unknown> = {};
+    for (const k of ['state', 'hometown', 'referral_source', 'intake_notes']) {
+      const v = str(body[k]);
+      if (v !== undefined) notes[k] = v;
+    }
 
-    const renameCode = meta.staff_code_provisional === true;
+    // Everything S1 needs, from what was sent plus what is already on file.
+    const merged = {
+      ...staff,
+      fullName: patch.fullName ?? staff.fullName,
+      dateOfBirth: patch.dateOfBirth ?? staff.dateOfBirth,
+      series: patch.series ?? staff.series,
+      address: patch.address ?? staff.address,
+      emergencyContactName: patch.emergencyContactName ?? staff.emergencyContactName,
+      emergencyContactMobile: patch.emergencyContactMobile ?? staff.emergencyContactMobile,
+      metadata: {
+        ...((staff.metadata ?? {}) as Record<string, unknown>),
+        ...(patch.gender ? { gender: patch.gender } : {}),
+        ...(patch.city ? { city: patch.city } : {}),
+        ...(patch.pincode ? { pincode: patch.pincode } : {}),
+      },
+    };
+    const missing = staffProfileMissing(merged);
+    if (missing.length) {
+      throw new BadRequestException({
+        statusCode: 400,
+        error: 'PROFILE_INCOMPLETE',
+        message: `Fill in ${missing.join(', ')} to finish the profile.`,
+        missing,
+      });
+    }
+    // A DOB already on file (older rows) still has to be of age.
+    if (!patch.dateOfBirth && merged.dateOfBirth) {
+      const age = ageOn(merged.dateOfBirth.toISOString().slice(0, 10));
+      if (age < MIN_AGE || age > MAX_AGE) throw new BadRequestException(`Age must be between ${MIN_AGE} and ${MAX_AGE}.`);
+    }
+
+    const hit = await this.checkRestrictedList(aadhaar ?? '', staff.mobile);
+    const meta = (staff.metadata ?? {}) as Record<string, unknown>;
+    await this.writeProfile(staff, patch, {
+      ...notes,
+      staff_code_provisional: false,
+      intake_completed_at: new Date().toISOString(),
+      intake_completed_by: actorId,
+    });
     const updated = await this.prisma.staffApplicant.update({
       where: { id: staffId },
       data: {
-        fullName,
-        address,
-        series,
-        ...(dateOfBirth ? { dateOfBirth } : {}),
         ...(aadhaar ? { aadhaarNumber: aadhaar } : {}),
         ...(languageTier ? { languageTier: languageTier as LanguageTier } : {}),
-        ...(email ? { email } : {}),
-        ...(str(body.emergency_contact_name) ? { emergencyContactName: str(body.emergency_contact_name) } : {}),
-        ...(str(body.emergency_contact_mobile) ? { emergencyContactMobile: str(body.emergency_contact_mobile) } : {}),
-        ...(renameCode ? { staffCode: await this.nextStaffCode(fullName) } : {}),
+        ...(meta.staff_code_provisional === true ? { staffCode: await this.nextStaffCode(merged.fullName) } : {}),
         ...(hit.found ? { restrictedListFlag: true } : {}),
-        metadata: {
-          ...meta,
-          ...extra,
-          staff_code_provisional: false,
-          intake_completed_at: new Date().toISOString(),
-          intake_completed_by: actorId,
-        } as Prisma.InputJsonValue,
       },
     });
-    // The login shows this name in the app header.
-    if (updated.userId) {
-      await this.prisma.user.update({ where: { id: updated.userId }, data: { fullName: fullName! } }).catch(() => undefined);
-    }
     await this.audit.log({
       actorId,
       action: AuditAction.STAGE_TRANSITION,
       entityType: 'staff_applicant',
       entityId: staffId,
-      metadata: { stage: 'S1_INTAKE', action: 'intake_completed', restricted: hit.found },
+      metadata: { stage: 'S1_INTAKE', action: 'intake_completed', by_staff: actorId === updated.userId, restricted: hit.found },
     });
     return { staff: updated, restricted: hit };
   }

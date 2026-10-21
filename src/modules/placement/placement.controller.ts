@@ -78,6 +78,7 @@ export class PlacementController {
         wage_config: WAGE_CONFIG_SCHEMA,
         trial_start_date: { type: 'string', format: 'date', description: 'Optional — defaults to now' },
         trial_end_date: { type: 'string', format: 'date', description: 'Optional — defaults to +7 days (Maid/UC/DR) or +14 days (SC), based on the staff\'s series' },
+        shift_start: { type: 'string', example: '08:00', description: 'Optional HH:MM (IST) the shift starts — defaults to the staff request\'s start_time. Without it the snapshot never calls the staff late.' },
       },
     },
   })
@@ -149,13 +150,14 @@ export class PlacementController {
         staff_salary: { type: 'number', example: 18000, description: 'Ignored if wage_config is also supplied' },
         management_fee: { type: 'number', example: 4500, description: 'Ignored if wage_config is also supplied' },
         wage_config: WAGE_CONFIG_SCHEMA,
+        shift_start: { type: 'string', example: '08:00', description: 'HH:MM (IST) the shift starts; "" clears it. Used for "late" on the staff snapshot.' },
       },
     },
   })
   updateTerms(
     @Req() req: { user: { id: string } },
     @Param('id') id: string,
-    @Body() body: { staff_salary?: number; management_fee?: number; wage_config?: WageConfigInput },
+    @Body() body: { staff_salary?: number; management_fee?: number; wage_config?: WageConfigInput; shift_start?: string },
   ): Promise<PlacementRow> {
     return this.service.updateTerms(id, body, req.user.id);
   }

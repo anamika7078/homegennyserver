@@ -180,111 +180,86 @@ export class StaffMobileController {
   }
 
   @Get('dashboard')
-  @ApiOperation({ summary: 'Get staff today tasks & completion %' })
+  @ApiOperation({
+    summary: 'Staff home: who I am, my RM, pipeline completion and what I have to do next',
+    description:
+      'Real values only: a blank field comes back null (no demo fallbacks), assignedRm is null until an RM ' +
+      'is assigned, and todayTasks is built from the pipeline (profile, verification tracks, training, ' +
+      'agreements) — [] when nothing is pending.',
+  })
   async getDashboard(@Req() req: any) {
     const staff = await this.prisma.staffApplicant.findFirst({
-      where: { userId: req.user.id },
-      include: { branch: true, assignedRm: true },
+      where: { userId: req.user.id, deletedAt: null },
+      include: { assignedRm: true, verificationTracks: true },
     });
-
     const progress = await this.buildPipelineProgress(staff);
 
     return {
-      staffCode: staff?.staffCode || 'STF-1029',
-      fullName: staff?.fullName || req.user.fullName || 'Pooja Mishra',
-      series: staff?.series || 'MAID',
-      pipelineStage: staff?.pipelineStage || 'S2_VERIFY',
+      staffCode: staff?.staffCode ?? null,
+      fullName: staff?.fullName ?? null,
+      series: staff?.series ?? null,
+      pipelineStage: staff?.pipelineStage ?? null,
       completionPct: progress.completion_pct,
-      assignedRm: staff?.assignedRm
-        ? { name: staff.assignedRm.fullName, phone: staff.assignedRm.phone }
-        : { name: 'Amit Gupta (RM)', phone: '+919800000001' },
-      // ⚠️ Not yet backed by a real task/checklist table — no schema exists
-      // for per-day staff tasks. Flagged as a known follow-up, not silently dropped.
-      todayTasks: [
-        { id: 1, title: 'Record Video Certification Prompt #2', done: false },
-        { id: 2, title: 'Upload Police Verification Document', done: false },
-      ],
+      profileComplete: !!staff && staff.pipelineStage !== 'S1_INTAKE',
+      assignedRm: staff?.assignedRm ? { name: staff.assignedRm.fullName, phone: staff.assignedRm.phone } : null,
+      todayTasks: staff ? this.pendingTasks(staff) : [{ id: 'profile', title: 'Complete your profile', done: false }],
     };
   }
 
-  @Get('profile')
-  @ApiOperation({ summary: 'Fetch staff personal details' })
-  async getProfile(@Req() req: any) {
-    const staff = await this.prisma.staffApplicant.findFirst({
-      where: { userId: req.user.id },
-    });
-
-    return {
-      id: req.user.id,
-      // The video-cert endpoints (upload-url/finalize/list) key everything on
-      // staff_applicants.id and check ownership by phone match against it —
-      // `id` above is the *users* row, which is a different id. Without this,
-      // the app had no way to learn its own staffApplicant id and every
-      // video-cert call 403'd with "You may only access your own staff record".
-      staffApplicantId: staff?.id ?? null,
-      staffCode: staff?.staffCode || 'STF-1029',
-      fullName: staff?.fullName || req.user.fullName || 'Pooja Mishra',
-      mobile: staff?.mobile || req.user.phone,
-      email: staff?.email || req.user.email,
-      series: staff?.series || 'MAID',
-      pipelineStage: staff?.pipelineStage || 'S2_VERIFY',
-      // Fallback literals only fire when there's no staff row at all — a real
-      // staff with a genuinely blank address/DOB no longer gets overwritten.
-      address: staff ? staff.address ?? null : 'Sector 62, Noida, UP',
-      dateOfBirth: staff ? staff.dateOfBirth : '1996-05-15',
+  /** What the staff member still has to do, from where they are in the pipeline. */
+  private pendingTasks(staff: {
+    pipelineStage: string; series: string | null; pvStatus: string;
+    verificationTracks: { trackType: string; status: string }[];
+  }): { id: string; title: string; done: boolean }[] {
+    const TRACK_TITLE: Record<string, string> = {
+      AADHAAR_EKYC: 'Verify your Aadhaar',
+      HEALTH_SCREENING: 'Upload your health certificate',
+      SARATHI_API: 'Verify your driving licence',
+      ECHALLAN_API: 'Driving record check',
     };
-  }
-
-  @Put('profile')
-  @ApiOperation({ summary: 'Update staff personal details' })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        address: { type: 'string', example: 'Sector 12, Noida' },
-        email: { type: 'string', example: 'rohan@example.com' },
-      },
-    },
-  })
-  async updateProfile(@Req() req: any, @Body() body: any) {
-    const staff = await this.prisma.staffApplicant.findFirst({
-      where: { userId: req.user.id },
-    });
-
-    if (staff) {
-      await this.prisma.staffApplicant.update({
-        where: { id: staff.id },
-        data: {
-          address: body.address || staff.address,
-          email: body.email || staff.email,
-        },
-      });
+    switch (staff.pipelineStage) {
+      case 'S1_INTAKE':
+        return [{ id: 'profile', title: 'Complete your profile', done: false }];
+      case 'S2_VERIFY': {
+        const tasks = (REQUIRED_VERIFICATION_TRACKS[staff.series ?? ''] ?? []).map((t) => ({
+          id: t,
+          title: TRACK_TITLE[t] ?? t,
+          done: staff.verificationTracks.some((v) => v.trackType === t && v.status === 'CLEAR'),
+        }));
+        const pvShort = STAFF_SERIES_SHORT[staff.series ?? ''] ?? '';
+        tasks.push({ id: 'POLICE_VERIFICATION', title: 'Police verification', done: isPvClear(pvShort, staff.pvStatus) });
+        return tasks;
+      }
+      case 'S3_TRAIN':
+        return [{ id: 'training', title: 'Finish your training and video certification', done: false }];
+      case 'S4_AGREEMENTS':
+        return [{ id: 'agreements', title: 'Sign your agreements', done: false }];
+      default:
+        return [];
     }
-
-    return { success: true, message: 'Profile updated successfully' };
   }
 
   @Get('pipeline-status')
   @ApiOperation({ summary: 'Fetch current onboarding stage only (see GET /staff/pipeline for full stage-by-stage progress)' })
   async getPipelineStatus(@Req() req: any) {
     const staff = await this.prisma.staffApplicant.findFirst({
-      where: { userId: req.user.id },
+      where: { userId: req.user.id, deletedAt: null },
       include: { verificationTracks: true },
     });
+    if (!staff) return { staffCode: null, pipelineStage: null, series: null, stageName: null, isVerified: false };
 
-    const series = staff?.series || 'MAID';
-    const requiredTracks = REQUIRED_VERIFICATION_TRACKS[series] ?? [];
+    const requiredTracks = REQUIRED_VERIFICATION_TRACKS[staff.series ?? ''] ?? [];
     const tracksClear = requiredTracks.every((trackType) =>
-      staff?.verificationTracks.some((t) => t.trackType === trackType && t.status === 'CLEAR'),
+      staff.verificationTracks.some((t) => t.trackType === trackType && t.status === 'CLEAR'),
     );
-    const pvClear = staff ? isPvClear(series, staff.pvStatus) : false;
+    const pvClear = isPvClear(STAFF_SERIES_SHORT[staff.series ?? ''] ?? '', staff.pvStatus);
 
     return {
-      staffCode: staff?.staffCode || 'STF-1029',
-      pipelineStage: staff?.pipelineStage || 'S2_VERIFY',
-      series,
-      stageName: PIPELINE_STAGE_LABELS[staff?.pipelineStage ?? 'S2_VERIFY'] ?? 'Unknown Stage',
-      isVerified: tracksClear && pvClear,
+      staffCode: staff.staffCode,
+      pipelineStage: staff.pipelineStage,
+      series: staff.series,
+      stageName: PIPELINE_STAGE_LABELS[staff.pipelineStage] ?? staff.pipelineStage,
+      isVerified: !!staff.series && tracksClear && pvClear,
     };
   }
 

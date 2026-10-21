@@ -22,7 +22,7 @@ import { PipelineFsmService, PipelineStage as FsmPipelineStage } from '../pipeli
 import { UserProvisioningService } from './user-provisioning.service';
 import { RegisterCustomerDto } from './dto/register-customer.dto';
 import { RegisterStaffDto } from './dto/register-staff.dto';
-import { intakeMissing } from '../../common/mappers/staff.mapper';
+import { staffProfileMissing } from '../staff/staff-profile.rules';
 import {
   generateTotpSecret,
   buildOtpauthUrl,
@@ -394,23 +394,24 @@ export class AuthService {
    */
   async profileStatus(userId: string, role: string): Promise<{ profile_complete: boolean; profile_missing: string[] } | null> {
     if (role === 'STAFF') {
-      const s = await this.prisma.staffApplicant.findFirst({
-        where: { userId, deletedAt: null },
-        select: { fullName: true, dateOfBirth: true, address: true, series: true },
-      });
+      // The profile is S1: complete once the staff member has left S1, however
+      // that happened (their own submit, or an RM-run intake).
+      const s = await this.prisma.staffApplicant.findFirst({ where: { userId, deletedAt: null } });
       if (!s) return null;
-      const missing = intakeMissing(s);
-      return { profile_complete: missing.length === 0, profile_missing: missing };
+      const inS1 = s.pipelineStage === 'S1_INTAKE';
+      return { profile_complete: !inS1, profile_missing: inS1 ? staffProfileMissing(s) : [] };
     }
     if (role === 'CLIENT') {
       const c = await this.prisma.financeCustomer.findFirst({
         where: { userId },
-        select: { customerName: true, address: true, metadata: true },
+        select: { customerName: true, address: true, city: true, pincode: true, metadata: true },
       });
       if (!c) return null;
       const missing = FinanceCustomerService.missingProfileFields({
         customer_name: c.customerName,
         address: c.address,
+        city: c.city,
+        pincode: c.pincode,
         metadata: c.metadata,
       });
       return { profile_complete: missing.length === 0, profile_missing: missing };
@@ -736,29 +737,34 @@ export class AuthService {
 
     let roleMeta: Record<string, any> = {};
     if (user.role === 'STAFF') {
+      // By the login it is linked to — phone numbers are not unique among staff rows.
       const staffApplicant = await this.prisma.staffApplicant.findFirst({
-        where: { OR: [{ id: user.id }, { mobile: user.phone }] },
+        where: { userId: user.id, deletedAt: null },
+        include: { assignedRm: { select: { fullName: true, phone: true } } },
       });
+      // Real values only: blank stays null, no demo fallbacks.
       roleMeta = {
-        staffCode: staffApplicant?.staffCode || 'STF-1029',
-        pipelineStage: staffApplicant?.pipelineStage || 'S2_VERIFY',
-        series: staffApplicant ? staffApplicant.series : 'MAID',
-        assignedRm: {
-          name: 'Amit Gupta (RM)',
-          phone: '+919800000001',
-        },
+        staffCode: staffApplicant?.staffCode ?? null,
+        pipelineStage: staffApplicant?.pipelineStage ?? null,
+        series: staffApplicant?.series ?? null,
+        assignedRm: staffApplicant?.assignedRm
+          ? { name: staffApplicant.assignedRm.fullName, phone: staffApplicant.assignedRm.phone }
+          : null,
       };
     } else if (user.role === 'CLIENT') {
       const customer = await this.prisma.financeCustomer.findFirst({
         where: { userId: user.id },
       });
+      const activePlacements = customer
+        ? await this.prisma.placement.count({ where: { clientId: customer.id, status: { in: ['TRIAL', 'CONFIRMED'] } } })
+        : 0;
       roleMeta = {
-        customerCode: customer?.id || 'CL-881',
+        customerCode: customer?.id ?? null,
         // null while an app sign-up has only the placeholder "New client <phone>".
         customerName: (customer?.metadata as Record<string, unknown> | null)?.name_pending === true
           ? null
-          : customer?.customerName || user.full_name,
-        activePlacements: 1,
+          : customer?.customerName || user.full_name || null,
+        activePlacements,
       };
     }
 

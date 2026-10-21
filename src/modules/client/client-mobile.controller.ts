@@ -16,6 +16,7 @@ import { sendStoredFile } from '../../common/storage/send-file.util';
 import { FinanceInvoiceService } from '../finance/invoice/invoice.service';
 import { FinanceCustomerService } from '../finance/customer/customer.service';
 import { parseClientProfileBody } from '../../common/utils/client-profile.util';
+import { activeServiceableCities } from '../staff/staff-profile.rules';
 import { CLIENT_VISIBLE_INVOICE_STATUSES } from '../../common/finance/invoice-status';
 import { buildServiceLines, periodRange } from '../../common/finance/service-lines.util';
 
@@ -62,9 +63,10 @@ export class ClientMobileController {
     const user = await this.prisma.user.findUnique({ where: { id: req.user.id }, select: { email: true, phone: true } });
     const missing = customer
       ? FinanceCustomerService.missingProfileFields({
-          customer_name: customer.customerName, address: customer.address, metadata: customer.metadata,
+          customer_name: customer.customerName, address: customer.address, city: customer.city,
+          pincode: customer.pincode, metadata: customer.metadata,
         })
-      : ['name', 'address'];
+      : ['name', 'address', 'city', 'pincode'];
     const meta = (customer?.metadata ?? {}) as Record<string, unknown>;
     return {
       // A mobile-only sign-up has a placeholder customer name until they give theirs.
@@ -119,7 +121,7 @@ export class ClientMobileController {
   async updateProfile(@Req() req: any, @Body() body: Record<string, unknown>) {
     const customer = await this.resolveCustomer(req.user.id);
     if (!customer) throw new ForbiddenException('No customer account is linked to this login.');
-    const p = parseClientProfileBody(body ?? {});
+    const p = parseClientProfileBody(body ?? {}, await activeServiceableCities(this.prisma));
     if (p.email !== undefined) {
       const taken = await this.prisma.user.findFirst({ where: { email: p.email, NOT: { id: req.user.id } }, select: { id: true } });
       if (taken) throw new BadRequestException('Another account already uses this email.');
