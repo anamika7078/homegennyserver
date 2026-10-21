@@ -1,5 +1,5 @@
 /**
- * Mobile-number-only registration — docs/MOBILE_BRIEF_MOBILE_ONLY_REGISTRATION.md (2026-10-21).
+ * Mobile-number-only registration — docs/MOBILE_BRIEF_REGISTRATION.md (2026-10-21).
  *
  * A new app user signs up with a mobile number and an OTP, nothing else:
  *   staff_applicants   name / DOB / address / series are filled by the RM at S1

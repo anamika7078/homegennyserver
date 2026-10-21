@@ -1,7 +1,7 @@
 # Registration & Onboarding — Mobile Login, Then Complete Your Profile
 
-**21 Oct 2026 · Built 2026-10-21** (backend, RM web, mobile brief `docs/MOBILE_BRIEF_ONBOARDING.md`; `npm run test:onboarding`). Replaces the "RM fills S1" and "client names themselves
-inside the first request" parts of the 2026-10-21 mobile-only sign-up (`MOBILE_BRIEF_MOBILE_ONLY_REGISTRATION.md`).
+**21 Oct 2026 · Built 2026-10-21** (backend, RM web, mobile brief `docs/MOBILE_BRIEF_REGISTRATION.md`; `npm run test:onboarding`). Replaces the "RM fills S1" and "client names themselves
+inside the first request" parts of the 2026-10-21 mobile-only sign-up (`MOBILE_BRIEF_REGISTRATION.md`).
 The mobile + OTP login itself stays as built.
 
 ## The flow
@@ -140,7 +140,7 @@ accounts get the wizard on their next login. Staff who reached S2 the old way (c
 - **Notifications**: the "new staff ready for verification" item links to the staff page.
 - Staff Snapshot: unchanged; S2 staff count under "In pipeline".
 
-## Part C — Mobile app (brief: `docs/MOBILE_BRIEF_ONBOARDING.md`)
+## Part C — Mobile app (brief: `docs/MOBILE_BRIEF_REGISTRATION.md`)
 - After login, read `GET /me/onboarding`. `COMPLETE_PROFILE` → open the profile wizard. The home stays reachable,
   but every action button shows "Complete your profile first" (and the server refuses anyway).
 - **Staff wizard** (3 steps): About you (name, DOB, gender, category) → Where you live (city dropdown, area,

@@ -1,6 +1,6 @@
 /**
  * Live HTTP test for mobile-number-only registration (2026-10-21),
- * docs/MOBILE_BRIEF_MOBILE_ONLY_REGISTRATION.md.
+ * docs/MOBILE_BRIEF_REGISTRATION.md.
  *
  *   OTP sign-in      /auth/otp/send + /auth/otp/verify: new number → signs up
  *                    (role CLIENT/STAFF), known number → signs in, office
