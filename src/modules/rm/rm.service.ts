@@ -15,6 +15,8 @@ import { toStaffDto, parseCreateStaffBody, mapSeriesFromShort, mapSeriesToShort 
 import { StaffService } from '../staff/staff.service';
 import { PayrollService } from '../payroll/payroll.service';
 import { UserProvisioningService } from '../auth/user-provisioning.service';
+import { FinanceCustomerService } from '../finance/customer/customer.service';
+import { parseClientProfileBody } from '../../common/utils/client-profile.util';
 import {
   BRANCH_AREA_CONFIG,
   DELHI_BRANCH_ID,
@@ -68,6 +70,7 @@ export class RmService {
     private readonly events: EventEmitter2,
     private readonly payroll: PayrollService,
     private readonly userProvisioning: UserProvisioningService,
+    private readonly customers: FinanceCustomerService,
   ) {}
 
   private staffWhere(scope: ReturnType<typeof resolveStaffScope>): Prisma.StaffApplicantWhereInput {
@@ -391,9 +394,10 @@ export class RmService {
   }
 
   /**
-   * Staff who self-registered from the app: created at S1_INTAKE and
-   * immediately advanced to S2_VERIFY by registration itself, but with no
-   * assignedRmId — there was no RM in that flow to set one. Not scoped by RM
+   * Staff who self-registered from the app: at S1_INTAKE with only a mobile
+   * number (since 2026-10-21; earlier sign-ups went straight to S2_VERIFY),
+   * and no assignedRmId — there was no RM in that flow to set one. Each row
+   * carries intake_complete / intake_missing for the "Complete S1" button. Not scoped by RM
    * or branch (a self-registered row has neither), unlike every other staff
    * list in this service.
    */
@@ -450,6 +454,177 @@ export class RmService {
 
     const updated = await this.prisma.staffApplicant.findUnique({ where: { id: staffId } });
     return toStaffDto(updated!);
+  }
+
+  /**
+   * "Complete S1" for a staff member who signed up from the app with a mobile
+   * number only: the RM calls them and fills in name / DOB / address / series
+   * (plus anything else S1 collects). An unclaimed one is claimed by whoever
+   * completes it. Then, like an RM intake: a restricted-list hit ends the case
+   * (TERMINAL / DENIED), otherwise the staff moves to S2_VERIFY unless
+   * advance_to_verify is false.
+   */
+  async completeIntake(user: AuthUser, staffId: string, body: Record<string, unknown>) {
+    const staff = await this.prisma.staffApplicant.findFirst({ where: { id: staffId, deletedAt: null } });
+    if (!staff) throw new NotFoundException(`Staff ${staffId} not found`);
+    if (user.role === UserRole.RM && staff.assignedRmId && staff.assignedRmId !== user.id) {
+      throw new ForbiddenException('This staff member belongs to another RM.');
+    }
+
+    const { staff: updated, restricted } = await this.staffService.completeIntake(staffId, body, user.id);
+
+    if (!updated.assignedRmId && user.role === UserRole.RM) {
+      const { count } = await this.prisma.staffApplicant.updateMany({
+        where: { id: staffId, assignedRmId: null },
+        data: { assignedRmId: user.id, branchId: updated.branchId ?? user.branchId },
+      });
+      if (count) {
+        await this.prisma.pipelineEvent.create({
+          data: {
+            staffId,
+            eventType: 'STAFF_CLAIMED',
+            fromStage: updated.pipelineStage,
+            toStage: updated.pipelineStage,
+            actorId: user.id,
+            payload: { self_registered: true, via: 'complete_intake' },
+          },
+        });
+      }
+    }
+
+    if (restricted.found) {
+      await this.fsm.advanceStage({
+        staffId,
+        toStage: 'TERMINAL' as FsmStage,
+        actorId: user.id,
+        reasonCode: restricted.reason ?? 'RESTRICTED',
+        terminalOutcome: 'DENIED' as TerminalOutcome,
+      });
+      await this.prisma.staffApplicant.update({ where: { id: staffId }, data: { currentScenarioCode: 'RESTRICTED' } });
+      this.events.emit('scenario.triggered', { staffId, code: 'RESTRICTED', effect: { notify: 'BM' } });
+      const row = await this.prisma.staffApplicant.findUnique({ where: { id: staffId } });
+      return { outcome: 'RESTRICTED', staff: toStaffDto(row!) };
+    }
+
+    const depositAmount = body.deposit_amount != null && body.deposit_amount !== ''
+      ? Number(body.deposit_amount)
+      : (body.deposit_collected ? SERIES_DEPOSIT_DEFAULTS[String(updated.series)] : undefined);
+    if (depositAmount != null && Number.isFinite(depositAmount)) {
+      await this.prisma.deposit.create({
+        data: {
+          staffId,
+          amount: depositAmount,
+          status: body.deposit_collected ? 'COLLECTED' : 'PENDING',
+          collectedAt: body.deposit_collected ? new Date() : undefined,
+        },
+      });
+    }
+
+    if (body.advance_to_verify !== false) {
+      await this.fsm.advanceStage({
+        staffId,
+        toStage: 'S2_VERIFY' as FsmStage,
+        actorId: user.id,
+        reasonCode: 'INTAKE_COMPLETE',
+        payload: { referral_source: body.referral_source, self_registered: true },
+      });
+      this.events.emit('realtime.broadcast', {
+        channel: 'pipeline',
+        event: 'pipeline.stage_changed',
+        data: { staffId, toStage: 'S2_VERIFY', fromStage: 'S1_INTAKE' },
+      });
+    }
+    const row = await this.prisma.staffApplicant.findUnique({ where: { id: staffId } });
+    return { outcome: body.advance_to_verify !== false ? 'ADVANCE_S2' : 'SAVED', staff: toStaffDto(row!) };
+  }
+
+  /**
+   * Clients who signed up from the app. They have no RM of their own until a
+   * request or a placement gives them one, so every RM/BM/Admin sees the same
+   * list — newest first, with what is still missing and whether they have
+   * asked for staff yet. `?status=pending` keeps only those still missing
+   * something or with no request.
+   */
+  async listClientLeads(status?: string) {
+    const rows = await this.prisma.financeCustomer.findMany({
+      where: { metadata: { path: ['self_registered'], equals: true } },
+      orderBy: { createdAt: 'desc' },
+      take: 300,
+      include: {
+        user: { select: { id: true, phone: true, email: true, fullName: true, lastLoginAt: true } },
+        _count: { select: { staffRequests: true } },
+        staffRequests: { orderBy: { createdAt: 'desc' }, take: 1, select: { id: true, requestNo: true, status: true, createdAt: true } },
+      },
+    });
+    const out = rows.map((c) => {
+      const missing = FinanceCustomerService.missingProfileFields({
+        customer_name: c.customerName, address: c.address, metadata: c.metadata,
+      });
+      const meta = (c.metadata ?? {}) as Record<string, unknown>;
+      return {
+        id: c.id,
+        name: missing.includes('name') ? null : c.customerName,
+        phone: c.user?.phone ?? null,
+        email: c.user?.email ?? null,
+        address: c.address,
+        city: c.city,
+        state: c.state,
+        pincode: c.pincode,
+        pan_card: c.panCard,
+        gstn: c.gstn,
+        unit_code: c.unitCode,
+        profile_complete: missing.length === 0,
+        profile_missing: missing,
+        request_count: c._count.staffRequests,
+        last_request: c.staffRequests[0]
+          ? { id: c.staffRequests[0].id, request_no: c.staffRequests[0].requestNo, status: c.staffRequests[0].status, created_at: c.staffRequests[0].createdAt }
+          : null,
+        lead_notes: Array.isArray(meta.lead_notes) ? meta.lead_notes : [],
+        registered_at: c.createdAt,
+        last_login_at: c.user?.lastLoginAt ?? null,
+      };
+    });
+    return status === 'pending' ? out.filter((c) => !c.profile_complete || c.request_count === 0) : out;
+  }
+
+  /** The RM fills in a client lead's profile on a call (PAN/GST included), and/or leaves a note. */
+  async updateClientLead(user: AuthUser, customerId: string, body: Record<string, unknown>) {
+    const c = await this.prisma.financeCustomer.findUnique({ where: { id: customerId } });
+    if (!c) throw new NotFoundException('Client not found.');
+    const p = parseClientProfileBody(body ?? {});
+    if (p.email !== undefined && c.userId) {
+      const taken = await this.prisma.user.findFirst({ where: { email: p.email, NOT: { id: c.userId } }, select: { id: true } });
+      if (taken) throw new BadRequestException('Another account already uses this email.');
+    }
+    await this.customers.completeProfile(customerId, {
+      name: p.name, address: p.address, city: p.city, state: p.state, pincode: p.pincode, pan_card: p.pan_card, gstn: p.gstn,
+    });
+    if (p.lat !== undefined) {
+      await this.prisma.financeCustomer.update({ where: { id: customerId }, data: { lat: p.lat, lng: p.lng } });
+    }
+    if (c.userId && (p.name !== undefined || p.email !== undefined)) {
+      await this.prisma.user.update({
+        where: { id: c.userId },
+        data: { ...(p.name !== undefined ? { fullName: p.name } : {}), ...(p.email !== undefined ? { email: p.email } : {}) },
+      });
+    }
+    const note = typeof body?.note === 'string' ? body.note.trim().slice(0, 1000) : '';
+    if (note) {
+      const fresh = await this.prisma.financeCustomer.findUnique({ where: { id: customerId }, select: { metadata: true } });
+      const meta = (fresh?.metadata ?? {}) as Record<string, unknown>;
+      const notes = Array.isArray(meta.lead_notes) ? meta.lead_notes : [];
+      await this.prisma.financeCustomer.update({
+        where: { id: customerId },
+        data: {
+          metadata: {
+            ...meta,
+            lead_notes: [...notes, { at: new Date().toISOString(), by: user.id, text: note }].slice(-50),
+          } as Prisma.InputJsonValue,
+        },
+      });
+    }
+    const leads = await this.listClientLeads();
+    return leads.find((l) => l.id === customerId) ?? null;
   }
 
   async listIncidents(user: AuthUser, status?: string) {

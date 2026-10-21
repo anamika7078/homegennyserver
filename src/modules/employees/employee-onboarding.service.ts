@@ -283,7 +283,7 @@ export class EmployeeOnboardingService {
           employeeId: employee.id,
           staffApplicantId: applicant.id,
           mobile: applicant.mobile,
-          fullName: applicant.fullName,
+          fullName: applicant.fullName ?? '',
           email: applicant.email ?? undefined,
           branchId: applicant.branchId,
           password: dto.password,

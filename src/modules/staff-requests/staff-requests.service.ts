@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { AuditAction, Prisma, StaffRequest, StaffSeries } from '@prisma/client';
+import { FinanceCustomerService } from '../finance/customer/customer.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuthUser } from '../../common/guards/branch-scope.util';
@@ -83,6 +84,7 @@ export class StaffRequestsService {
     private readonly audit: AuditService,
     private readonly cook: CookService,
     private readonly care: CarePlanService,
+    private readonly customers: FinanceCustomerService,
   ) {}
 
   // ── Validation ─────────────────────────────────────────────────────────────
@@ -369,11 +371,47 @@ export class StaffRequestsService {
     return { menu, careNeeds };
   }
 
-  /** From the client app — the client is whoever is logged in. */
+  /**
+   * From the client app — the client is whoever is logged in.
+   *
+   * A client who signed up with a mobile number only has no name or address
+   * yet; their first request is where those come in. `profile` (full_name,
+   * city, state, pincode, address) fills the gaps, and the request's own
+   * address stands in for a missing home address. Nothing is saved unless the
+   * request itself is valid, and a request is refused while a gap remains.
+   */
   async createFromClient(userId: string, body: Record<string, unknown>) {
-    const customer = await this.resolveCustomer(userId);
+    let customer = await this.resolveCustomer(userId);
     const fields = { ...this.parseRequestBody(body) };
     Object.assign(fields, await this.parseHandoff(fields, body, customer.id));
+
+    const missing = FinanceCustomerService.missingProfileFields({
+      customer_name: customer.customerName, address: customer.address, metadata: customer.metadata,
+    });
+    if (missing.length) {
+      const profile = (body.profile && typeof body.profile === 'object' ? body.profile : {}) as Record<string, unknown>;
+      const name = str(profile.full_name);
+      if (missing.includes('name') && (!name || name.length < 2)) {
+        throw new BadRequestException({
+          statusCode: 400,
+          error: 'PROFILE_INCOMPLETE',
+          message: 'Your name is needed for the first request — send profile.full_name.',
+          profile_missing: missing,
+        });
+      }
+      await this.customers.completeProfile(customer.id, {
+        name: missing.includes('name') ? name : undefined,
+        address: str(profile.address) ?? (missing.includes('address') ? fields.address : undefined),
+        city: str(profile.city),
+        state: str(profile.state),
+        pincode: str(profile.pincode),
+      });
+      if (name && missing.includes('name')) {
+        await this.prisma.user.update({ where: { id: userId }, data: { fullName: name } }).catch(() => undefined);
+      }
+      customer = await this.resolveCustomer(userId);
+    }
+
     const branchId = await this.resolveBranch(customer.id, customer.city);
     const created = await this.insert(
       {
@@ -401,7 +439,7 @@ export class StaffRequestsService {
     const fields = { ...this.parseRequestBody(body) };
     const clientId = str(body.client_id) ?? null;
     Object.assign(fields, await this.parseHandoff(fields, body, clientId));
-    let customer: { id: string; address: string; city: string | null } | null = null;
+    let customer: { id: string; address: string | null; city: string | null } | null = null;
     if (clientId) {
       customer = await this.prisma.financeCustomer.findUnique({ where: { id: clientId }, select: { id: true, address: true, city: true } });
       if (!customer) throw new BadRequestException('client_id is not a known client.');
@@ -685,7 +723,7 @@ export class StaffRequestsService {
           // Only what a client needs to choose. No phone, Aadhaar, address or surname.
           staff: {
             id: c.staff.id,
-            first_name: c.staff.fullName.split(' ')[0],
+            first_name: (c.staff.fullName ?? '').split(' ')[0],
             series: mapSeriesToShort(c.staff.series),
             series_db: c.staff.series,
             language_tier: c.staff.languageTier,
@@ -1068,7 +1106,7 @@ export class StaffRequestsService {
     await this.notify(
       [await this.clientUserId(req.clientId)],
       'Booking confirmed',
-      `${staff?.fullName.split(' ')[0] ?? 'Your staff'} — ${when}${req.visitType === 'ONE_TIME' && req.durationMin ? ` for ${req.durationMin / 60} h` : ''} (${req.requestNo}).`,
+      `${staff?.fullName?.split(' ')[0] || 'Your staff'} — ${when}${req.visitType === 'ONE_TIME' && req.durationMin ? ` for ${req.durationMin / 60} h` : ''} (${req.requestNo}).`,
       'STAFF_REQUEST_CONFIRMED',
       { request_id: requestId, placement_id: placementId },
     );

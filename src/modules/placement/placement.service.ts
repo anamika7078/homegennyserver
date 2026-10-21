@@ -70,7 +70,7 @@ export class PlacementService {
     metadata?: unknown;
     createdAt: Date;
     updatedAt: Date;
-  }, staff?: { staffCode: string; series: string; fullName?: string } | null, client?: { customerName: string } | null): PlacementRow {
+  }, staff?: { staffCode: string; series: string | null; fullName?: string | null } | null, client?: { customerName: string } | null): PlacementRow {
     const metadata = (p.metadata as Record<string, unknown> | null) ?? {};
     return {
       id: p.id,
@@ -93,8 +93,8 @@ export class PlacementService {
       created_at: p.createdAt,
       updated_at: p.updatedAt,
       staff_code: staff?.staffCode,
-      series: staff?.series,
-      staff_name: staff?.fullName,
+      series: staff?.series ?? undefined,
+      staff_name: staff?.fullName ?? undefined,
       client_name: client?.customerName,
     };
   }
@@ -291,7 +291,7 @@ export class PlacementService {
     }
     const status = directConfirm ? PlacementStatus.CONFIRMED : PlacementStatus.TRIAL;
 
-    const trialDays = TRIAL_DAYS_BY_SERIES[staff.series] ?? DEFAULT_TRIAL_DAYS;
+    const trialDays = (staff.series && TRIAL_DAYS_BY_SERIES[staff.series]) || DEFAULT_TRIAL_DAYS;
 
     const row = await this.prisma.placement.create({
       data: {

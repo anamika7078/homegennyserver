@@ -451,7 +451,7 @@ export class TrackingService {
   }
 
   /** Two points in a row away from home → tell the client and the RM, once until they are back. */
-  private async checkAway(shift: ShiftLog, staff: { id: string; fullName: string; assignedRmId: string | null }) {
+  private async checkAway(shift: ShiftLog, staff: { id: string; fullName: string | null; assignedRmId: string | null }) {
     const placement = await this.prisma.placement.findUnique({ where: { id: shift.placementId! } });
     if (!placement) return;
     const home = await this.homeOf(placement);
@@ -550,7 +550,7 @@ export class TrackingService {
         staff_code: s?.staffCode ?? null,
         name: s?.fullName ?? null,
         series: s?.series ?? null,
-        series_label: s ? SERIES_LABEL[s.series] ?? s.series : null,
+        series_label: s?.series ? SERIES_LABEL[s.series] ?? s.series : null,
         status: v.status,
         check_in: v.shift?.checkInAt?.toISOString() ?? null,
         check_out: v.shift?.checkOutAt?.toISOString() ?? null,
@@ -666,7 +666,7 @@ export class TrackingService {
     const rmId = p.rmId ?? staff.assignedRmId;
     const rm = rmId ? await this.prisma.user.findUnique({ where: { id: rmId }, select: { fullName: true, phone: true } }).catch(() => null) : null;
     const photo = await this.photoDoc(staffId);
-    const required = REQUIRED_TRACKS[staff.series] ?? [];
+    const required = (staff.series && REQUIRED_TRACKS[staff.series]) || [];
     const pvOk = staff.series === 'MAID' ? staff.pvStatus !== 'ADVERSE' : staff.pvStatus === 'CLEAR';
     return {
       staff_id: staff.id,
@@ -678,7 +678,7 @@ export class TrackingService {
       age: ageFrom(staff.dateOfBirth),
       gender: (m.gender as string | undefined) ?? null,
       series: staff.series,
-      series_label: SERIES_LABEL[staff.series] ?? staff.series,
+      series_label: staff.series ? SERIES_LABEL[staff.series] ?? staff.series : null,
       language_tier: staff.languageTier,
       language_tier_label: staff.languageTier ? LANGUAGE_TIER_LABEL[staff.languageTier] : null,
       city: (m.city as string | undefined) ?? null,

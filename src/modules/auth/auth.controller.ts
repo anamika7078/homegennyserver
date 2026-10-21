@@ -22,6 +22,9 @@ const AUTH_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
  */
 const PASSWORD_RESET_THROTTLE = { default: { limit: 3, ttl: 900_000 } };
 
+/** 10/min per IP on the app's OTP sign-in — two calls (send + verify) per sign-in, plus a resend or a typo. */
+const OTP_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
+
 const LOGIN_RESPONSE_SCHEMA = {
   type: 'object',
   properties: {
@@ -101,9 +104,10 @@ export class AuthController {
   @ApiOperation({
     summary: 'Self-register as a Customer (CLIENT)',
     description:
-      'Creates the login account AND a linked finance_customers record in one step (appears in Finance’s ' +
-      'customer list immediately). Returns tokens — the app is logged in right after registering. ' +
-      'Rate-limited to 5 requests/min per IP.',
+      'Only `phone` is required. Creates the login AND a finance_customers row with a pending profile ' +
+      '(placeholder name, no address/PAN) — filled in when the client first requests staff. Without a password ' +
+      'the account signs in by OTP only. The app should use POST /auth/otp/verify instead, which registers a ' +
+      'new number the same way. Returns tokens. Rate-limited to 5 requests/min per IP.',
   })
   @ApiResponse({ status: 201, description: 'Registered and logged in.', schema: LOGIN_RESPONSE_SCHEMA })
   @ApiResponse({ status: 409, description: 'Phone or email already registered.' })
@@ -122,11 +126,11 @@ export class AuthController {
   @ApiOperation({
     summary: 'Self-register as Staff',
     description:
-      'Creates the login account AND a linked staff_applicants record (the RM pipeline entity) in one step, ' +
-      'already advanced past S1_INTAKE to S2_VERIFY — registering IS the intake step. No RM is assigned yet ' +
-      '(self-registration has none to assign): the staff member is listed at GET /rm/unassigned-staff until an ' +
-      'RM claims them via POST /rm/unassigned-staff/:id/claim. Returns tokens — the app is logged in right ' +
-      'after registering. Rate-limited to 5 requests/min per IP.',
+      'Only `phone` is required. Creates the login AND a staff_applicants row at S1_INTAKE with no RM. It ' +
+      'stays at S1 until an RM claims it (GET /rm/unassigned-staff) and fills in name/DOB/address/series via ' +
+      'POST /rm/staff/:id/complete-intake, which moves it to S2_VERIFY. The app should use POST ' +
+      '/auth/otp/verify instead, which registers a new number the same way. Returns tokens. ' +
+      'Rate-limited to 5 requests/min per IP.',
   })
   @ApiResponse({ status: 201, description: 'Registered and logged in.', schema: LOGIN_RESPONSE_SCHEMA })
   @ApiResponse({ status: 409, description: 'Phone or email already registered.' })
@@ -136,6 +140,73 @@ export class AuthController {
     @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> },
   ) {
     return this.authService.registerStaff(dto, this.clientMeta(req));
+  }
+
+  @Post('otp/send')
+  @Public()
+  @UseGuards(ThrottlerGuard)
+  @Throttle(OTP_THROTTLE)
+  @ApiTags(...TAG_MOBILE_ONLY)
+  @ApiOperation({
+    summary: 'App sign-in step 1 — send a login OTP to a mobile number',
+    description:
+      'For the app (CLIENT and STAFF). Also tells the app whether the number is registered, so it knows to ask ' +
+      '"Client or Staff?" before step 2. ⚠️ TEMPORARY: no SMS is sent; the code is the fixed AUTH_MOCK_OTP ' +
+      '(123456) until an SMS provider is wired in. Valid 10 minutes.',
+  })
+  @ApiBody({ schema: { type: 'object', required: ['phone'], properties: { phone: { type: 'string', example: '9811100001' } } } })
+  @ApiResponse({
+    status: 201,
+    schema: {
+      type: 'object',
+      properties: {
+        sent: { type: 'boolean' },
+        expires_at: { type: 'string', format: 'date-time' },
+        is_registered: { type: 'boolean' },
+        role: { type: 'string', nullable: true, enum: ['CLIENT', 'STAFF'] },
+        use_password_login: { type: 'boolean', description: 'Office account (RM/BM/Admin…) — OTP sign-in is refused' },
+      },
+    },
+  })
+  sendLoginOtp(@Body() body: { phone?: string }) {
+    return this.authService.sendLoginOtp(String(body?.phone ?? ''));
+  }
+
+  @Post('otp/verify')
+  @Public()
+  @UseGuards(ThrottlerGuard)
+  @Throttle(OTP_THROTTLE)
+  @ApiTags(...TAG_MOBILE_ONLY)
+  @ApiOperation({
+    summary: 'App sign-in step 2 — verify the OTP; signs in, or signs up a new number',
+    description:
+      'Registered number → normal login response. New number → `role` (CLIENT or STAFF) is required; the account ' +
+      'is created from the phone alone (optional full_name, and series for STAFF) and signed in. Either way the ' +
+      'response is the login response plus `is_new_user`, and `user.profile_complete` / `user.profile_missing`. ' +
+      'Office roles (RM/BM/Admin…) get 403 — they use POST /auth/login.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['phone', 'otp'],
+      properties: {
+        phone: { type: 'string', example: '9811100001' },
+        otp: { type: 'string', example: '123456' },
+        role: { type: 'string', enum: ['CLIENT', 'STAFF'], description: 'Required only for a new number' },
+        full_name: { type: 'string', description: 'Optional, new number only' },
+        series: { type: 'string', enum: ['UC', 'SC', 'CK'], description: 'Optional, new STAFF only' },
+      },
+    },
+  })
+  @ApiResponse({ status: 201, description: 'Signed in (and registered, if new).', schema: LOGIN_RESPONSE_SCHEMA })
+  @ApiResponse({ status: 400, description: 'Expired OTP, or a new number sent without role.' })
+  @ApiResponse({ status: 401, description: 'Incorrect OTP.' })
+  @ApiResponse({ status: 403, description: 'Office account, or the number is on the restricted list.' })
+  verifyLoginOtp(
+    @Body() body: { phone?: string; otp?: string; role?: string; full_name?: string; series?: string },
+    @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> },
+  ) {
+    return this.authService.verifyLoginOtp(body ?? {}, this.clientMeta(req));
   }
 
   @Post('login')

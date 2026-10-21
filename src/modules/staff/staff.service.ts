@@ -1,10 +1,11 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { Prisma, PipelineStage } from '@prisma/client';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Prisma, PipelineStage, LanguageTier } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '@prisma/client';
 import * as crypto from 'crypto';
 import { mapSeriesFromShort, parseCreateStaffBody, toStaffDto, mapSeriesToShort } from '../../common/mappers/staff.mapper';
+import { assertSeriesActive } from '../../common/config/active-series';
 
 @Injectable()
 export class StaffService {
@@ -40,25 +41,7 @@ export class StaffService {
     }
 
     if (!data.staff_code) {
-      const firstName = input.fullName
-        ? input.fullName.split(' ')[0].toLowerCase().replace(/[^a-z0-9]/g, '')
-        : 'emp';
-
-      let seqNumber = 1;
-      
-      const latest = await this.prisma.staffApplicant.findFirst({
-        where: { staffCode: { startsWith: firstName } },
-        orderBy: { staffCode: 'desc' },
-      });
-
-      if (latest) {
-        const match = latest.staffCode.match(/\d+$/);
-        if (match) {
-          seqNumber = parseInt(match[0], 10) + 1;
-        }
-      }
-      
-      input.staffCode = `${firstName}${seqNumber.toString().padStart(3, '0')}`;
+      input.staffCode = await this.nextStaffCode(input.fullName);
     }
 
     const row = await this.prisma.staffApplicant.create({ data: input });
@@ -70,6 +53,172 @@ export class StaffService {
       metadata: { stage: 'S1_INTAKE', action: 'created' },
     });
     return toStaffDto(row);
+  }
+
+  /** First name + a running number (pooja001, pooja002…); "new" when there is no name yet. */
+  private async nextStaffCode(fullName?: string | null): Promise<string> {
+    const firstName =
+      (fullName ?? '').trim().split(' ')[0].toLowerCase().replace(/[^a-z0-9]/g, '') || (fullName == null ? 'new' : 'emp');
+    let seqNumber = 1;
+    const latest = await this.prisma.staffApplicant.findFirst({
+      where: { staffCode: { startsWith: firstName } },
+      orderBy: { staffCode: 'desc' },
+    });
+    if (latest) {
+      const match = latest.staffCode.match(/\d+$/);
+      if (match) seqNumber = parseInt(match[0], 10) + 1;
+    }
+    return `${firstName}${seqNumber.toString().padStart(3, '0')}`;
+  }
+
+  /**
+   * A staff member who signed up from the app with a mobile number only. The
+   * row sits at S1_INTAKE with no name, DOB, address or series until an RM
+   * fills them in with completeIntake(). Same restricted-list check as an
+   * RM intake, on the phone.
+   */
+  async createSelfRegistered(params: {
+    mobile: string;
+    fullName?: string;
+    series?: string;
+    /** Older app builds still send the full form — kept for the RM to confirm. */
+    email?: string;
+    dateOfBirth?: string;
+    address?: string;
+    extra?: Record<string, unknown>;
+  }) {
+    const hit = await this.checkRestrictedList('', params.mobile);
+    if (hit.found) {
+      await this.audit.log({
+        action: AuditAction.RESTRICTED_LIST,
+        entityType: 'staff_applicant_intake',
+        metadata: { phone: params.mobile, reason: hit.reason, blocked: 'self_registration' },
+      });
+      throw new ForbiddenException('This number cannot be registered. Please contact HomeGenny.');
+    }
+    // Optional at sign-up: kept if given, checked the same way as everywhere else.
+    let series: ReturnType<typeof mapSeriesFromShort> | null = null;
+    if (params.series) {
+      series = mapSeriesFromShort(params.series);
+      assertSeriesActive(series);
+    }
+    const fullName = params.fullName?.trim() || null;
+    const row = await this.prisma.staffApplicant.create({
+      data: {
+        staffCode: await this.nextStaffCode(fullName),
+        series,
+        fullName,
+        dateOfBirth: params.dateOfBirth ? new Date(`${params.dateOfBirth.slice(0, 10)}T00:00:00.000Z`) : null,
+        address: params.address?.trim() || null,
+        email: params.email || null,
+        mobile: params.mobile,
+        pipelineStage: PipelineStage.S1_INTAKE,
+        metadata: { ...(params.extra ?? {}), self_registered: true, staff_code_provisional: !fullName } as Prisma.InputJsonValue,
+      },
+    });
+    await this.audit.log({
+      action: AuditAction.STAGE_TRANSITION,
+      entityType: 'staff_applicant',
+      entityId: row.id,
+      metadata: { stage: 'S1_INTAKE', action: 'self_registered' },
+    });
+    return row;
+  }
+
+  /**
+   * "Complete S1" — the RM fills in what an app sign-up left out. Writes the
+   * S1 fields only (the stage move to S2 is the caller's); a staff code made
+   * before there was a name is replaced with one from the name.
+   */
+  async completeIntake(staffId: string, body: Record<string, unknown>, actorId: string) {
+    const staff = await this.prisma.staffApplicant.findFirst({ where: { id: staffId, deletedAt: null } });
+    if (!staff) throw new NotFoundException(`Staff ${staffId} not found`);
+    if (staff.pipelineStage !== PipelineStage.S1_INTAKE) {
+      throw new BadRequestException(`S1 is already done — this staff member is at ${staff.pipelineStage}.`);
+    }
+
+    const str = (v: unknown) => (v === undefined || v === null || String(v).trim() === '' ? undefined : String(v).trim());
+    const fullName = str(body.full_name) ?? staff.fullName ?? undefined;
+    const dob = str(body.date_of_birth);
+    const address = str(body.address) ?? staff.address ?? undefined;
+    const seriesRaw = str(body.series);
+    const missing = [
+      !fullName && 'full_name',
+      !dob && !staff.dateOfBirth && 'date_of_birth',
+      !address && 'address',
+      !seriesRaw && !staff.series && 'series',
+    ].filter(Boolean);
+    if (missing.length) throw new BadRequestException(`Required to complete S1: ${missing.join(', ')}`);
+    if (fullName!.length < 2) throw new BadRequestException('full_name is too short.');
+    let dateOfBirth: Date | undefined;
+    if (dob) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dob) || Number.isNaN(Date.parse(`${dob}T00:00:00Z`))) {
+        throw new BadRequestException('date_of_birth must be YYYY-MM-DD.');
+      }
+      // UTC midnight — a @db.Date column stores the day meant (this server runs IST).
+      dateOfBirth = new Date(`${dob}T00:00:00.000Z`);
+    }
+    let series = staff.series;
+    if (seriesRaw) {
+      series = mapSeriesFromShort(seriesRaw);
+      if (series !== staff.series) assertSeriesActive(series);
+    }
+
+    const aadhaar = str(body.aadhaar_number);
+    if (aadhaar && !/^\d{12}$/.test(aadhaar)) throw new BadRequestException('aadhaar_number must be 12 digits.');
+    const hit = await this.checkRestrictedList(aadhaar ?? '', staff.mobile);
+
+    const meta = (staff.metadata ?? {}) as Record<string, unknown>;
+    const extra: Record<string, unknown> = {};
+    for (const k of ['gender', 'alternate_phone', 'city', 'state', 'pincode', 'hometown', 'referral_source', 'intake_notes']) {
+      const v = str(body[k]);
+      if (v !== undefined) extra[k] = k === 'gender' ? v.toUpperCase() : v;
+    }
+    if (extra.gender !== undefined && !['MALE', 'FEMALE', 'OTHER'].includes(String(extra.gender))) {
+      throw new BadRequestException('gender must be MALE, FEMALE or OTHER.');
+    }
+    const languageTier = str(body.language_tier);
+    if (languageTier && !['T1', 'T2', 'T3', 'T4'].includes(languageTier)) {
+      throw new BadRequestException('language_tier must be T1, T2, T3 or T4.');
+    }
+    const email = str(body.email);
+
+    const renameCode = meta.staff_code_provisional === true;
+    const updated = await this.prisma.staffApplicant.update({
+      where: { id: staffId },
+      data: {
+        fullName,
+        address,
+        series,
+        ...(dateOfBirth ? { dateOfBirth } : {}),
+        ...(aadhaar ? { aadhaarNumber: aadhaar } : {}),
+        ...(languageTier ? { languageTier: languageTier as LanguageTier } : {}),
+        ...(email ? { email } : {}),
+        ...(str(body.emergency_contact_name) ? { emergencyContactName: str(body.emergency_contact_name) } : {}),
+        ...(str(body.emergency_contact_mobile) ? { emergencyContactMobile: str(body.emergency_contact_mobile) } : {}),
+        ...(renameCode ? { staffCode: await this.nextStaffCode(fullName) } : {}),
+        ...(hit.found ? { restrictedListFlag: true } : {}),
+        metadata: {
+          ...meta,
+          ...extra,
+          staff_code_provisional: false,
+          intake_completed_at: new Date().toISOString(),
+          intake_completed_by: actorId,
+        } as Prisma.InputJsonValue,
+      },
+    });
+    // The login shows this name in the app header.
+    if (updated.userId) {
+      await this.prisma.user.update({ where: { id: updated.userId }, data: { fullName: fullName! } }).catch(() => undefined);
+    }
+    await this.audit.log({
+      actorId,
+      action: AuditAction.STAGE_TRANSITION,
+      entityType: 'staff_applicant',
+      entityId: staffId,
+      metadata: { stage: 'S1_INTAKE', action: 'intake_completed', restricted: hit.found },
+    });
+    return { staff: updated, restricted: hit };
   }
 
   async findById(id: string) {

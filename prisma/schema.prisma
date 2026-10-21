@@ -117,16 +117,16 @@ model UserSession {
 model StaffApplicant {
   id                     String                 @id @default(uuid()) @db.Uuid
   staffCode              String                 @unique @map("staff_code") @db.VarChar(30)
-  series                 StaffSeries
+  series                 StaffSeries?
   languageTier           LanguageTier?          @map("language_tier")
   currentScenarioCode    String?                @map("current_scenario") @db.VarChar(20)
   terminalOutcome        TerminalOutcome?       @map("terminal_outcome")
-  fullName               String                 @map("full_name") @db.VarChar(200)
-  dateOfBirth            DateTime               @map("date_of_birth") @db.Date
+  fullName               String?                @map("full_name") @db.VarChar(200)
+  dateOfBirth            DateTime?              @map("date_of_birth") @db.Date
   mobile                 String                 @db.VarChar(20)
   email                  String?                @db.VarChar(200)
   aadhaarNumber          String?                @map("aadhaar_number") @db.VarChar(20)
-  address                String
+  address                String?
   emergencyContactName   String?                @map("emergency_contact_name") @db.VarChar(200)
   emergencyContactMobile String?                @map("emergency_contact_mobile") @db.VarChar(20)
   verifiedDocs           Json                   @default("{}") @map("verified_docs")
@@ -1314,14 +1314,14 @@ model FinanceCustomer {
   id                              String                            @id @default(uuid()) @db.Uuid
   userId                          String?                           @unique @map("user_id") @db.Uuid
   customerName                    String                            @map("customer_name") @db.VarChar(255)
-  address                         String
+  address                         String?
   city                            String?                           @db.VarChar(100)
   state                           String?                           @db.VarChar(100)
   pincode                         String?                           @db.VarChar(20)
   /// The client's home, for the check-in distance on the RM map
   lat                             Decimal?                          @db.Decimal(10, 7)
   lng                             Decimal?                          @db.Decimal(10, 7)
-  panCard                         String                            @map("pan_card") @db.VarChar(20)
+  panCard                         String?                           @map("pan_card") @db.VarChar(20)
   gstn                            String?                           @db.VarChar(20)
   billNoPrefix                    String                            @map("bill_no_prefix") @db.VarChar(30)
   billSeq                         Int                               @default(0) @map("bill_seq")

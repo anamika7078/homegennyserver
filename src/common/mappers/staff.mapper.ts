@@ -24,6 +24,16 @@ function parseRoleTypes(value: unknown): string[] {
   return [String(value)].filter(Boolean);
 }
 
+/** The S1 fields still empty — the same four the S1→S2 gate in pipeline-fsm checks. */
+export function intakeMissing(row: Pick<PrismaStaff, 'fullName' | 'dateOfBirth' | 'address' | 'series'>): string[] {
+  return [
+    !row.fullName?.trim() && 'full_name',
+    !row.dateOfBirth && 'date_of_birth',
+    !row.address?.trim() && 'address',
+    !row.series && 'series',
+  ].filter((x): x is string => !!x);
+}
+
 /** API / legacy snake_case shape expected by frontend. `open_holds` is present only when the caller loaded them. */
 export function toStaffDto(row: PrismaStaff & { stageHolds?: StageHold[] }) {
   return {
@@ -46,6 +56,9 @@ export function toStaffDto(row: PrismaStaff & { stageHolds?: StageHold[] }) {
     current_scenario_code: row.currentScenarioCode,
     terminal_outcome: row.terminalOutcome,
     full_name: row.fullName,
+    // An app sign-up gives a mobile number only; the RM fills the rest on "Complete S1".
+    intake_missing: intakeMissing(row),
+    intake_complete: intakeMissing(row).length === 0,
     date_of_birth: row.dateOfBirth,
     mobile: row.mobile,
     email: row.email,
@@ -89,7 +102,11 @@ export function mapSeriesFromShort(s: string): StaffSeries {
   return series;
 }
 
-export function mapSeriesToShort(s: StaffSeries): string {
+/** Staff who signed up from the app have no series until the RM completes S1 — that stays null. */
+export function mapSeriesToShort(s: StaffSeries): string;
+export function mapSeriesToShort(s: StaffSeries | null): string | null;
+export function mapSeriesToShort(s: StaffSeries | null): string | null {
+  if (s == null) return null;
   const m: Record<StaffSeries, string> = {
     [StaffSeries.DRIVER]: 'DR',
     [StaffSeries.SKILLED_CARE]: 'SC',

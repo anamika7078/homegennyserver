@@ -1,6 +1,6 @@
 import {
-  Controller, Get, Post, Param, Query, Body, Res, UseInterceptors, Req,
-  UploadedFiles, BadRequestException,
+  Controller, Get, Post, Patch, Param, Query, Body, Res, UseInterceptors, Req,
+  UploadedFiles, BadRequestException, ForbiddenException,
 } from '@nestjs/common';
 import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
@@ -14,6 +14,8 @@ import { IncidentsService, MAX_COMPLAINT_PHOTOS, MAX_COMPLAINT_PHOTO_BYTES } fro
 import { TrackingService } from '../tracking/tracking.service';
 import { sendStoredFile } from '../../common/storage/send-file.util';
 import { FinanceInvoiceService } from '../finance/invoice/invoice.service';
+import { FinanceCustomerService } from '../finance/customer/customer.service';
+import { parseClientProfileBody } from '../../common/utils/client-profile.util';
 import { CLIENT_VISIBLE_INVOICE_STATUSES } from '../../common/finance/invoice-status';
 import { buildServiceLines, periodRange } from '../../common/finance/service-lines.util';
 
@@ -41,6 +43,7 @@ export class ClientMobileController {
     // document the office sees rather than a second version of it.
     private readonly financeInvoices: FinanceInvoiceService,
     private readonly tracking: TrackingService,
+    private readonly customers: FinanceCustomerService,
   ) {}
 
   private async resolveCustomer(userId: string) {
@@ -56,17 +59,84 @@ export class ClientMobileController {
   })
   async getProfile(@Req() req: any) {
     const customer = await this.resolveCustomer(req.user.id);
+    const user = await this.prisma.user.findUnique({ where: { id: req.user.id }, select: { email: true, phone: true } });
+    const missing = customer
+      ? FinanceCustomerService.missingProfileFields({
+          customer_name: customer.customerName, address: customer.address, metadata: customer.metadata,
+        })
+      : ['name', 'address'];
+    const meta = (customer?.metadata ?? {}) as Record<string, unknown>;
     return {
-      name: customer?.customerName ?? req.user.fullName,
-      email: req.user.email ?? null,
-      phone: req.user.phone,
+      // A mobile-only sign-up has a placeholder customer name until they give theirs.
+      name: missing.includes('name') ? null : customer?.customerName ?? null,
+      email: user?.email ?? null,
+      phone: user?.phone ?? req.user.phone,
       address: customer?.address ?? null,
       city: customer?.city ?? null,
+      state: customer?.state ?? null,
       pincode: customer?.pincode ?? null,
+      lat: customer?.lat != null ? Number(customer.lat) : null,
+      lng: customer?.lng != null ? Number(customer.lng) : null,
+      pan_card: customer?.panCard ?? null,
+      gstn: customer?.gstn ?? null,
+      self_registered: meta.self_registered === true,
+      /** false → ask for profile_missing before (or with) the first staff request. */
+      profile_complete: missing.length === 0,
+      profile_missing: missing,
       payment_method: null,
       account_last4: null,
       upi_id: null,
     };
+  }
+
+  @Patch('profile')
+  @Roles(UserRole.CLIENT)
+  @ApiOperation({
+    summary: "Fill in or change the client's own profile",
+    description:
+      'All fields optional; only those sent change. A client who signed up with a mobile number only needs ' +
+      "`full_name` and `address` before their first staff request (or can send them in that request's " +
+      '`profile` block instead). PAN/GSTN are optional here — the RM or Finance usually collects them. ' +
+      'Returns the same shape as GET /client/profile.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        full_name: { type: 'string', example: 'Anita Sharma' },
+        email: { type: 'string', example: 'anita@example.com' },
+        address: { type: 'string', example: 'B-12, Sector 44, Noida' },
+        city: { type: 'string', example: 'Noida' },
+        state: { type: 'string', example: 'Uttar Pradesh' },
+        pincode: { type: 'string', example: '201301' },
+        lat: { type: 'number' },
+        lng: { type: 'number' },
+        pan_card: { type: 'string', example: 'ABCDE1234F' },
+        gstn: { type: 'string' },
+      },
+    },
+  })
+  async updateProfile(@Req() req: any, @Body() body: Record<string, unknown>) {
+    const customer = await this.resolveCustomer(req.user.id);
+    if (!customer) throw new ForbiddenException('No customer account is linked to this login.');
+    const p = parseClientProfileBody(body ?? {});
+    if (p.email !== undefined) {
+      const taken = await this.prisma.user.findFirst({ where: { email: p.email, NOT: { id: req.user.id } }, select: { id: true } });
+      if (taken) throw new BadRequestException('Another account already uses this email.');
+    }
+    await this.customers.completeProfile(customer.id, {
+      name: p.name, address: p.address, city: p.city, state: p.state, pincode: p.pincode, pan_card: p.pan_card, gstn: p.gstn,
+    });
+    if (p.lat !== undefined) {
+      await this.prisma.financeCustomer.update({ where: { id: customer.id }, data: { lat: p.lat, lng: p.lng } });
+    }
+    if (p.name !== undefined || p.email !== undefined) {
+      await this.prisma.user.update({
+        where: { id: req.user.id },
+        data: { ...(p.name !== undefined ? { fullName: p.name } : {}), ...(p.email !== undefined ? { email: p.email } : {}) },
+      });
+    }
+    return this.getProfile(req);
   }
 
   /**

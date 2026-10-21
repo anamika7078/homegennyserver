@@ -406,8 +406,8 @@ export class SchemaBootstrapService implements OnModuleInit {
       CREATE TABLE IF NOT EXISTS finance_customers (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         customer_name VARCHAR(255) NOT NULL,
-        address TEXT NOT NULL,
-        pan_card VARCHAR(20) UNIQUE NOT NULL,
+        address TEXT,
+        pan_card VARCHAR(20) UNIQUE,
         gstn VARCHAR(20),
         bill_no_prefix VARCHAR(30) NOT NULL,
         bill_seq INT NOT NULL DEFAULT 0,

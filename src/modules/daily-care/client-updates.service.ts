@@ -62,7 +62,7 @@ export class ClientUpdatesService {
 
     for (const { placement, client } of placements) {
       const base = { placement_id: placement.id, client_name: client?.customerName ?? null };
-      if (CARE_SERIES.includes(staff.series)) {
+      if (staff.series && CARE_SERIES.includes(staff.series)) {
         const plan = await this.prisma.carePlan.findFirst({ where: { placementId: placement.id, status: 'ACTIVE' } });
         if (plan) {
           items.push({

@@ -22,6 +22,7 @@ import { PipelineFsmService, PipelineStage as FsmPipelineStage } from '../pipeli
 import { UserProvisioningService } from './user-provisioning.service';
 import { RegisterCustomerDto } from './dto/register-customer.dto';
 import { RegisterStaffDto } from './dto/register-staff.dto';
+import { intakeMissing } from '../../common/mappers/staff.mapper';
 import {
   generateTotpSecret,
   buildOtpauthUrl,
@@ -39,6 +40,19 @@ import { hashRefreshToken, refreshTokenMatches } from '../../common/utils/refres
  * TODO: replace with a real OTP/SMS provider.
  */
 const MOCK_OTP_FALLBACK = '123456';
+
+/** The app roles that sign in with a mobile OTP. Office roles keep password (+ TOTP) login. */
+const OTP_LOGIN_ROLES = new Set(['CLIENT', 'STAFF']);
+
+/**
+ * One stored form per number: digits only, and an Indian +91/91 prefix on a
+ * 10-digit number dropped — the app sends 10 digits, and users.phone holds
+ * them that way.
+ */
+export function normalizePhone(raw: string): string {
+  const digits = String(raw ?? '').replace(/\D/g, '');
+  return digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : digits;
+}
 
 /** Maximum admin session lifetime: 8 hours (in seconds) */
 const ADMIN_SESSION_MAX_SECONDS = 8 * 60 * 60;
@@ -167,109 +181,241 @@ export class AuthService {
   }
 
   /**
-   * Public self-registration for a Customer. Creates the login account (role
-   * CLIENT) AND a linked `finance_customers` row in the same flow, so the
-   * customer appears in Finance's customer list right away. If the finance
-   * record fails to create (e.g. duplicate PAN), the just-created user is
-   * rolled back so we never leave an orphaned login with no business record.
+   * Public self-registration for a Customer — a mobile number is all it takes
+   * (2026-10-21). Creates the login (role CLIENT) and a linked
+   * `finance_customers` row with a pending profile: placeholder name, no
+   * address or PAN. The client fills those in when they first ask for staff
+   * (PATCH /client/profile, or the `profile` block of the request), and the
+   * RM sees them under Leads → Clients meanwhile. An older app build that
+   * still sends the full form gets it all saved at once.
    */
   async registerCustomer(
     dto: RegisterCustomerDto,
     meta?: { ip?: string; userAgent?: string },
   ): Promise<LoginResponse | { requires_2fa: true; user_id: string } | TotpSetupRequired> {
-    await this.assertPhoneAndEmailAvailable(dto.phone, dto.email);
+    const phone = normalizePhone(dto.phone);
+    await this.assertPhoneAndEmailAvailable(phone, dto.email);
 
-    const customer = await this.financeCustomer.createCustomer({
-      customer_name: dto.business_name?.trim() || dto.full_name,
-      address:       dto.address,
-      pan_card:      dto.pan_card,
-      gstn:          dto.gstn,
-      city:          dto.city,
-      state:         dto.state,
-      pincode:       dto.pincode,
-    });
-    const user = await this.userProvisioning.linkClientAccount({
-      financeCustomerId: customer.id,
-      fullName:           dto.full_name,
-      phone:              dto.phone,
-      email:              dto.email,
-      password:           dto.password, // self-registered — always explicit, never the default
-    });
+    const name = dto.business_name?.trim() || dto.full_name?.trim() || undefined;
+    const customer = await this.financeCustomer.createPendingCustomer({ phone, name });
+    try {
+      if (dto.address || dto.pan_card || dto.city || dto.state || dto.pincode || dto.gstn) {
+        await this.financeCustomer.completeProfile(customer.id, {
+          address: dto.address,
+          pan_card: dto.pan_card,
+          gstn: dto.gstn,
+          city: dto.city,
+          state: dto.state,
+          pincode: dto.pincode,
+        });
+      }
+    } catch (err) {
+      await this.dropPendingCustomer(customer.id);
+      throw err;
+    }
+
+    let user;
+    try {
+      user = await this.userProvisioning.linkClientAccount({
+        financeCustomerId: customer.id,
+        fullName:          dto.full_name?.trim() || '',
+        phone,
+        email:             dto.email,
+        password:          dto.password,
+        otpOnly:           !dto.password,
+      });
+    } catch (err) {
+      await this.dropPendingCustomer(customer.id);
+      throw err;
+    }
     if (!user) {
+      await this.dropPendingCustomer(customer.id);
       throw new BadRequestException('A phone number is required to register.');
     }
 
-    this.logger.log(`[AUTH] Registered CLIENT ${user.phone} — linked to finance_customers`);
+    this.logger.log(`[AUTH] Registered CLIENT ${user.phone} — pending profile, finance_customers ${customer.id}`);
     return this.login(this.toUserRecord(user), meta);
   }
 
+  /** Undo a just-made pending customer when the rest of registration fails — nothing else points at it yet. */
+  private async dropPendingCustomer(customerId: string) {
+    await this.dataSource
+      .query(`DELETE FROM finance_customer_branches WHERE customer_id = $1`, [customerId])
+      .catch(() => undefined);
+    await this.dataSource.query(`DELETE FROM finance_customers WHERE id = $1`, [customerId]).catch(() => undefined);
+  }
+
   /**
-   * Public self-registration for Staff. Creates the login account (role
-   * STAFF) AND a linked `staff_applicants` row — the RM pipeline entity, not
-   * an `employees` (HR) row — so the person shows up on the RM side exactly
-   * like an RM-created intake does, at S1_INTAKE, and is then immediately
-   * advanced to S2_VERIFY: intake's whole job is capturing this basic info,
-   * and registering IS that. (An `employees` row only ever exists after S5
-   * deployment turns into a hire — see the HR↔pipeline bridge — so writing
-   * one here at registration was the wrong table from the start.)
+   * Public self-registration for Staff — a mobile number is all it takes
+   * (2026-10-21). Creates the login (role STAFF) and a `staff_applicants` row
+   * at S1_INTAKE with no RM. It stays at S1: the RM claims it from
+   * Leads, calls the person, and fills in name / DOB / address / series on
+   * "Complete S1" (POST /rm/staff/:id/complete-intake), which moves it to
+   * S2_VERIFY. Registration used to advance straight to S2 itself, back when
+   * the app collected all of S1.
    *
-   * There is no RM to own this candidate yet — self-registration doesn't go
-   * through one — so `assignedRmId` is left null. That makes the row
-   * invisible to any individual RM's kanban (it's scoped to their own
-   * assigned staff), which is deliberate: GET /rm/unassigned-staff lists
-   * these for any RM/BM to see, and POST /rm/unassigned-staff/:id/claim is
-   * how one takes ownership. Until claimed, the pipeline still runs (S2
-   * verification etc. don't require an assigned RM) — only RM-scoped actions
-   * do.
-   *
-   * StaffService.create() runs the restricted-list check itself (throws
-   * ForbiddenException on a hit) — not duplicated here.
+   * Restricted-list check on the phone runs inside createSelfRegistered().
    */
   async registerStaff(
     dto: RegisterStaffDto,
     meta?: { ip?: string; userAgent?: string },
   ): Promise<LoginResponse | { requires_2fa: true; user_id: string } | TotpSetupRequired> {
-    await this.assertPhoneAndEmailAvailable(dto.phone, dto.email);
+    const phone = normalizePhone(dto.phone);
+    await this.assertPhoneAndEmailAvailable(phone, dto.email);
 
-    const created = await this.staffService.create({
-      full_name: dto.full_name,
-      mobile: dto.phone,
-      email: dto.email,
-      date_of_birth: dto.date_of_birth,
-      address: dto.address,
+    const extra: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries({
+      alternate_phone: dto.alternate_phone,
+      gender: dto.gender,
+      city: dto.city,
+      state: dto.state,
+      pincode: dto.pincode,
+    })) {
+      if (v) extra[k] = v;
+    }
+    const created = await this.staffService.createSelfRegistered({
+      mobile: phone,
+      fullName: dto.full_name,
       series: dto.series,
-      metadata: {
-        self_registered: true,
-        alternate_phone: dto.alternate_phone,
-        gender: dto.gender,
-        city: dto.city,
-        state: dto.state,
-        pincode: dto.pincode,
-      },
+      email: dto.email,
+      dateOfBirth: dto.date_of_birth,
+      address: dto.address,
+      extra,
     });
 
-    const user = await this.userProvisioning.linkLightweightStaffAccount({
-      staffApplicantId: created.id as string,
-      phone:            dto.phone,
-      fullName:         dto.full_name,
-      email:            dto.email,
-      branchId:         null,
-      password:         dto.password, // self-registered — always explicit, never the default
-    });
+    let user;
+    try {
+      user = await this.userProvisioning.linkLightweightStaffAccount({
+        staffApplicantId: created.id,
+        phone,
+        fullName:         dto.full_name?.trim() || '',
+        email:            dto.email,
+        branchId:         null,
+        password:         dto.password,
+        otpOnly:          !dto.password,
+      });
+    } catch (err) {
+      await this.prisma.staffApplicant.delete({ where: { id: created.id } }).catch(() => undefined);
+      throw err;
+    }
 
-    // S1's job — full name, phone, DOB, address, category — is exactly what
-    // registration just captured, so there's nothing left for an RM to add
-    // before S2 verification can start. actorId is the staff's own new user
-    // row: there is no other actor for a self-service signup.
-    await this.fsm.advanceStage({
-      staffId: created.id as string,
-      toStage: FsmPipelineStage.S2_VERIFY,
-      actorId: user.id,
-      reasonCode: 'SELF_REGISTERED',
-    });
-
-    this.logger.log(`[AUTH] Registered STAFF ${user.phone} — self-registered, S1 complete, unassigned`);
+    this.logger.log(`[AUTH] Registered STAFF ${user.phone} — at S1_INTAKE, unassigned, waiting for an RM`);
     return this.login(this.toUserRecord(user), meta);
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // Mobile OTP sign-in — the app's only way in for CLIENT and STAFF
+  //
+  // ⚠️ TEMPORARY: no SMS provider yet, so the code is the fixed AUTH_MOCK_OTP
+  // (123456) and nothing is sent. Anyone who knows a number can sign in as it.
+  // Accepted knowingly on 2026-10-21 to ship mobile-only registration; swap
+  // issueLoginOtp() for a real sender before go-live. Staff roles (RM/BM/
+  // ADMIN/HR…) never sign in this way — they keep password (+ TOTP) login.
+  // ────────────────────────────────────────────────────────────────────────────
+
+  /** phone → the code issued and when it lapses. Per process, like failedAttempts. */
+  private readonly loginOtps = new Map<string, { otp: string; expiresAt: number; tries: number }>();
+  private static readonly LOGIN_OTP_MAX_TRIES = 5;
+
+  async sendLoginOtp(rawPhone: string) {
+    const phone = normalizePhone(rawPhone);
+    if (!/^\+?\d{10,15}$/.test(phone)) {
+      throw new BadRequestException('Enter a valid 10-digit mobile number.');
+    }
+    const otp = this.mockOtp();
+    const expires = otpExpiresAt();
+    this.loginOtps.set(phone, { otp, expiresAt: expires.getTime(), tries: 0 });
+    this.logger.warn(`[AUTH] FIXED-OTP login code issued for ${phone} — no SMS was sent.`);
+
+    const existing = await this.findUserByIdentifier(phone);
+    const appRole = existing && OTP_LOGIN_ROLES.has(existing.role) ? existing.role : null;
+    return {
+      sent: true,
+      expires_at: expires.toISOString(),
+      is_registered: !!existing,
+      /** CLIENT or STAFF when the number already has an app account; null otherwise. */
+      role: appRole,
+      /** true when the number belongs to an office login (RM/BM/Admin…) — use password login instead. */
+      use_password_login: !!existing && !appRole,
+    };
+  }
+
+  /**
+   * Checks the code, then signs in — or, for a number with no account yet,
+   * registers it first (role required) and signs in. Returns the normal
+   * login response plus `is_new_user`.
+   */
+  async verifyLoginOtp(
+    body: { phone?: string; otp?: string; role?: string; full_name?: string; series?: string },
+    meta?: { ip?: string; userAgent?: string },
+  ) {
+    const phone = normalizePhone(String(body.phone ?? ''));
+    const otp = String(body.otp ?? '').trim();
+    if (!phone || !otp) throw new BadRequestException('phone and otp are required.');
+
+    const issued = this.loginOtps.get(phone);
+    if (!issued || Date.now() > issued.expiresAt) {
+      throw new BadRequestException('This OTP has expired — request a new one.');
+    }
+    if (issued.otp !== otp) {
+      issued.tries += 1;
+      if (issued.tries >= AuthService.LOGIN_OTP_MAX_TRIES) this.loginOtps.delete(phone);
+      throw new UnauthorizedException('Incorrect OTP.');
+    }
+
+    const existing = await this.findUserByIdentifier(phone);
+    if (existing) {
+      this.loginOtps.delete(phone);
+      if (!OTP_LOGIN_ROLES.has(existing.role)) {
+        throw new ForbiddenException('This number belongs to an office account — sign in with your password.');
+      }
+      if (!existing.is_active) throw new UnauthorizedException('Account is inactive');
+      const res = await this.login(existing, meta);
+      return { ...res, is_new_user: false };
+    }
+
+    // The code stays valid here, so the app can ask "Client or Staff?" and resend it.
+    const role = String(body.role ?? '').trim().toUpperCase();
+    if (role !== 'CLIENT' && role !== 'STAFF') {
+      throw new BadRequestException('This number is not registered yet — send role: CLIENT or STAFF to sign up.');
+    }
+    this.loginOtps.delete(phone);
+    const res =
+      role === 'CLIENT'
+        ? await this.registerCustomer({ phone, full_name: body.full_name || undefined }, meta)
+        : await this.registerStaff({ phone, full_name: body.full_name || undefined, series: body.series || undefined }, meta);
+    return { ...res, is_new_user: true };
+  }
+
+  /**
+   * What an app user still has to fill in. STAFF: the S1 fields (the RM
+   * fills them, the app only shows "under review"). CLIENT: name and address
+   * (asked for when they first request staff).
+   */
+  async profileStatus(userId: string, role: string): Promise<{ profile_complete: boolean; profile_missing: string[] } | null> {
+    if (role === 'STAFF') {
+      const s = await this.prisma.staffApplicant.findFirst({
+        where: { userId, deletedAt: null },
+        select: { fullName: true, dateOfBirth: true, address: true, series: true },
+      });
+      if (!s) return null;
+      const missing = intakeMissing(s);
+      return { profile_complete: missing.length === 0, profile_missing: missing };
+    }
+    if (role === 'CLIENT') {
+      const c = await this.prisma.financeCustomer.findFirst({
+        where: { userId },
+        select: { customerName: true, address: true, metadata: true },
+      });
+      if (!c) return null;
+      const missing = FinanceCustomerService.missingProfileFields({
+        customer_name: c.customerName,
+        address: c.address,
+        metadata: c.metadata,
+      });
+      return { profile_complete: missing.length === 0, profile_missing: missing };
+    }
+    return null;
   }
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -596,7 +742,7 @@ export class AuthService {
       roleMeta = {
         staffCode: staffApplicant?.staffCode || 'STF-1029',
         pipelineStage: staffApplicant?.pipelineStage || 'S2_VERIFY',
-        series: staffApplicant?.series || 'MAID',
+        series: staffApplicant ? staffApplicant.series : 'MAID',
         assignedRm: {
           name: 'Amit Gupta (RM)',
           phone: '+919800000001',
@@ -608,7 +754,10 @@ export class AuthService {
       });
       roleMeta = {
         customerCode: customer?.id || 'CL-881',
-        customerName: customer?.customerName || user.full_name,
+        // null while an app sign-up has only the placeholder "New client <phone>".
+        customerName: (customer?.metadata as Record<string, unknown> | null)?.name_pending === true
+          ? null
+          : customer?.customerName || user.full_name,
         activePlacements: 1,
       };
     }
@@ -635,6 +784,8 @@ export class AuthService {
         is_active: user.is_active,
         branch_id: user.branch_id,
         ...roleMeta,
+        // CLIENT/STAFF only: what is still to be filled in (see profileStatus).
+        ...((await this.profileStatus(user.id, user.role)) ?? {}),
       },
     };
   }
@@ -1037,6 +1188,8 @@ export class AuthService {
       employee_profile: employee
         ? { id: employee.id, employee_id: employee.employeeId, status: employee.status }
         : null,
+      // CLIENT/STAFF: profile_complete + profile_missing — what the app still has to show/ask for.
+      ...((await this.profileStatus(u.id, u.role)) ?? {}),
     };
   }
 }

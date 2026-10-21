@@ -343,6 +343,50 @@ export class RmController {
     return this.rm.claimStaff(req.user, staffId);
   }
 
+  @Post('staff/:staffId/complete-intake')
+  @ApiOperation({
+    summary: '"Complete S1" — fill in an app sign-up\'s S1 details and move it to S2',
+    description:
+      'For staff who signed up from the app with a mobile number only (they sit at S1_INTAKE; `intake_complete` ' +
+      'is false). Required unless already on file: full_name, date_of_birth (YYYY-MM-DD), address, series ' +
+      '(UC/SC/CK). Optional: gender, aadhaar_number, language_tier, email, alternate_phone, city, state, pincode, ' +
+      'hometown, emergency_contact_name/mobile, referral_source, intake_notes, deposit_amount, deposit_collected. ' +
+      'Claims the staff for the caller if unclaimed. Restricted-list hit → TERMINAL (DENIED). ' +
+      'advance_to_verify: false saves without moving to S2.',
+  })
+  completeIntake(
+    @Req() req: { user: AuthUser },
+    @Param('staffId') staffId: string,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.rm.completeIntake(req.user, staffId, body ?? {});
+  }
+
+  @Get('client-leads')
+  @ApiOperation({
+    summary: 'Clients who signed up from the app — profile status and whether they have asked for staff',
+    description: 'Every RM/BM/Admin sees the same list (a new client has no RM yet). ?status=pending keeps only ' +
+      'those still missing name/address or with no request yet.',
+  })
+  @ApiQuery({ name: 'status', required: false, enum: ['pending', 'all'] })
+  listClientLeads(@Query('status') status?: string) {
+    return this.rm.listClientLeads(status);
+  }
+
+  @Patch('client-leads/:customerId')
+  @ApiOperation({
+    summary: 'Fill in a client lead\'s profile on a call, and/or add a note',
+    description: 'Optional: full_name, email, address, city, state, pincode, lat+lng, pan_card, gstn, note. ' +
+      'Only fields sent change.',
+  })
+  updateClientLead(
+    @Req() req: { user: AuthUser },
+    @Param('customerId') customerId: string,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.rm.updateClientLead(req.user, customerId, body ?? {});
+  }
+
   @Get('locations')
   @ApiOperation({ summary: 'Cities and branches for attendance location filters' })
   locations(@Req() req: { user: AuthUser }) {

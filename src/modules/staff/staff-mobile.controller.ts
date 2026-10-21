@@ -111,7 +111,7 @@ export class StaffMobileController {
    * getTimeline() reads, just staff-scoped and reshaped for the app's
    * List<PipelineStage> model.
    */
-  private async buildPipelineProgress(staff: { id: string; pipelineStage: string; series?: string } | null) {
+  private async buildPipelineProgress(staff: { id: string; pipelineStage: string; series?: string | null } | null) {
     if (!staff) {
       return {
         items: stageOrderFor(undefined, false).map((stage) => ({
@@ -134,7 +134,7 @@ export class StaffMobileController {
     const touchedS25 =
       staff.pipelineStage === 'S2_5_ASSESS' ||
       events.some((e) => e.fromStage === 'S2_5_ASSESS' || e.toStage === 'S2_5_ASSESS');
-    const stageOrder = stageOrderFor(staff.series, touchedS25);
+    const stageOrder = stageOrderFor(staff.series ?? undefined, touchedS25);
 
     // completedAt per stage = occurredAt of the event whose fromStage was that stage
     // (i.e. the transition that moved the applicant OUT of it).
@@ -739,7 +739,7 @@ export class StaffMobileController {
       select: { id: true, promptKey: true, reviewStatus: true, attemptNumber: true, createdAt: true },
     });
 
-    const seriesShort = STAFF_SERIES_SHORT[staff.series] ?? 'MAID';
+    const seriesShort = (staff.series && STAFF_SERIES_SHORT[staff.series]) || 'MAID';
     const required = REQUIRED_VIDEO_PROMPTS[seriesShort] ?? 9;
     const approved = new Set(
       rows.filter((r) => r.reviewStatus === 'APPROVED').map((r) => r.promptKey),

@@ -62,7 +62,7 @@ export class StaffApplicant {
   @Column({ nullable: true })
   user_id: string;
 
-  @Column({ type: 'enum', enum: Series })
+  @Column({ type: 'enum', enum: Series, nullable: true }) // null until the RM completes S1 for an app sign-up
   series: Series;
 
   @Column({ type: 'text', array: true, default: '{}' })
@@ -82,10 +82,10 @@ export class StaffApplicant {
   terminal_outcome: TerminalOutcome;
 
   // Personal details
-  @Column()
+  @Column({ nullable: true })
   full_name: string;
 
-  @Column({ type: 'date' })
+  @Column({ type: 'date', nullable: true })
   date_of_birth: Date;
 
   @Column({ length: 15 })
@@ -94,7 +94,7 @@ export class StaffApplicant {
   @Column({ nullable: true })
   email: string;
 
-  @Column({ type: 'text' })
+  @Column({ type: 'text', nullable: true })
   address: string;
 
   @Column({ nullable: true })

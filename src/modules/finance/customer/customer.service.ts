@@ -512,7 +512,7 @@ export class FinanceCustomerService implements OnModuleInit {
       [
         dto.customer_name ?? existing.customer_name,
         dto.address ?? existing.address,
-        (dto.pan_card ?? existing.pan_card).toUpperCase(),
+        (dto.pan_card ?? existing.pan_card)?.toUpperCase() ?? null,
         dto.gstn ? dto.gstn.toUpperCase() : existing.gstn,
         dto.status ?? existing.status,
         generateUnitName(dto.customer_name ?? existing.customer_name),
@@ -520,6 +520,161 @@ export class FinanceCustomerService implements OnModuleInit {
       ],
     );
     return this.getCustomer(id);
+  }
+
+  /**
+   * A client who signed up from the app with a mobile number only.
+   *
+   * finance_customers needs a name and a unit code from day one (every client
+   * screen resolves the login to this row), so the row is made now: the name
+   * is the one given, or "New client <phone>"; address and PAN stay empty.
+   * Without a real name the unit code is a provisional NEW-nn, replaced by one
+   * built from the real name in completeProfile() — while nothing has been
+   * billed or quoted under it.
+   */
+  async createPendingCustomer(params: { phone: string; name?: string }) {
+    await this.ensureTablesExist();
+    const name = params.name?.trim() || '';
+    const customerName = name || `New client ${params.phone}`;
+
+    const existingCodes = await this.allUnitCodes();
+    const unitCode = name ? generateUnitCode(name, existingCodes) : generateUnitCode('NEW', existingCodes);
+    const unitName = generateUnitName(customerName);
+    const now = new Date();
+    const billPrefix = buildBillPrefix(unitCode, now.getMonth() + 1, now.getFullYear());
+    const metadata = { self_registered: true, name_pending: !name, unit_code_provisional: !name };
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+    try {
+      const result: { id: string }[] = await queryRunner.query(
+        `INSERT INTO finance_customers
+           (id, customer_name, address, pan_card, gstn, bill_no_prefix, bill_seq,
+            unit_code, unit_name, status, metadata, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, NULL, NULL, NULL, $2, 1, $3, $4, 'ACTIVE', $5::jsonb, now(), now())
+         RETURNING id`,
+        [customerName, billPrefix, unitCode, unitName, JSON.stringify(metadata)],
+      );
+      await queryRunner.query(
+        `INSERT INTO finance_customer_branches (customer_id, unit_code, unit_name, status)
+         VALUES ($1, $2, $3, 'ACTIVE')`,
+        [result[0].id, unitCode, unitName],
+      );
+      await queryRunner.commitTransaction();
+      return this.getCustomer(result[0].id);
+    } catch (err: any) {
+      await queryRunner.rollbackTransaction();
+      this.logger.error(`Error creating pending customer: ${err?.message}`);
+      throw new BadRequestException(err?.message || 'Failed to create customer');
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  /**
+   * Fills in a client's profile — from the app (PATCH /client/profile, or the
+   * `profile` block of their first staff request) or from the RM's lead view.
+   * Only the fields given are changed. A provisional unit code is rebuilt from
+   * the real name the first time one arrives, unless an invoice or a commercial
+   * calculation already carries it.
+   */
+  async completeProfile(
+    customerId: string,
+    dto: {
+      name?: string; address?: string; city?: string; state?: string; pincode?: string;
+      pan_card?: string; gstn?: string;
+    },
+  ) {
+    const existing = await this.getCustomer(customerId);
+    const meta = (existing.metadata ?? {}) as Record<string, unknown>;
+    const name = dto.name?.trim() || undefined;
+    const pan = dto.pan_card?.trim().toUpperCase() || undefined;
+
+    if (pan && pan !== existing.pan_card) {
+      const taken = await this.dataSource.query<{ id: string }[]>(
+        `SELECT id FROM finance_customers WHERE pan_card = $1 AND id <> $2`,
+        [pan, customerId],
+      );
+      if (taken.length) throw new ConflictException(`Another customer already has PAN ${pan}`);
+    }
+
+    await this.dataSource.query(
+      `UPDATE finance_customers SET
+         customer_name = COALESCE($2, customer_name),
+         unit_name     = CASE WHEN $2::text IS NULL THEN unit_name ELSE $3 END,
+         address       = COALESCE($4, address),
+         city          = COALESCE($5, city),
+         state         = COALESCE($6, state),
+         pincode       = COALESCE($7, pincode),
+         pan_card      = COALESCE($8, pan_card),
+         gstn          = COALESCE($9, gstn),
+         metadata      = CASE WHEN $2::text IS NULL THEN metadata ELSE metadata || '{"name_pending": false}'::jsonb END,
+         updated_at    = now()
+       WHERE id = $1`,
+      [
+        customerId,
+        name ?? null,
+        name ? generateUnitName(name) : null,
+        dto.address?.trim() || null,
+        dto.city?.trim() || null,
+        dto.state?.trim() || null,
+        dto.pincode?.trim() || null,
+        pan ?? null,
+        dto.gstn?.trim().toUpperCase() || null,
+      ],
+    );
+    // The primary branch was made with the customer and has no address of its own yet.
+    await this.dataSource.query(
+      `UPDATE finance_customer_branches SET
+         address = COALESCE(address, $3), city = COALESCE(city, $4),
+         state = COALESCE(state, $5), pincode = COALESCE(pincode, $6), updated_at = now()
+       WHERE customer_id = $1 AND unit_code = $2`,
+      [customerId, existing.unit_code, dto.address?.trim() || null, dto.city?.trim() || null,
+       dto.state?.trim() || null, dto.pincode?.trim() || null],
+    );
+
+    if (name && meta.unit_code_provisional === true) {
+      const [{ used }] = await this.dataSource.query<{ used: boolean }[]>(
+        `SELECT EXISTS (SELECT 1 FROM client_invoices WHERE client_id = $1)
+             OR EXISTS (SELECT 1 FROM finance_commercial_calculations WHERE customer_id = $1) AS used`,
+        [customerId],
+      );
+      if (!used) {
+        const codes = (await this.allUnitCodes()).filter((c) => c !== existing.unit_code);
+        const unitCode = generateUnitCode(name, codes);
+        const now = new Date();
+        await this.dataSource.query(
+          `UPDATE finance_customers SET unit_code = $2, bill_no_prefix = $3,
+             metadata = metadata || '{"unit_code_provisional": false}'::jsonb
+           WHERE id = $1`,
+          [customerId, unitCode, buildBillPrefix(unitCode, now.getMonth() + 1, now.getFullYear())],
+        );
+        await this.dataSource.query(
+          `UPDATE finance_customer_branches SET unit_code = $3, unit_name = $4, updated_at = now()
+           WHERE customer_id = $1 AND unit_code = $2`,
+          [customerId, existing.unit_code, unitCode, generateUnitName(name)],
+        );
+      }
+    }
+    return this.getCustomer(customerId);
+  }
+
+  /** What a client still has to give before they can ask for staff. */
+  static missingProfileFields(c: { customer_name?: string | null; address?: string | null; metadata?: unknown }): string[] {
+    const meta = (c.metadata ?? {}) as Record<string, unknown>;
+    const missing: string[] = [];
+    // Until then customer_name holds the placeholder "New client <phone>".
+    if (meta.name_pending === true || !c.customer_name?.trim()) missing.push('name');
+    if (!c.address?.trim()) missing.push('address');
+    return missing;
+  }
+
+  private async allUnitCodes(): Promise<string[]> {
+    const rows = await this.dataSource.query<{ unit_code: string }[]>(
+      `SELECT unit_code FROM finance_customers UNION SELECT unit_code FROM finance_customer_branches`,
+    );
+    return rows.map((r) => r.unit_code);
   }
 
   /**

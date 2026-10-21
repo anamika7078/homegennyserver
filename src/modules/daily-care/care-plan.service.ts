@@ -603,7 +603,7 @@ export class CarePlanService {
   /** The caretaker's own view: every active care placement, today's list, today's report. */
   async staffToday(user: AuthUser) {
     const staff = await this.access.staffForUser(user.id);
-    if (!CARE_SERIES.includes(staff.series)) return { date: istNow().date, placements: [] };
+    if (!staff.series || !CARE_SERIES.includes(staff.series)) return { date: istNow().date, placements: [] };
     const placements = await this.access.activePlacementsForStaff(staff.id);
     const out: Record<string, unknown>[] = [];
     for (const { placement, client } of placements) {

@@ -1,4 +1,5 @@
 import { Injectable, Logger, ConflictException } from '@nestjs/common';
+import { randomBytes } from 'crypto';
 import { hashPassword } from '../../common/utils/password.util';
 import { PrismaService } from '../../prisma/prisma.service';
 
@@ -16,6 +17,12 @@ interface CreateUserRowParams {
   role: 'CLIENT' | 'STAFF' | 'RM';
   branchId?: string | null;
   password?: string | null;
+  /**
+   * Signs in with a mobile OTP and has no password. Gets an unguessable random
+   * one so the account is never on DEFAULT_PASSWORD, and is not asked to
+   * change it (there is nothing to change).
+   */
+  otpOnly?: boolean;
 }
 
 /**
@@ -53,8 +60,11 @@ export class UserProvisioningService {
 
   /** Creates the `users` row only. Callers link it to a business record afterward. */
   async createUserRow(params: CreateUserRowParams) {
-    const usedDefaultPassword = !params.password;
-    const passwordHash = await hashPassword(params.password || DEFAULT_PASSWORD);
+    const otpOnly = !params.password && params.otpOnly === true;
+    const usedDefaultPassword = !params.password && !otpOnly;
+    const passwordHash = await hashPassword(
+      params.password || (otpOnly ? randomBytes(32).toString('base64url') : DEFAULT_PASSWORD),
+    );
     return this.prisma.user.create({
       data: {
         role: params.role,
@@ -64,7 +74,7 @@ export class UserProvisioningService {
         branchId: params.branchId ?? null,
         passwordHash,
         isActive: true,
-        metadata: { mustChangePassword: usedDefaultPassword },
+        metadata: { mustChangePassword: usedDefaultPassword, ...(otpOnly ? { otp_only: true } : {}) },
       },
     });
   }
@@ -80,6 +90,7 @@ export class UserProvisioningService {
     phone?: string;
     email?: string;
     password?: string;
+    otpOnly?: boolean;
   }) {
     if (!params.phone) {
       this.logger.warn(
@@ -93,6 +104,7 @@ export class UserProvisioningService {
       email: params.email,
       role: 'CLIENT',
       password: params.password,
+      otpOnly: params.otpOnly,
     });
     try {
       await this.prisma.financeCustomer.update({
@@ -166,6 +178,7 @@ export class UserProvisioningService {
     email?: string;
     branchId?: string | null;
     password?: string;
+    otpOnly?: boolean;
   }) {
     const user = await this.createUserRow({
       phone: params.phone,
@@ -174,6 +187,7 @@ export class UserProvisioningService {
       role: 'STAFF',
       branchId: params.branchId,
       password: params.password,
+      otpOnly: params.otpOnly,
     });
     try {
       await this.prisma.staffApplicant.update({

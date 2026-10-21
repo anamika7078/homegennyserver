@@ -310,7 +310,7 @@ export class AgreementsService {
     if (!staff) {
       throw new BadRequestException('Staff not found — refresh the page and try again');
     }
-    const staffName = staff.fullName.trim() || dto.staff_name?.trim() || '';
+    const staffName = (staff.fullName ?? '').trim() ||dto.staff_name?.trim() || '';
     if (!staffName) throw new BadRequestException('Could not resolve staff name');
 
     const otp = AGREEMENT_ESIGN_MOCK_OTP;

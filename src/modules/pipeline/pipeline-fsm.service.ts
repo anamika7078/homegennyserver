@@ -534,14 +534,17 @@ export class PipelineFsmService {
 
     return this.dataSource.transaction(async (manager) => {
       const staff = await manager.query(
-        `SELECT id, pipeline_stage, series, mobile, pv_status, restricted_list AS restricted_list_flag
+        `SELECT id, pipeline_stage, series, mobile, pv_status, restricted_list AS restricted_list_flag,
+                full_name, date_of_birth, address
          FROM staff_applicants WHERE id = $1 FOR UPDATE`,
         [staffId]
       );
 
       if (!staff.length) throw new BadRequestException(`Staff ${staffId} not found`);
       const current: PipelineStage = staff[0].pipeline_stage;
-      const seriesShort = mapSeriesToShort(mapSeriesFromShort(String(staff[0].series)));
+      // An app sign-up has no series until the RM completes S1; the S1 gate
+      // below stops it going further without one.
+      const seriesShort = staff[0].series ? mapSeriesToShort(mapSeriesFromShort(String(staff[0].series))) : '';
 
       // ── Restricted list — "always first, before any other action" ─────────
       // Re-checked here (not just at intake) so a match added retroactively by
@@ -582,6 +585,22 @@ export class PipelineFsmService {
             ? `Stage 2.5 (practical assessment) is switched off while the Driver series is paused — move ${current} → S3_TRAIN instead.`
             : `Invalid transition: ${current} → ${toStage}. Allowed: ${validNext.join(', ')}`
         );
+      }
+
+      // ── S1_INTAKE exit gate — the details S1 exists to collect. A staff who
+      // signed up from the app gives only a mobile number; the RM fills the
+      // rest in on "Complete S1". No hold or override skips this: every later
+      // stage reads the series, and a nameless staff can't be verified. ──────
+      if (current === PipelineStage.S1_INTAKE && toStage === PipelineStage.S2_VERIFY) {
+        const missing = [
+          !String(staff[0].full_name ?? '').trim() && 'full name',
+          !staff[0].date_of_birth && 'date of birth',
+          !String(staff[0].address ?? '').trim() && 'address',
+          !staff[0].series && 'series',
+        ].filter(Boolean);
+        if (missing.length) {
+          throw new BadRequestException(`S1 intake is incomplete — fill in ${missing.join(', ')} first (Complete S1).`);
+        }
       }
 
       // ── TERMINAL requires an explicit, validated outcome ────────────────────

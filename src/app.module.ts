@@ -75,6 +75,7 @@ import { RmPortalModule } from './modules/rm-portal/rm-portal.module';
 import { MapsController } from './modules/maps/maps.controller';
 import { ClientMobileController } from './modules/client/client-mobile.controller';
 import { TrackingModule } from './modules/tracking/tracking.module';
+import { FinanceCustomerModule } from './modules/finance/customer/customer.module';
 
 import { StorageModule } from './common/storage/storage.module';
 import databaseConfig from './config/database.config';
@@ -129,6 +130,8 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     ScheduleModule.forRoot(),
     // Check-in/out + location; ClientMobileController (registered here) uses it.
     TrackingModule,
+    // PATCH /client/profile (ClientMobileController) fills in the customer row.
+    FinanceCustomerModule,
     EventEmitterModule.forRoot(),
     PrismaModule,
     RbacModule,

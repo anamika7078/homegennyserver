@@ -411,7 +411,7 @@ export class VerificationService {
     };
 
     const bySlug = new Map(staff.verificationTracks.map((t) => [TRACK_LABELS[t.trackType] ?? t.trackType, t]));
-    const required = REQUIRED_BY_SERIES[staff.series] ?? [];
+    const required = (staff.series && REQUIRED_BY_SERIES[staff.series]) || [];
 
     const tracks = Object.entries(TRACK_LABELS).map(([trackType, slug]) => {
       const row = bySlug.get(slug);

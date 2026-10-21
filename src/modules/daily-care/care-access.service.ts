@@ -108,7 +108,14 @@ export class CareAccessService {
       }),
     ]);
     if (!staff || !client) throw new NotFoundException('Placement not found.');
-    return { placement, staff, client, active: ACTIVE_PLACEMENT.includes(placement.status) };
+    // Only an app sign-up still at S1 has no series, and nobody is placed from S1.
+    if (!staff.series) throw new BadRequestException('This staff member has not finished S1 intake.');
+    return {
+      placement,
+      staff: { ...staff, fullName: staff.fullName ?? '', series: staff.series },
+      client,
+      active: ACTIVE_PLACEMENT.includes(placement.status),
+    };
   }
 
   /** Any logged-in role, dispatched on role. `write` additionally needs an active placement. */
