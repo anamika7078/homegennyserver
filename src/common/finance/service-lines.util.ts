@@ -48,6 +48,10 @@ export interface BilledStaff {
   shift_hours: number | null;
   /** Everything this person contributes to the taxable value, added up. */
   amount: number;
+  /** PER_DUTY rows: the duty count and per-duty billing rate, as stored on payroll. */
+  rate_basis?: string | null;
+  duties?: number | null;
+  duty_billing_rate?: number | null;
 }
 
 export interface ServiceLine {
@@ -81,9 +85,30 @@ function round2(n: number): number {
  * which is the one thing a client will check.
  */
 export function buildServiceLines(staff: BilledStaff[], daysInPeriod: number): ServiceLine[] {
-  const monthly = staff.filter((s) => s.placement_type !== 'TEMPORARY');
-  const hourly = staff.filter((s) => s.placement_type === 'TEMPORARY');
+  const perDuty = staff.filter((s) => s.rate_basis === 'PER_DUTY');
+  const rest = staff.filter((s) => s.rate_basis !== 'PER_DUTY');
+  const monthly = rest.filter((s) => s.placement_type !== 'TEMPORARY');
+  const hourly = rest.filter((s) => s.placement_type === 'TEMPORARY');
   const lines: ServiceLine[] = [];
+
+  // Per-duty (24×7 live-in) staff are listed one by one, by name, the way the
+  // trade's own duty sheet lists them: relief staff cover the regular staff's
+  // off days, and the client checks each person's duties against the house.
+  // The rate is the agreed billing rate, and duties × rate is the amount.
+  for (const s of perDuty) {
+    const duties = Number(s.duties) || 0;
+    const rate = Number(s.duty_billing_rate) || 0;
+    const amount = round2(Number(s.amount) || 0);
+    const kind = s.placement_type === 'TEMPORARY' ? 'relief' : `${s.shift_hours ?? 24}hrs`;
+    lines.push({
+      strength: 1,
+      description: duties && rate
+        ? `${designationFor(s.series)} — ${s.staff_name} (${kind}) — ${duties % 1 ? duties.toFixed(1) : duties} ` +
+          `${duties === 1 ? 'duty' : 'duties'} at Rs.${money(rate)}/-per duty [${money(rate)} × ${duties}]`
+        : `${designationFor(s.series)} — ${s.staff_name}`,
+      amount,
+    });
+  }
 
   const groups = new Map<string, BilledStaff[]>();
   for (const s of monthly) {

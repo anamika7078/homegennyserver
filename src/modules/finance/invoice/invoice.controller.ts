@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Param, Query, Body, Req, DefaultValuePipe, ParseIntPipe, Res,
+  BadRequestException, Controller, Get, Post, Param, Query, Body, Req, DefaultValuePipe, ParseIntPipe, Res,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { Response } from 'express';
@@ -8,6 +8,7 @@ import { RolesGuard } from '../../auth/guards/roles.guard';
 import { Roles, UserRole } from '../../auth/decorators/roles.decorator';
 import { FinanceInvoiceService } from './invoice.service';
 import { ConsolidatedInvoiceService } from './consolidated-invoice.service';
+import { parseTillDate } from '../../../common/finance/period.util';
 
 // Spec: Client Invoicing — RM=R, BM=R, Finance=Y, Admin=Y. (Client=Y refers to a
 // client-facing "view my invoices" capability that has no endpoint in this
@@ -105,19 +106,52 @@ export class FinanceInvoiceController {
       'once the invoice has been approved or sent.',
   })
   consolidatedGenerate(
-    @Body() body: { customer_id: string; month: number; year: number },
+    @Body() body: { customer_id: string; month: number; year: number; to_date?: string },
     @Req() req: { user?: { id?: string } },
   ) {
+    // to_date: invoice up to that day (e.g. the 7th) — the next invoice of the
+    // month then starts on the 8th. Omitted, it is the rest of the month.
+    const till = parseTillDate(body.to_date, Number(body.month), Number(body.year));
     // generateOrAmend, not generate: this is the button on the unit-code
     // screen, and pressing it after a colleague joined mid-month has to extend
     // the draft rather than fail with "an invoice already exists".
-    return this.consolidated.generateOrAmend(body.customer_id, body.month, body.year, req.user?.id);
+    return this.consolidated.generateOrAmend(body.customer_id, Number(body.month), Number(body.year), req.user?.id, till);
+  }
+
+  @Post('billing-cycle/run')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Raise the DRAFT invoices of every client whose billing period ends on a date',
+    description:
+      'What the morning job does for yesterday, on demand: weekly clients on the 7th/14th/21st/month end, ' +
+      'fortnightly on the 15th/month end, monthly at month end; MANUAL clients never. Already-invoiced ' +
+      'periods are skipped, so running it twice bills nothing twice. Use it to catch up after downtime.',
+  })
+  runCycleBilling(@Body() body: { date?: string }, @Req() req: { user?: { id?: string } }) {
+    const date = String(body?.date ?? '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new BadRequestException('date must be YYYY-MM-DD.');
+    return this.consolidated.runCycleBilling(date, req.user?.id);
   }
 
   @Get('summary')
   @ApiOperation({ summary: 'Invoice status summary for dashboard' })
   getSummary() {
     return this.service.getInvoiceSummary();
+  }
+
+  @Get(':id/salary-slips')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Salary slip for every staff member on this invoice, same days, one page each',
+    description:
+      'Built from the payroll rows the invoice billed, so the slips and the invoice cannot disagree. ' +
+      'Printable HTML — one slip per page.',
+  })
+  async salarySlips(@Param('id') id: string, @Res() res: Response) {
+    const html = await this.service.generateSalarySlipsHtml(id);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="salary-slips-${id}.html"`);
+    res.send(html);
   }
 
   @Get(':id/download')
@@ -145,5 +179,30 @@ export class FinanceInvoiceController {
   @ApiOperation({ summary: 'Mark invoice as sent to client' })
   send(@Param('id') id: string) {
     return this.service.sendInvoice(id);
+  }
+
+  @Post(':id/recalculate')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Recompute an unsent invoice with the current GST settings',
+    description:
+      'For a DRAFT or APPROVED consolidated invoice: rebuilds its lines and tax from its payroll ' +
+      'using today’s Company & GST settings, keeping the same number and status. This is how a ' +
+      'Bill of Supply raised before the GSTIN was entered becomes a Tax Invoice. Refused once sent.',
+  })
+  recalculate(@Param('id') id: string, @Req() req: { user?: { id?: string } }) {
+    return this.consolidated.recalculate(id, req.user?.id);
+  }
+
+  @Post(':id/cancel')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Cancel an invoice',
+    description:
+      'Requires a reason. Releases the invoice’s payroll so the same work can be billed on a ' +
+      'corrected invoice.',
+  })
+  cancel(@Param('id') id: string, @Body() body: { reason?: string }) {
+    return this.service.cancelInvoice(id, body?.reason ?? '');
   }
 }

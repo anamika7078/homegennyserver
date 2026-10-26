@@ -186,11 +186,8 @@ export class ClientMobileController {
 
     let todayAttendanceStatus: string | null = null;
     if (placement) {
-      const today = new Date(`${new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10)}T00:00:00.000Z`);
-      const shift = await this.prisma.shiftLog.findFirst({
-        where: { staffId: placement.staffId, placementId: placement.id, shiftDate: today },
-      });
-      todayAttendanceStatus = shift?.checkOutAt ? 'CHECKED_OUT' : shift?.checkInAt ? 'CHECKED_IN' : 'NOT_CHECKED_IN';
+      // Counts a live-in stay or night shift that began before midnight.
+      todayAttendanceStatus = await this.tracking.dutyStatus(placement.staffId, placement.id);
     }
 
     return {
@@ -359,6 +356,10 @@ export class ClientMobileController {
         invoiceId: i.id,
         invoiceNumber: i.invoiceNumber,
         billingMonth: `${i.periodMonth}/${i.periodYear}`,
+        // A client can have several invoices in a month now (weekly billing,
+        // or one up to the 7th and one for the rest), so each carries its dates.
+        periodFrom: i.periodFrom ? i.periodFrom.toISOString().slice(0, 10) : null,
+        periodTo: i.periodTo ? i.periodTo.toISOString().slice(0, 10) : null,
         salaryComponent: Number(i.staffSalaryComponent),
         employerEsic: Number(i.esicEmployer),
         employerPf: Number(i.pfEmployer),
@@ -664,6 +665,7 @@ export class ClientMobileController {
     const billed = await this.prisma.$queryRaw<any[]>`
       SELECT sa.full_name AS staff_name, sa.series::text AS series,
              pr.placement_type, pr.shift_days, pr.hours_worked, pr.hourly_rate,
+             pr.rate_basis, pr.duties, pr.duty_billing_rate,
              p.shift_hours,
              (SELECT COALESCE(SUM(ii.amount), 0) FROM invoice_items ii
                WHERE ii.invoice_id = ${invoice.id}::uuid AND ii.staff_id = pr.staff_id) AS amount
@@ -681,6 +683,9 @@ export class ClientMobileController {
         placement_type: r.placement_type,
         shift_days: Number(r.shift_days ?? 0),
         hours_worked: r.hours_worked == null ? null : Number(r.hours_worked),
+        rate_basis: r.rate_basis ?? null,
+        duties: r.duties == null ? null : Number(r.duties),
+        duty_billing_rate: r.duty_billing_rate == null ? null : Number(r.duty_billing_rate),
         hourly_rate: r.hourly_rate == null ? null : Number(r.hourly_rate),
         shift_hours: r.shift_hours == null ? null : Number(r.shift_hours),
         amount: Number(r.amount ?? 0),
@@ -705,8 +710,9 @@ export class ClientMobileController {
       invoiceId: invoice.id,
       documentType: invoice.documentType,
       billingMonth: `${invoice.periodMonth}/${invoice.periodYear}`,
-      periodFrom: period.from.toISOString().slice(0, 10),
-      periodTo: period.to.toISOString().slice(0, 10),
+      // The invoice's own dates — it can be one part of a month now.
+      periodFrom: ((invoice as any).periodFrom as Date | null)?.toISOString().slice(0, 10) ?? period.from.toISOString().slice(0, 10),
+      periodTo: ((invoice as any).periodTo as Date | null)?.toISOString().slice(0, 10) ?? period.to.toISOString().slice(0, 10),
       status: invoice.status,
       dueDate: invoice.dueDate,
       placeOfSupply: (invoice as any).placeOfSupply ?? null,

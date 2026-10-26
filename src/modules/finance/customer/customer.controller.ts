@@ -102,7 +102,7 @@ export class FinanceCustomerController {
 
   @Put(':id')
   @ApiOperation({ summary: 'Update a finance customer' })
-  updateCustomer(@Param('id') id: string, @Body() body: Partial<CreateCustomerDto> & { status?: string }) {
+  updateCustomer(@Param('id') id: string, @Body() body: Partial<CreateCustomerDto> & { status?: string; billing_cycle?: string }) {
     return this.service.updateCustomer(id, body);
   }
 

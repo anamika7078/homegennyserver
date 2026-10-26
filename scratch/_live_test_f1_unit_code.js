@@ -314,10 +314,12 @@ async function main() {
     // invoice kaise bnega?" — it bills like any other, with no special case.
     const oneDayCustomer = await db.query(
       `INSERT INTO finance_customers
-         (id, customer_name, unit_code, unit_name, address, pan_card, bill_no_prefix,
+         (id, customer_name, unit_code, unit_name, address, state, pan_card, bill_no_prefix,
           status, created_at, updated_at)
+       -- A state is required now: a Tax Invoice cannot be issued without a
+       -- place of supply, and a blank one is refused rather than assumed.
        VALUES (gen_random_uuid(), 'F1 One Day Client', 'F1-ONEDAY-01', 'One Day',
-               '1, Test Lane', 'AAAPL1111C', 'F1DAY', 'ACTIVE', now(), now())
+               '1, Test Lane', 'Delhi', 'AAAPL1111C', 'F1DAY', 'ACTIVE', now(), now())
        RETURNING id`,
     );
     made.oneDayCustomerId = oneDayCustomer.rows[0].id;

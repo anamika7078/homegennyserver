@@ -38,14 +38,78 @@ export interface GstBreakdown {
   totalTax: number;
   placeOfSupply: string | null;
   isInterState: boolean;
+  /** False when the recipient's state could not be resolved to a GST state code. */
+  placeOfSupplyKnown: boolean;
+  /** The rate applied; 0 on a Bill of Supply. */
+  gstRatePct: number;
   /** Anything the invoice still needs before it is a valid tax invoice. */
   missing: string[];
 }
 
-/** Normalises state names so "delhi" and " Delhi " compare equal. */
-function normaliseState(state: string | null | undefined): string {
-  return String(state ?? '').trim().toLowerCase();
+/**
+ * GST state codes — the first two digits of every GSTIN.
+ *
+ * Intra- vs inter-state used to be decided by comparing state *names*, so
+ * "New Delhi" against "Delhi", or "HR" against "Haryana", charged IGST on a
+ * supply that never left the state. Both sides are resolved to this code
+ * first and the codes are compared instead.
+ */
+export const GST_STATE_CODES: Record<string, string> = {
+  '01': 'Jammu and Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab',
+  '04': 'Chandigarh', '05': 'Uttarakhand', '06': 'Haryana', '07': 'Delhi',
+  '08': 'Rajasthan', '09': 'Uttar Pradesh', '10': 'Bihar', '11': 'Sikkim',
+  '12': 'Arunachal Pradesh', '13': 'Nagaland', '14': 'Manipur', '15': 'Mizoram',
+  '16': 'Tripura', '17': 'Meghalaya', '18': 'Assam', '19': 'West Bengal',
+  '20': 'Jharkhand', '21': 'Odisha', '22': 'Chhattisgarh', '23': 'Madhya Pradesh',
+  '24': 'Gujarat', '26': 'Dadra and Nagar Haveli and Daman and Diu',
+  '27': 'Maharashtra', '29': 'Karnataka', '30': 'Goa', '31': 'Lakshadweep',
+  '32': 'Kerala', '33': 'Tamil Nadu', '34': 'Puducherry',
+  '35': 'Andaman and Nicobar Islands', '36': 'Telangana', '37': 'Andhra Pradesh',
+  '38': 'Ladakh',
+};
+
+/** Spellings and abbreviations people actually type into a customer record. */
+const STATE_ALIASES: Record<string, string> = {
+  'new delhi': '07', 'nct of delhi': '07', 'delhi ncr': '07', dl: '07',
+  hr: '06', up: '09', mh: '27', ka: '29', tn: '33', wb: '19', rj: '08',
+  pb: '03', gj: '24', mp: '23', ap: '37', ts: '36', tg: '36', uk: '05',
+  hp: '02', jk: '01', 'j&k': '01', orissa: '21', pondicherry: '34',
+  uttaranchal: '05', gurgaon: '06', gurugram: '06', noida: '09',
+  'greater noida': '09', ghaziabad: '09', faridabad: '06',
+};
+
+function squash(s: string): string {
+  return s.trim().toLowerCase().replace(/[^a-z0-9& ]/g, ' ').replace(/\s+/g, ' ').trim();
 }
+
+/**
+ * Resolves a state name, abbreviation, two-digit code or full GSTIN to its
+ * GST state code. Returns null when it cannot tell — the caller treats that as
+ * "place of supply unknown" rather than guessing.
+ */
+export function stateCodeOf(value: string | null | undefined): string | null {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  if (isValidGstin(raw)) return raw.slice(0, 2);
+  if (/^\d{1,2}$/.test(raw)) {
+    const code = raw.padStart(2, '0');
+    return GST_STATE_CODES[code] ? code : null;
+  }
+  const s = squash(raw);
+  if (STATE_ALIASES[s]) return STATE_ALIASES[s];
+  for (const [code, name] of Object.entries(GST_STATE_CODES)) {
+    if (squash(name) === s) return code;
+  }
+  return null;
+}
+
+/** "07" → "Delhi". */
+export function stateNameOf(code: string | null | undefined): string | null {
+  return code ? GST_STATE_CODES[code] ?? null : null;
+}
+
+/** GST rates the settings page accepts. */
+export const ALLOWED_GST_RATES = [0, 5, 12, 18, 28] as const;
 
 /**
  * A GSTIN is 15 characters: 2-digit state code, 10-char PAN, entity digit,
@@ -79,15 +143,30 @@ export function computeGst(args: {
   recipientGstin: string | null;
   recipientState: string | null;
 }): GstBreakdown {
-  const { taxableValue: rawTaxable, gstRatePct, supplier, recipientState } = args;
+  const { taxableValue: rawTaxable, gstRatePct, supplier, recipientGstin, recipientState } = args;
   const missing: string[] = [];
 
-  // Place of supply for a service to a registered business is the recipient's
-  // location; falling back to the supplier's state keeps intra-state maths
-  // right when the customer record has no state yet.
-  const placeOfSupply = recipientState?.trim() || supplier.state?.trim() || null;
-  if (!recipientState?.trim()) missing.push("recipient's state");
-  if (!supplier.state?.trim()) missing.push("supplier's state");
+  // Place of supply is the recipient's location. A registered recipient's
+  // GSTIN states it outright, so it wins over a free-text state field.
+  //
+  // There is deliberately no fallback to the supplier's state any more: that
+  // turned every customer with a blank state into an intra-state supply and
+  // charged CGST+SGST where IGST may have been due. An unknown place of supply
+  // is reported, and `placeOfSupplyKnown` lets the caller refuse to issue.
+  const recipientCode = isValidGstin(recipientGstin)
+    ? stateCodeOf(recipientGstin)
+    : stateCodeOf(recipientState);
+  const supplierCode = isValidGstin(supplier.gstin)
+    ? stateCodeOf(supplier.gstin)
+    : stateCodeOf(supplier.state);
+  const placeOfSupply = stateNameOf(recipientCode) ?? (recipientState?.trim() || null);
+
+  if (!recipientCode) {
+    missing.push(recipientState?.trim()
+      ? `recipient's state ("${recipientState.trim()}" is not a recognised Indian state)`
+      : "recipient's state");
+  }
+  if (!supplierCode) missing.push("supplier's state");
   if (!supplier.sacCode?.trim()) missing.push('SAC code');
   if (!isValidGstin(supplier.gstin)) missing.push('supplier GSTIN');
 
@@ -103,14 +182,13 @@ export function computeGst(args: {
       cgst: 0, sgst: 0, igst: 0, totalTax: 0,
       placeOfSupply,
       isInterState: false,
+      placeOfSupplyKnown: Boolean(recipientCode),
+      gstRatePct: 0,
       missing,
     };
   }
 
-  const isInterState =
-    Boolean(placeOfSupply) &&
-    Boolean(supplier.state) &&
-    normaliseState(placeOfSupply) !== normaliseState(supplier.state);
+  const isInterState = Boolean(recipientCode && supplierCode && recipientCode !== supplierCode);
 
   const totalTax = round2(taxableValue * (gstRatePct / 100));
 
@@ -127,6 +205,8 @@ export function computeGst(args: {
     cgst, sgst, igst, totalTax,
     placeOfSupply,
     isInterState,
+    placeOfSupplyKnown: Boolean(recipientCode),
+    gstRatePct,
     missing,
   };
 }

@@ -24,6 +24,16 @@ const MIN_GAP_MS = 2 * 60_000;
 const STALE_MS = 20 * 60_000;
 const KEEP_DAYS = 30;
 const MAX_POINTS = 50;
+/**
+ * A normal shift stays open this long past its own length, so a night shift
+ * (10 pm–6 am) or a late check-out still finds it. After that it is a
+ * forgotten check-out, closed when the staff member next checks in.
+ */
+const GRACE_HOURS = 6;
+/** A live-in stay is never open longer than this; older ones are not looked at. */
+const MAX_OPEN_DAYS = 31;
+/** IST 12:00 noon, as minutes past UTC midnight of the same date (06:30 UTC). */
+const NOON_IST_UTC_MS = (6 * 60 + 30) * 60_000;
 
 const ACTIVE = ['TRIAL', 'CONFIRMED'] as const;
 
@@ -169,12 +179,130 @@ export class TrackingService {
       .catch((e) => this.logger.warn(`notify ${template} failed: ${e.message}`));
   }
 
-  /** Today's open shift (checked in, not out), at any of the staff member's placements. */
-  private openShift(staffId: string, day: Date, placementId?: string) {
-    return this.prisma.shiftLog.findFirst({
-      where: { staffId, shiftDate: day, checkInAt: { not: null }, checkOutAt: null, ...(placementId ? { placementId } : {}) },
+  /**
+   * A 24×7 live-in stays checked in across days; anything else is a shift of
+   * `shift_hours`. Relief priced per duty is a 24-hour duty too.
+   */
+  private isLiveIn(p: Pick<Placement, 'shiftHours' | 'rateBasis'> | null | undefined): boolean {
+    if (!p) return false;
+    return Number(p.shiftHours ?? 0) >= 24 || p.rateBasis === 'PER_DUTY';
+  }
+
+  /** Whether an open shift is still a live one, or a check-out that was forgotten. */
+  private async stillOpen(shift: ShiftLog): Promise<boolean> {
+    if (!shift.checkInAt) return false;
+    const placement = shift.placementId
+      ? await this.prisma.placement.findUnique({ where: { id: shift.placementId }, select: { shiftHours: true, rateBasis: true } })
+      : null;
+    if (this.isLiveIn(placement)) return true;
+    const hours = Number(placement?.shiftHours ?? 8);
+    return Date.now() - shift.checkInAt.getTime() <= (hours + GRACE_HOURS) * 3_600_000;
+  }
+
+  /**
+   * The staff member's open shift (checked in, not out), at any placement —
+   * whatever day it began.
+   *
+   * This used to look only at today's date, so a shift that crossed midnight
+   * vanished at 12: the app's location stopped ("you are not checked in"),
+   * check-out next morning failed, and the family saw "not checked in" for
+   * someone asleep in the next room. A live-in stays open until check-out; a
+   * normal shift for its own length plus a grace period.
+   */
+  private async openShift(staffId: string, placementId?: string): Promise<ShiftLog | null> {
+    const rows = await this.prisma.shiftLog.findMany({
+      where: {
+        staffId,
+        checkInAt: { not: null },
+        checkOutAt: null,
+        shiftDate: { gte: dbDate(addDays(istNow().date, -MAX_OPEN_DAYS)) },
+        ...(placementId ? { placementId } : {}),
+      },
       orderBy: { checkInAt: 'desc' },
+      take: 5,
     });
+    for (const shift of rows) if (await this.stillOpen(shift)) return shift;
+    return null;
+  }
+
+  /**
+   * Closes check-outs that were forgotten: a normal shift still open long past
+   * its length is ended at check-in + shift length, and says so. Run before a
+   * new check-in, so yesterday's forgotten shift neither blocks today's nor
+   * gets mistaken for it.
+   */
+  private async closeForgotten(staffId: string) {
+    const rows = await this.prisma.shiftLog.findMany({
+      where: { staffId, checkInAt: { not: null }, checkOutAt: null },
+    });
+    for (const shift of rows) {
+      if (await this.stillOpen(shift)) continue;
+      const placement = shift.placementId
+        ? await this.prisma.placement.findUnique({ where: { id: shift.placementId }, select: { shiftHours: true } })
+        : null;
+      const end = new Date(shift.checkInAt!.getTime() + Number(placement?.shiftHours ?? 8) * 3_600_000);
+      await this.prisma.shiftLog.update({
+        where: { id: shift.id },
+        data: { checkOutAt: end, metadata: { ...(meta(shift) as object), auto_closed: true, auto_closed_at: new Date().toISOString() } },
+      });
+    }
+  }
+
+  /**
+   * Marks the days a live-in stay covers, after the day it began.
+   *
+   * A live-in's check-in day is a duty (marked at check-in). Each later day
+   * is a duty when they were still on duty at 12 noon IST that day. So: in on
+   * the 10th at 8 pm, out on the 12th at 9 am → the 10th and the 11th, two
+   * duties; out on the 12th at 3 pm → three. A day already marked — absent or
+   * on leave by the RM, say — is left as it is.
+   */
+  async markLiveInDays(shift: ShiftLog, actorId?: string): Promise<number> {
+    if (!shift.checkInAt || !shift.placementId) return 0;
+    const placement = await this.prisma.placement.findUnique({ where: { id: shift.placementId } });
+    if (!placement || !this.isLiveIn(placement)) return 0;
+    const start = shift.shiftDate.toISOString().slice(0, 10);
+    const until = (shift.checkOutAt ?? new Date()).getTime();
+    const days: string[] = [];
+    for (let i = 1; i <= MAX_OPEN_DAYS; i++) {
+      const d = addDays(start, i);
+      const noon = Date.parse(`${d}T00:00:00Z`) + NOON_IST_UTC_MS;
+      if (noon > until) break;
+      if (noon >= shift.checkInAt.getTime()) days.push(d);
+    }
+    if (!days.length) return 0;
+    const res = await this.prisma.staffDailyAttendance.createMany({
+      data: days.map((d) => ({
+        staffId: shift.staffId,
+        placementId: placement.id,
+        branchId: placement.branchId,
+        attendanceDate: dbDate(d),
+        status: 'PRESENT' as const,
+        markedBy: actorId ?? placement.rmId ?? shift.staffId,
+        notes: 'Live-in: on duty at noon',
+      })),
+      skipDuplicates: true,
+    });
+    return res.count;
+  }
+
+  /**
+   * Every hour: each open live-in stay gets the day it has now been on duty
+   * through noon. Same rule as at check-out — this just keeps attendance
+   * (and so billing) current while the stay is still going.
+   */
+  @Cron('5 * * * *')
+  async markOpenLiveInDays() {
+    const open = await this.prisma.shiftLog.findMany({
+      where: {
+        checkInAt: { not: null }, checkOutAt: null,
+        shiftDate: { gte: dbDate(addDays(istNow().date, -MAX_OPEN_DAYS)) },
+      },
+    });
+    let marked = 0;
+    for (const shift of open) marked += await this.markLiveInDays(shift).catch(() => 0);
+    if (marked) this.logger.log(`[LIVE_IN] marked ${marked} day(s) present for open live-in stays`);
+    return marked;
   }
 
   // ── staff app ─────────────────────────────────────────────────────────────
@@ -185,11 +313,14 @@ export class TrackingService {
     const today = istNow().date;
     const { ok } = await this.checkInable(staff.id, today);
     const clients = await this.clientsById(ok.map((p) => p.clientId));
-    const open = await this.openShift(staff.id, dbDate(today));
+    const open = await this.openShift(staff.id);
     const items = await Promise.all(ok.map(async (p) => {
       const c = clients.get(p.clientId);
       const home = await this.homeOf(p);
-      const shift = await this.prisma.shiftLog.findFirst({ where: { staffId: staff.id, placementId: p.id, shiftDate: dbDate(today) } });
+      // A stay that began on an earlier day is still today's shift.
+      const shift = open?.placementId === p.id
+        ? open
+        : await this.prisma.shiftLog.findFirst({ where: { staffId: staff.id, placementId: p.id, shiftDate: dbDate(today) } });
       return {
         placement_id: p.id,
         client_name: c?.customerName ?? 'Client',
@@ -197,6 +328,7 @@ export class TrackingService {
         home: home ? { lat: home.lat, lng: home.lng } : null,
         placement_type: p.placementType,
         visit_type: meta(p).visit_type === 'ONE_TIME' ? 'ONE_TIME' : 'REGULAR',
+        live_in: this.isLiveIn(p),
         today: shift?.checkOutAt ? 'CHECKED_OUT' : shift?.checkInAt ? 'CHECKED_IN' : 'NOT_CHECKED_IN',
       };
     }));
@@ -242,7 +374,8 @@ export class TrackingService {
       throw new BadRequestException('You work at more than one house — choose where you are checking in (placement_id).');
     }
 
-    const open = await this.openShift(staff.id, day);
+    await this.closeForgotten(staff.id);
+    const open = await this.openShift(staff.id);
     if (open && open.placementId !== placement.id) {
       const other = open.placementId ? await this.prisma.placement.findUnique({ where: { id: open.placementId }, select: { clientId: true } }) : null;
       const name = other ? (await this.clientsById([other.clientId])).get(other.clientId)?.customerName : null;
@@ -342,7 +475,7 @@ export class TrackingService {
     const today = istNow().date;
     const day = dbDate(today);
     const point = optPoint(body.latitude ?? body.lat, body.longitude ?? body.lng);
-    const open = await this.openShift(staff.id, day, body.placement_id ? String(body.placement_id) : undefined);
+    const open = await this.openShift(staff.id, body.placement_id ? String(body.placement_id) : undefined);
     if (!open) {
       const done = await this.prisma.shiftLog.findFirst({ where: { staffId: staff.id, shiftDate: day, checkOutAt: { not: null } } });
       throw new BadRequestException(done ? 'You have already checked out today.' : 'No check-in found for today — check in before checking out');
@@ -366,9 +499,15 @@ export class TrackingService {
     if (placement?.placementType === 'TEMPORARY') {
       const hours = Math.round((workedMs / 3_600_000) * 10) / 10;
       await this.prisma.staffDailyAttendance
-        .updateMany({ where: { staffId: staff.id, placementId: placement.id, attendanceDate: day }, data: { hoursWorked: Math.min(hours, 99.9) } })
+        // On the day the shift began — a night shift's hours belong to the evening it started.
+        .updateMany({ where: { staffId: staff.id, placementId: placement.id, attendanceDate: open.shiftDate }, data: { hoursWorked: Math.min(hours, 99.9) } })
         .catch((e) => this.logger.warn(`hours on check-out failed: ${e.message}`));
     }
+
+    // A live-in stay: every day after the first that it was on duty at noon is
+    // a duty. The hourly job keeps this current; doing it here as well means a
+    // stay closed between two runs is never short a day.
+    const liveInDays = await this.markLiveInDays(shift, userId).catch(() => 0);
 
     if (placement) {
       const client = (await this.clientsById([placement.clientId])).get(placement.clientId);
@@ -390,6 +529,7 @@ export class TrackingService {
       longitude: point?.lng ?? null,
       distance_m: distance,
       worked: duration(workedMs),
+      live_in_days_marked: liveInDays,
       timestamp: shift.checkOutAt?.toISOString(),
     };
   }
@@ -400,8 +540,7 @@ export class TrackingService {
    */
   async addLocation(userId: string, body: Record<string, unknown>) {
     const staff = await this.staffOf(userId);
-    const day = dbDate(istNow().date);
-    const open = await this.openShift(staff.id, day);
+    const open = await this.openShift(staff.id);
     if (!open || !open.placementId) {
       throw new BadRequestException('You are not checked in — location is shared only during a shift.');
     }
@@ -497,8 +636,19 @@ export class TrackingService {
     return p;
   }
 
+  /** CHECKED_IN / CHECKED_OUT / NOT_CHECKED_IN for today, counting a stay that began earlier. */
+  async dutyStatus(staffId: string, placementId: string): Promise<'CHECKED_IN' | 'CHECKED_OUT' | 'NOT_CHECKED_IN'> {
+    if (await this.openShift(staffId, placementId)) return 'CHECKED_IN';
+    const today = await this.prisma.shiftLog.findFirst({
+      where: { staffId, placementId, shiftDate: dbDate(istNow().date) },
+    });
+    return today?.checkOutAt ? 'CHECKED_OUT' : today?.checkInAt ? 'CHECKED_IN' : 'NOT_CHECKED_IN';
+  }
+
   private async shiftView(p: Placement, day: Date) {
-    const shift = await this.prisma.shiftLog.findFirst({ where: { staffId: p.staffId, placementId: p.id, shiftDate: day } });
+    // A stay or night shift that began on an earlier day is still today's.
+    const shift = (await this.openShift(p.staffId, p.id))
+      ?? await this.prisma.shiftLog.findFirst({ where: { staffId: p.staffId, placementId: p.id, shiftDate: day } });
     const home = await this.homeOf(p);
     const open = !!(shift?.checkInAt && !shift.checkOutAt);
     const last = open ? await this.prisma.staffLocationPing.findFirst({ where: { shiftLogId: shift!.id }, orderBy: { recordedAt: 'desc' } }) : null;

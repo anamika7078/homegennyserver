@@ -11,6 +11,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { FinanceCustomerModule } from './customer/customer.module';
 import { CommercialModule } from './commercial/commercial.module';
 import { TaxModule } from './tax/tax.module';
+import { CompanySettingsModule } from './settings/company-settings.module';
 
 @Module({
   controllers: [FinanceController],
@@ -26,6 +27,7 @@ import { TaxModule } from './tax/tax.module';
     AnalyticsModule,
     FinanceCustomerModule,
     CommercialModule,
+    CompanySettingsModule,
   ],
 })
 export class FinanceModule {}

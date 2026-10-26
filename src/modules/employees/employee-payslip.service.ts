@@ -58,6 +58,20 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+/**
+ * Days on a slip: summed per house (a month invoiced in parts has several rows
+ * for one house), then the most at any one house — summing across houses would
+ * claim more days than the month holds.
+ */
+function daysAtBusiestHouse(rows: { placementId: string | null; shiftDays: number | null }[]): number {
+  const perHouse = new Map<string, number>();
+  for (const r of rows) {
+    const k = r.placementId ?? '';
+    perHouse.set(k, (perHouse.get(k) ?? 0) + (r.shiftDays ?? 0));
+  }
+  return Math.max(0, ...perHouse.values());
+}
+
 function inr(value: number): string {
   return value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -136,7 +150,7 @@ export class EmployeePayslipService {
         periodYear: first.periodYear,
         // Days at the house she attended most — summing days across houses
         // would claim more days than the month holds.
-        presentDays: Math.max(...group.map((r) => r.shiftDays ?? 0)) || null,
+        presentDays: daysAtBusiestHouse(group) || null,
         grossSalary: round2(group.reduce((s, r) => s + num(r.grossSalary), 0)),
         totalDeductions: round2(esic + pf),
         netSalary: round2(group.reduce((s, r) => s + num(r.netSalary), 0)),
@@ -335,7 +349,15 @@ export class EmployeePayslipService {
         periodYear: year,
         // The most days at any one house. Summing across houses would claim
         // more days than the month holds.
-        presentDays: Math.max(...group.map((r) => r.shiftDays ?? 0)),
+        presentDays: daysAtBusiestHouse(group),
+        // A 24×7 live-in slip is read in duties at a rate, not in days of a
+        // monthly wage — "23 duties × ₹517" is what the staff member checks.
+        duties: group.some((r) => r.rateBasis === 'PER_DUTY')
+          ? round2(group.reduce((s, r) => s + Number(r.duties ?? 0), 0))
+          : null,
+        dutyRate: group.find((r) => r.rateBasis === 'PER_DUTY')?.dutyRate != null
+          ? Number(group.find((r) => r.rateBasis === 'PER_DUTY')!.dutyRate)
+          : null,
         grossSalary: round2(group.reduce((s, r) => s + Number(r.grossSalary ?? 0), 0)),
         totalDeductions: round2(deductions),
         netSalary: round2(group.reduce((s, r) => s + Number(r.netSalary ?? 0), 0)),
@@ -349,9 +371,11 @@ export class EmployeePayslipService {
           ? group.map((r) => ({
               clientName: nameOf.get(clientOf.get(r.placementId ?? '') ?? '') ?? 'Unknown client',
               placementType: (r.placementType as 'PERMANENT' | 'TEMPORARY') ?? 'PERMANENT',
-              worked: r.placementType === 'TEMPORARY'
-                ? `${Number(r.hoursWorked ?? 0)} hours`
-                : `${r.shiftDays ?? 0} days`,
+              worked: r.rateBasis === 'PER_DUTY'
+                ? `${Number(r.duties ?? 0)} duties`
+                : r.placementType === 'TEMPORARY'
+                  ? `${Number(r.hoursWorked ?? 0)} hours`
+                  : `${r.shiftDays ?? 0} days`,
               grossSalary: round2(Number(r.grossSalary ?? 0)),
               invoiced: Boolean(r.client_invoice_id),
             }))

@@ -3,6 +3,9 @@ import { DataSource } from 'typeorm';
 import { amountInWords } from '../../../common/finance/amount-in-words.util';
 import { buildServiceLines, periodRange, type ServiceLine } from '../../../common/finance/service-lines.util';
 import { assertTransition, type InvoiceStatus } from '../../../common/finance/invoice-status';
+import { readSupplierSettings } from '../../../common/finance/supplier-settings';
+import { formatPeriod, isoDate, monthBounds, type Period } from '../../../common/finance/period.util';
+import { designationFor } from '../../../common/finance/service-lines.util';
 import { NotificationsService } from '../../notifications/notifications.service';
 
 export interface InvoiceRow {
@@ -69,6 +72,14 @@ export class FinanceInvoiceService {
             ci.status,
             ci.created_at,
             ci.is_consolidated,
+            -- What the GST was charged on. The list used to divide the tax by
+            -- the management fee and print "170% GST on fee", because the tax
+            -- is on the whole value now, not on the fee.
+            ci.taxable_value,
+            ci.document_type,
+            -- An invoice can cover part of a month now; the list shows its dates.
+            ci.period_from,
+            ci.period_to,
             c.customer_name AS client_name,
             -- Only a legacy per-placement invoice has a single staff member.
             -- A consolidated invoice covers a whole client, so it reports how
@@ -104,6 +115,10 @@ export class FinanceInvoiceService {
             ep.status,
             ep.created_at,
             false                AS is_consolidated,
+            NULL::numeric        AS taxable_value,
+            NULL::varchar        AS document_type,
+            NULL::date           AS period_from,
+            NULL::date           AS period_to,
             'Internal HR'        AS client_name,
             emp.full_name        AS staff_name,
             emp.employee_id      AS staff_code,
@@ -200,7 +215,7 @@ export class FinanceInvoiceService {
             { description: 'Employer ESIC',          amount: parseFloat(inv.esic_employer ?? '0'),   gst_applicable: false },
             { description: 'Employer PF',            amount: parseFloat(inv.pf_employer ?? '0'),     gst_applicable: false },
             { description: 'Management Fee',         amount: parseFloat(inv.management_fee),         gst_applicable: true  },
-            { description: 'GST on Management Fee',  amount: parseFloat(inv.gst_amount),             gst_applicable: false },
+            { description: 'GST',                    amount: parseFloat(inv.gst_amount),             gst_applicable: false },
           ];
 
       // Who this invoice bills.
@@ -297,27 +312,8 @@ export class FinanceInvoiceService {
    * document printed from a stale blank GSTIN would be the wrong document
    * entirely.
    */
-  private async supplierIdentity() {
-    const rows = await this.dataSource.query<{ key: string; value: unknown }[]>(
-      `SELECT key, value FROM system_settings WHERE key LIKE 'finance.%'`,
-    );
-    const get = (k: string): string | null => {
-      const raw = rows.find((r) => r.key === k)?.value;
-      const v = typeof raw === 'string' ? raw : raw == null ? '' : String(raw).replace(/^"|"$/g, '');
-      return v.trim() ? v.trim() : null;
-    };
-    return {
-      legalName: get('finance.supplier_legal_name') ?? 'HomeGenny',
-      gstin: get('finance.supplier_gstin'),
-      state: get('finance.supplier_state'),
-      sacCode: get('finance.sac_code'),
-      address: get('finance.supplier_address'),
-      pan: get('finance.supplier_pan'),
-      bankName: get('finance.bank_name'),
-      bankAccount: get('finance.bank_account'),
-      bankIfsc: get('finance.bank_ifsc'),
-      bankBranch: get('finance.bank_branch'),
-    };
+  private supplierIdentity() {
+    return readSupplierSettings(this.dataSource);
   }
 
   /**
@@ -340,9 +336,11 @@ export class FinanceInvoiceService {
       staff_name: string; series: string | null; placement_type: string | null;
       shift_days: string | null; hours_worked: string | null; hourly_rate: string | null;
       shift_hours: string | null; amount: string | null;
+      rate_basis: string | null; duties: string | null; duty_billing_rate: string | null;
     }[]>(
       `SELECT sa.full_name AS staff_name, sa.series::text AS series,
               pr.placement_type, pr.shift_days, pr.hours_worked, pr.hourly_rate,
+             pr.rate_basis, pr.duties, pr.duty_billing_rate,
               p.shift_hours,
               (SELECT COALESCE(SUM(ii.amount), 0) FROM invoice_items ii
                 WHERE ii.invoice_id = $1 AND ii.staff_id = pr.staff_id) AS amount
@@ -363,6 +361,9 @@ export class FinanceInvoiceService {
         placement_type: r.placement_type,
         shift_days: Number(r.shift_days ?? 0),
         hours_worked: r.hours_worked == null ? null : Number(r.hours_worked),
+        rate_basis: r.rate_basis ?? null,
+        duties: r.duties == null ? null : Number(r.duties),
+        duty_billing_rate: r.duty_billing_rate == null ? null : Number(r.duty_billing_rate),
         hourly_rate: r.hourly_rate == null ? null : Number(r.hourly_rate),
         shift_hours: r.shift_hours == null ? null : Number(r.shift_hours),
         amount: Number(r.amount ?? 0),
@@ -388,6 +389,31 @@ export class FinanceInvoiceService {
    * this a tax invoice is now stated on the document instead of left for
    * someone to notice.
    */
+  /**
+   * The days an invoice covers, as the document prints them.
+   *
+   * `period_from`/`period_to` are what the invoice locks — no other invoice
+   * can bill those days. The printed "From" is when service actually began
+   * inside them: a household whose first live-in started on the 5th reads
+   * "From 05/10 To 31/10", not from the 1st.
+   */
+  private async printedPeriod(
+    invoiceId: string, row: Record<string, unknown>, month: number, year: number,
+  ): Promise<Period> {
+    const bounds = monthBounds(month, year);
+    const from = isoDate(row.period_from) ?? bounds.from;
+    const to = isoDate(row.period_to) ?? bounds.to;
+    const started = await this.dataSource.query<{ d: unknown }[]>(
+      `SELECT MIN(GREATEST(pr.period_from, COALESCE(p.trial_start_date, p.confirmed_at::date, pr.period_from))) AS d
+         FROM payroll_records pr
+         JOIN placements p ON p.id = pr.placement_id
+        WHERE pr.client_invoice_id = $1`,
+      [invoiceId],
+    ).catch(() => []);
+    const first = isoDate(started[0]?.d);
+    return { from: first && first > from && first <= to ? first : from, to };
+  }
+
   async generateInvoiceHtml(id: string): Promise<string> {
     const inv = await this.getInvoice(id);
     const supplier = await this.supplierIdentity();
@@ -416,6 +442,16 @@ export class FinanceInvoiceService {
     const isTaxInvoice = row.document_type === 'TAX_INVOICE';
     const title = isPayslip ? 'Staff Payslip' : isTaxInvoice ? 'Tax Invoice' : 'Bill of Supply';
 
+    // A tax invoice prints the GSTIN and state it was issued under, not
+    // whatever the settings say today.
+    const supplierGstin = (isTaxInvoice ? (row.supplier_gstin as string | null) : null) ?? supplier.gstin;
+    const supplierState = (isTaxInvoice ? (row.supplier_state as string | null) : null) ?? supplier.state;
+
+    // The rate actually charged, read back from the stored figures. The labels
+    // used to be hardcoded to 18% / 9% whatever rate had been applied.
+    const ratePct = taxedOn > 0 ? Math.round((totalTax / taxedOn) * 10000) / 100 : 0;
+    const pct = (n: number) => `${Number.isInteger(n) ? n : n.toFixed(2).replace(/0$/, '')}%`;
+
     // What the client is charged for, stated the way the trade states it: one
     // line per kind of staff, strength and duties and the all-in rate. The
     // salary/ESIC/PF/fee breakdown behind it stays on invoice_items, where
@@ -442,33 +478,40 @@ export class FinanceInvoiceService {
     const lineTotal = (service ?? charges).reduce((t, li) => t + Number(li.amount ?? 0), 0);
     const subtotal = Math.round(lineTotal * 100) / 100;
 
-    const period = periodRange(inv.period_month, inv.period_year);
-    const asDate = (d: Date) => d.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const period = await this.printedPeriod(id, row as Record<string, unknown>, inv.period_month, inv.period_year);
+    const asDate = (iso: string) => iso.split('-').reverse().join('/');
 
     // Each tax line states the value it was charged on as well as the tax, so
     // the rate can be checked against the base without doing the sum.
     const taxLine = (label: string, amount: number) =>
       `<tr><td>${label}</td><td class="r base">${fmt(taxedOn)}</td><td class="r">${fmt(amount)}</td></tr>`;
     const taxRows = isPayslip ? '' : igst > 0
-      ? taxLine('18% IGST', igst)
+      ? taxLine(`${pct(ratePct)} IGST`, igst)
       : (cgst > 0 || sgst > 0)
-        ? taxLine('9% CGST', cgst) + taxLine('9% SGST', sgst)
+        ? taxLine(`${pct(ratePct / 2)} CGST`, cgst) + taxLine(`${pct(ratePct / 2)} SGST`, sgst)
         : '';
 
-    // Say on the document what is stopping this from being a tax invoice,
-    // rather than quietly issuing a lesser one and hoping someone checks.
+    // Say on the document why it carries no tax, rather than quietly issuing
+    // a lesser one and hoping someone checks. Driven by what the invoice *is*
+    // (its stored type) — reading only today's settings printed "this is a
+    // Bill of Supply" on a Tax Invoice whenever a setting was later cleared.
     const missing: string[] = [];
-    if (!isPayslip) {
-      if (!supplier.gstin) missing.push('supplier GSTIN');
+    if (!isPayslip && !isTaxInvoice) {
+      if (!supplier.isRegistered) missing.push('supplier GSTIN');
       if (!supplier.state) missing.push('supplier state');
       if (!sac) missing.push('SAC code');
     }
-    const notice = missing.length
-      ? `<div class="notice"><strong>This is a Bill of Supply, not a Tax Invoice.</strong>
-           No GST has been charged, because this is not on file yet:
-           ${esc(missing.join(', '))}. Add it in Finance settings and invoices
-           raised afterwards will carry tax.</div>`
-      : '';
+    const notice = isPayslip || isTaxInvoice
+      ? ''
+      : missing.length
+        ? `<div class="notice"><strong>This is a Bill of Supply, not a Tax Invoice.</strong>
+             No GST has been charged, because this is not on file yet:
+             ${esc(missing.join(', '))}. Add it under Finance → Company &amp; GST and
+             invoices raised afterwards will carry tax.</div>`
+        : `<div class="notice"><strong>This is a Bill of Supply, not a Tax Invoice.</strong>
+             It was raised before the GST registration was recorded, so no GST was
+             charged. Finance can recalculate it as a Tax Invoice while it has not
+             been sent.</div>`;
 
     const bankBlock = (supplier.bankAccount || supplier.bankIfsc)
       ? `<div class="bank"><div class="h">Bank details for payment</div>
@@ -525,9 +568,9 @@ export class FinanceInvoiceService {
       <div class="h">Supplier</div>
       <div class="name">${esc(supplier.legalName)}</div>
       ${supplier.address ? `<div>${esc(supplier.address)}</div>` : ''}
-      <div>GSTIN: ${esc(supplier.gstin ?? '—')}</div>
+      <div>GSTIN: ${esc(supplierGstin ?? '—')}</div>
       ${supplier.pan ? `<div>PAN: ${esc(supplier.pan)}</div>` : ''}
-      <div>State: ${esc(supplier.state ?? '—')}</div>
+      <div>State: ${esc(supplierState ?? '—')}</div>
     </div>
     <div>
       <div class="h">Billed to</div>
@@ -542,7 +585,9 @@ export class FinanceInvoiceService {
   <div class="meta">
     <div><span>${isPayslip ? 'Payslip' : 'Invoice'} no.</span><strong>${esc(inv.invoice_number)}</strong></div>
     <div><span>Date</span><strong>${new Date(inv.due_date).toLocaleDateString('en-IN')}</strong></div>
-    <div><span>Period</span><strong>${String(inv.period_month).padStart(2, '0')}/${inv.period_year}</strong></div>
+    <div><span>Period</span><strong>${isPayslip
+      ? `${String(inv.period_month).padStart(2, '0')}/${inv.period_year}`
+      : `${asDate(period.from)} – ${asDate(period.to)}`}</strong></div>
     ${!isPayslip ? `<div><span>Place of supply</span><strong>${esc(row.place_of_supply ?? row.client_state ?? '—')}</strong></div>` : ''}
     ${!isPayslip ? `<div><span>Staff strength</span><strong>${inv.staff_count ?? 0}</strong></div>` : ''}
     ${inv.staff_name ? `<div><span>Staff billed</span><strong>${esc(inv.staff_name)}</strong></div>` : ''}
@@ -580,6 +625,141 @@ export class FinanceInvoiceService {
     <span>For ${esc(supplier.legalName)}</span>
   </div>
 </body></html>`;
+  }
+
+  /**
+   * One salary slip per staff member billed on this invoice, for the same days.
+   *
+   * The invoice tells the client what the work cost; each slip tells the staff
+   * member what they earned for it — duties (or days, or hours) at their rate,
+   * less their ESIC and PF where those apply. Built from the very payroll rows
+   * the invoice billed, so the two can never disagree. One printable page each.
+   */
+  async generateSalarySlipsHtml(invoiceId: string): Promise<string> {
+    const [inv] = await this.dataSource.query<Record<string, unknown>[]>(
+      `SELECT ci.id, ci.invoice_number, ci.period_month, ci.period_year, ci.period_from, ci.period_to,
+              fc.customer_name, fc.address, fc.city
+         FROM client_invoices ci
+         LEFT JOIN finance_customers fc ON fc.id = ci.client_id
+        WHERE ci.id = $1`,
+      [invoiceId],
+    );
+    if (!inv) throw new NotFoundException(`Invoice ${invoiceId} not found`);
+
+    const rows = await this.dataSource.query<{
+      staff_name: string; staff_code: string; series: string | null; placement_type: string | null;
+      rate_basis: string | null; period_from: unknown; period_to: unknown; join_date: unknown;
+      duties: string | null; duty_rate: string | null; shift_days: number | null;
+      hours_worked: string | null; hourly_rate: string | null;
+      gross_salary: string; esic_employee: string; pf_employee: string; net_salary: string;
+      bank_account: string | null; bank_ifsc: string | null;
+    }[]>(
+      `SELECT sa.full_name AS staff_name, sa.staff_code, sa.series::text AS series,
+              pr.placement_type, pr.rate_basis, pr.period_from, pr.period_to,
+              COALESCE(p.trial_start_date, p.confirmed_at::date) AS join_date,
+              pr.duties, pr.duty_rate, pr.shift_days, pr.hours_worked, pr.hourly_rate,
+              pr.gross_salary, pr.esic_employee, pr.pf_employee, pr.net_salary,
+              sba.account_number AS bank_account, sba.ifsc AS bank_ifsc
+         FROM payroll_records pr
+         JOIN placements p ON p.id = pr.placement_id
+         JOIN staff_applicants sa ON sa.id = pr.staff_id
+         LEFT JOIN LATERAL (
+           SELECT account_number, ifsc FROM staff_bank_accounts b
+            WHERE b.staff_id = pr.staff_id ORDER BY b.created_at DESC LIMIT 1
+         ) sba ON true
+        WHERE pr.client_invoice_id = $1
+        ORDER BY sa.staff_code, pr.period_from`,
+      [invoiceId],
+    ).catch(async () =>
+      // No bank-account table in this database: the slip prints without it.
+      this.dataSource.query(
+        `SELECT sa.full_name AS staff_name, sa.staff_code, sa.series::text AS series,
+                pr.placement_type, pr.rate_basis, pr.period_from, pr.period_to,
+                COALESCE(p.trial_start_date, p.confirmed_at::date) AS join_date,
+                pr.duties, pr.duty_rate, pr.shift_days, pr.hours_worked, pr.hourly_rate,
+                pr.gross_salary, pr.esic_employee, pr.pf_employee, pr.net_salary,
+                NULL AS bank_account, NULL AS bank_ifsc
+           FROM payroll_records pr
+           JOIN placements p ON p.id = pr.placement_id
+           JOIN staff_applicants sa ON sa.id = pr.staff_id
+          WHERE pr.client_invoice_id = $1
+          ORDER BY sa.staff_code, pr.period_from`,
+        [invoiceId],
+      ));
+    if (!rows.length) {
+      throw new BadRequestException(`${inv.invoice_number} bills no payroll, so there are no salary slips for it.`);
+    }
+
+    const supplier = await this.supplierIdentity();
+    const fmt = (n: number | string) =>
+      new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(n ?? 0));
+    const esc = (v: unknown) =>
+      String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
+    const dmy = (v: unknown) => (isoDate(v) ?? '').split('-').reverse().join('/');
+
+    const slips = rows.map((r) => {
+      const from = isoDate(r.period_from)!;
+      const join = isoDate(r.join_date);
+      const shownFrom = join && join > from && join <= isoDate(r.period_to)! ? join : from;
+      const relief = r.placement_type === 'TEMPORARY';
+      const worked = r.rate_basis === 'PER_DUTY'
+        ? `${Number(r.duties)} ${Number(r.duties) === 1 ? 'duty' : 'duties'} × ₹${fmt(r.duty_rate ?? 0)}`
+        : r.rate_basis === 'HOURLY' || (r.rate_basis == null && relief)
+          ? `${Number(r.hours_worked ?? 0)} hours × ₹${fmt(r.hourly_rate ?? 0)}`
+          : `${r.shift_days ?? 0} days`;
+      const esic = Number(r.esic_employee ?? 0);
+      const pf = Number(r.pf_employee ?? 0);
+      return `
+  <section class="slip">
+    <div class="head">
+      <div><div class="co">${esc(supplier.legalName)}</div>
+        ${supplier.address ? `<div class="muted">${esc(supplier.address)}</div>` : ''}</div>
+      <div class="ttl">Salary Slip</div>
+    </div>
+    <table class="kv">
+      <tr><td>Employee</td><td><strong>${esc(r.staff_name)}</strong> (${esc(r.staff_code)})</td>
+          <td>Designation</td><td>${esc(designationFor(r.series))}${relief ? ' — relief' : ''}</td></tr>
+      <tr><td>Period</td><td>${dmy(shownFrom)} – ${dmy(r.period_to)}</td>
+          <td>Date of joining</td><td>${relief ? 'TEMP duty' : dmy(join) || '—'}</td></tr>
+      <tr><td>Worked at</td><td colspan="3">${esc(inv.customer_name ?? '—')}${inv.city ? ', ' + esc(inv.city) : ''}</td></tr>
+    </table>
+    <table class="amt">
+      <tr><th>Earnings</th><th class="r">₹</th><th>Deductions</th><th class="r">₹</th></tr>
+      <tr><td>Wages (${esc(worked)})</td><td class="r">${fmt(r.gross_salary)}</td>
+          <td>Employee PF</td><td class="r">${pf ? fmt(pf) : '—'}</td></tr>
+      <tr><td></td><td></td><td>Employee ESIC</td><td class="r">${esic ? fmt(esic) : '—'}</td></tr>
+      <tr class="tot"><td>Gross</td><td class="r">${fmt(r.gross_salary)}</td>
+          <td>Total deductions</td><td class="r">${fmt(pf + esic)}</td></tr>
+    </table>
+    <div class="net">Net pay <strong>₹${fmt(r.net_salary)}</strong></div>
+    ${r.bank_account ? `<div class="muted">Paid to A/c ${esc(String(r.bank_account).replace(/.(?=.{4})/g, '•'))} · IFSC ${esc(r.bank_ifsc ?? '')}</div>` : ''}
+    <div class="foot"><span>Against invoice ${esc(inv.invoice_number)}</span><span>Computer-generated — no signature required</span></div>
+  </section>`;
+    }).join('');
+
+    const span = formatPeriod({ from: isoDate(inv.period_from)!, to: isoDate(inv.period_to)! });
+    return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Salary slips — ${esc(inv.invoice_number)} (${esc(span)})</title>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#0f172a;font-size:13px;margin:0;padding:24px}
+  .slip{max-width:760px;margin:0 auto 28px;border:1px solid #cbd5e1;border-radius:8px;padding:20px;page-break-after:always}
+  .slip:last-child{page-break-after:auto}
+  .head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #0f172a;padding-bottom:10px;margin-bottom:12px}
+  .co{font-weight:700;font-size:16px}
+  .ttl{font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#334155}
+  .muted{color:#64748b;font-size:12px}
+  table{width:100%;border-collapse:collapse;margin-bottom:12px}
+  .kv td{padding:5px 6px;border-bottom:1px solid #f1f5f9}
+  .kv td:nth-child(odd){color:#64748b;width:18%}
+  .amt th{background:#0f172a;color:#fff;font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:7px;text-align:left}
+  .amt td{padding:7px;border-bottom:1px solid #e2e8f0}
+  .amt tr.tot td{font-weight:600;border-top:1px solid #94a3b8}
+  .r{text-align:right;font-variant-numeric:tabular-nums}
+  .net{font-size:16px;padding:10px 12px;background:#f8fafc;border-left:3px solid #0f172a;margin-bottom:8px}
+  .foot{display:flex;justify-content:space-between;color:#94a3b8;font-size:11px;margin-top:12px}
+  @media print{body{padding:0}.slip{border:0}}
+</style></head><body>${slips}</body></html>`;
   }
 
   /**
@@ -637,9 +817,10 @@ export class FinanceInvoiceService {
       invoice_number: string; total_amount: string; period_month: number; period_year: number;
       due_date: string; document_type: string | null;
       customer_name: string | null; email: string | null; user_id: string | null;
+      period_from: unknown; period_to: unknown;
     }[]>(
       `SELECT ci.invoice_number, ci.total_amount, ci.period_month, ci.period_year,
-              ci.due_date, ci.document_type,
+              ci.due_date, ci.document_type, ci.period_from, ci.period_to,
               fc.customer_name, u.email, u.id AS user_id
          FROM client_invoices ci
          LEFT JOIN finance_customers fc ON fc.id = ci.client_id
@@ -663,7 +844,10 @@ export class FinanceInvoiceService {
       );
     }
 
-    const period = `${String(inv.period_month).padStart(2, '0')}/${inv.period_year}`;
+    // An invoice can be one part of a month, so it is named by its dates.
+    const period = inv.period_from && inv.period_to
+      ? formatPeriod({ from: isoDate(inv.period_from)!, to: isoDate(inv.period_to)! })
+      : `${String(inv.period_month).padStart(2, '0')}/${inv.period_year}`;
     const amount = new Intl.NumberFormat('en-IN', {
       style: 'currency', currency: 'INR', maximumFractionDigits: 2,
     }).format(Number(inv.total_amount));
@@ -719,6 +903,13 @@ export class FinanceInvoiceService {
       `UPDATE client_invoices SET payment_ref = COALESCE(payment_ref, $1) WHERE id = $2`,
       [`cancelled: ${reason.trim().slice(0, 80)}`, id],
     ).catch(() => undefined);
+    // Hand the work back so it can be billed again. Left linked, the payroll
+    // stayed "already invoiced" against a cancelled document and the corrected
+    // invoice had nothing to bill.
+    await this.dataSource.query(
+      `UPDATE payroll_records SET client_invoice_id = NULL WHERE client_invoice_id = $1`,
+      [id],
+    );
     return { ...result, reason };
   }
 

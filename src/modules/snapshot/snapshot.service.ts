@@ -483,9 +483,23 @@ export class SnapshotService {
     const [clients, requests, shifts, marks, tasks, reports, menus, meals, profiles, ratings, instr] = await Promise.all([
       this.prisma.financeCustomer.findMany({ where: { id: { in: clientIds } }, select: { id: true, customerName: true, city: true, lat: true, lng: true } }),
       this.prisma.staffRequest.findMany({ where: { id: { in: requestIds } }, select: { id: true, lat: true, lng: true } }),
+      // The day's own shift, plus one carried in from an earlier day: a 24×7
+      // live-in stay, or last night's shift still running past midnight.
+      // Without the carry, a live-in on day three read "not checked in".
       this.prisma.shiftLog.findMany({
-        where: { placementId: { in: ids }, shiftDate: day },
-        select: { placementId: true, checkInAt: true, checkOutAt: true, checkInLat: true, checkInLng: true },
+        where: {
+          placementId: { in: ids },
+          OR: [
+            { shiftDate: day },
+            {
+              shiftDate: { lt: day, gte: dbDate(addDays(date, -31)) },
+              checkInAt: { not: null },
+              OR: [{ checkOutAt: null }, { checkOutAt: { gte: new Date(Date.parse(`${date}T00:00:00Z`) - 330 * 60_000) } }],
+            },
+          ],
+        },
+        orderBy: { shiftDate: 'asc' },
+        select: { placementId: true, shiftDate: true, checkInAt: true, checkOutAt: true, checkInLat: true, checkInLng: true },
       }),
       this.prisma.staffDailyAttendance.findMany({
         where: { staffId: { in: staffIds }, attendanceDate: day },
@@ -514,7 +528,22 @@ export class SnapshotService {
 
     const clientOf = new Map(clients.map((c) => [c.id, c]));
     const requestOf = new Map(requests.map((r) => [r.id, r]));
-    const shiftOf = new Map(shifts.map((s) => [s.placementId!, s]));
+    // A carried-in shift counts only for a live-in, or from the day before
+    // (a night shift); an older open row is a forgotten check-out. The day's
+    // own row, when there is one, wins (rows come oldest first).
+    const liveIn = new Set(placements
+      .filter((p) => Number((p as { shiftHours?: unknown }).shiftHours ?? 0) >= 24
+        || (p as { rateBasis?: string | null }).rateBasis === 'PER_DUTY')
+      .map((p) => p.id));
+    const yesterday = addDays(date, -1);
+    const shiftOf = new Map(
+      shifts
+        .filter((s) => {
+          const d = s.shiftDate.toISOString().slice(0, 10);
+          return d === date || liveIn.has(s.placementId!) || d === yesterday;
+        })
+        .map((s) => [s.placementId!, s]),
+    );
     const group = <T extends { placementId: string | null }>(xs: T[]) => {
       const m = new Map<string, T[]>();
       for (const x of xs) if (x.placementId) m.set(x.placementId, [...(m.get(x.placementId) ?? []), x]);

@@ -462,6 +462,19 @@ model Placement {
   hourlyRate       Decimal?        @map("hourly_rate") @db.Decimal(10, 2)
   /// TEMPORARY only — what HomeGenny charges per hour on top.
   hourlyFee        Decimal?        @map("hourly_fee") @db.Decimal(10, 2)
+  /// MONTHLY | HOURLY | PER_DUTY. Null = as before: MONTHLY for PERMANENT,
+  /// HOURLY for TEMPORARY. PER_DUTY is the 24×7 live-in model — a fixed rate
+  /// per duty, never divided by the days in the month.
+  rateBasis        String?         @map("rate_basis") @db.VarChar(20)
+  /// PER_DUTY only — what the staff member earns per duty.
+  dutyRate         Decimal?        @map("duty_rate") @db.Decimal(10, 2)
+  /// PER_DUTY only — what the client is billed per duty, before GST. All-in:
+  /// employer ESIC/PF, when on, come out of the margin, not on top.
+  dutyBillingRate  Decimal?        @map("duty_billing_rate") @db.Decimal(10, 2)
+  esicApplicable   Boolean         @default(true) @map("esic_applicable")
+  pfApplicable     Boolean         @default(true) @map("pf_applicable")
+  /// A relief/substitute placement: the post it covers on the regular staff's off days.
+  coversPlacementId String?        @map("covers_placement_id") @db.Uuid
   // Written by exit() (placement.service.ts) — used to silently no-op via a
   // raw-SQL catch fallback because these columns never existed until now.
   exitDate         DateTime?       @map("exit_date") @db.Date
@@ -588,6 +601,10 @@ model PayrollRecord {
   staffId           String    @map("staff_id") @db.Uuid
   periodMonth       Int       @map("period_month")
   periodYear        Int       @map("period_year")
+  /// The days this row pays for — part of a month when the client is invoiced
+  /// mid-month. Never overlaps another row of the same placement.
+  periodFrom        DateTime? @map("period_from") @db.Date
+  periodTo          DateTime? @map("period_to") @db.Date
   grossSalary       Decimal   @map("gross_salary") @db.Decimal(10, 2)
   deductions        Json      @default("{}")
   netSalary         Decimal   @map("net_salary") @db.Decimal(10, 2)
@@ -623,6 +640,11 @@ model PayrollRecord {
   hourlyFee         Decimal?  @map("hourly_fee") @db.Decimal(10, 2)
   managementFee     Decimal?  @map("management_fee") @db.Decimal(10, 2)
   statutoryShare    Decimal?  @map("statutory_share") @db.Decimal(6, 4)
+  /// PER_DUTY rows keep the duty count and both rates as they stood that month.
+  rateBasis         String?   @map("rate_basis") @db.VarChar(20)
+  duties            Decimal?  @db.Decimal(6, 1)
+  dutyRate          Decimal?  @map("duty_rate") @db.Decimal(10, 2)
+  dutyBillingRate   Decimal?  @map("duty_billing_rate") @db.Decimal(10, 2)
   placement         Placement @relation(fields: [placementId], references: [id])
 
   @@map("payroll_records")
@@ -658,6 +680,11 @@ model Invoice {
   creditedAmount       Decimal           @default(0) @map("credited_amount") @db.Decimal(10, 2)
   periodMonth          Int               @map("period_month")
   periodYear           Int               @map("period_year")
+  /// First and last day this invoice bills. A client can be invoiced for part of a
+  /// month and then the rest; no two invoices may cover the same day (DB trigger
+  /// trg_client_invoices_no_overlap). Filled to the whole month when not given.
+  periodFrom           DateTime?         @map("period_from") @db.Date
+  periodTo             DateTime?         @map("period_to") @db.Date
   staffSalaryComponent Decimal           @map("staff_salary_component") @db.Decimal(10, 2)
   managementFee        Decimal           @map("management_fee") @db.Decimal(10, 2)
   gstAmount            Decimal           @map("gst_amount") @db.Decimal(10, 2)
@@ -1319,6 +1346,9 @@ model FinanceCustomer {
   address                         String?
   city                            String?                           @db.VarChar(100)
   state                           String?                           @db.VarChar(100)
+  /// MONTHLY | FORTNIGHTLY | WEEKLY | MANUAL — when a DRAFT invoice is raised
+  /// automatically (the morning after each period closes). MANUAL: never.
+  billingCycle                    String                            @default("MONTHLY") @map("billing_cycle") @db.VarChar(20)
   pincode                         String?                           @db.VarChar(20)
   /// The client's home, for the check-in distance on the RM map
   lat                             Decimal?                          @db.Decimal(10, 7)

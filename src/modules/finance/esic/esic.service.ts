@@ -47,14 +47,20 @@ const UNIFIED_CONTRIBUTIONS_SQL = `
     pr.staff_id                              AS staff_id,
     sa.full_name                             AS staff_name,
     sa.staff_code                            AS staff_code,
-    pr.gross_salary, pr.gross_salary         AS pf_base,
-    pr.esic_employee, pr.esic_employer,
-    pr.pf_employee, pr.pf_employer,
-    pr.net_salary,
+    -- One line per person per month: a month paid in parts, or across
+    -- several clients, is still one member's contribution on the return.
+    SUM(pr.gross_salary)                     AS gross_salary,
+    SUM(pr.gross_salary)                     AS pf_base,
+    SUM(pr.esic_employee)                    AS esic_employee,
+    SUM(pr.esic_employer)                    AS esic_employer,
+    SUM(pr.pf_employee)                      AS pf_employee,
+    SUM(pr.pf_employer)                      AS pf_employer,
+    SUM(pr.net_salary)                       AS net_salary,
     'EOR'                                    AS source
   FROM payroll_records pr
   JOIN staff_applicants sa ON sa.id = pr.staff_id
   WHERE pr.period_month = $1 AND pr.period_year = $2
+  GROUP BY pr.staff_id, sa.full_name, sa.staff_code
 
   UNION ALL
 

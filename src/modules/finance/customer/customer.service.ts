@@ -4,6 +4,8 @@ import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { AxiosResponse } from 'axios';
 import { firstValueFrom } from 'rxjs';
+import { BILLING_CYCLES } from '../../../common/finance/period.util';
+import { stateCodeOf, stateNameOf } from '../../../common/finance/gst.util';
 
 export interface PanVerificationResult {
   pan_number: string;
@@ -263,7 +265,7 @@ export class FinanceCustomerService implements OnModuleInit {
 
   async listCustomers(search?: string) {
     let sql = `
-      SELECT c.id, c.customer_name, c.address, c.city, c.state, c.pincode, c.pan_card, c.gstn,
+      SELECT c.id, c.customer_name, c.address, c.city, c.state, c.pincode, c.pan_card, c.gstn, c.billing_cycle,
              c.bill_no_prefix, c.bill_seq, c.unit_code, c.unit_name,
              c.status, c.metadata, c.created_at, c.updated_at
       FROM finance_customers c
@@ -281,7 +283,7 @@ export class FinanceCustomerService implements OnModuleInit {
     const rows = await this.dataSource.query(
       `SELECT c.id, c.customer_name, c.address, c.city, c.state, c.pincode, c.pan_card, c.gstn,
               c.bill_no_prefix, c.bill_seq, c.unit_code, c.unit_name,
-              c.status, c.metadata, c.created_at, c.updated_at
+              c.status, c.metadata, c.created_at, c.updated_at, c.billing_cycle
        FROM finance_customers c
        WHERE c.id = $1`,
       [id],
@@ -502,8 +504,44 @@ export class FinanceCustomerService implements OnModuleInit {
     );
   }
 
-  async updateCustomer(id: string, dto: Partial<CreateCustomerDto> & { status?: string }) {
+  async updateCustomer(
+    id: string,
+    dto: Partial<CreateCustomerDto> & { status?: string; billing_cycle?: string },
+  ) {
     const existing = await this.getCustomer(id);
+
+    // How often this client is invoiced automatically. MANUAL: never.
+    let billingCycle: string | undefined;
+    if (dto.billing_cycle !== undefined) {
+      billingCycle = String(dto.billing_cycle).toUpperCase();
+      if (!(BILLING_CYCLES as readonly string[]).includes(billingCycle)) {
+        throw new BadRequestException(`billing_cycle must be one of ${BILLING_CYCLES.join(', ')}.`);
+      }
+    }
+    // The state decides CGST+SGST against IGST, and a blank one now stops a
+    // Tax Invoice — so it has to be editable, and stored as the state's name.
+    let state: string | null | undefined;
+    if (dto.state !== undefined) {
+      const raw = String(dto.state ?? '').trim();
+      if (!raw) state = null;
+      else {
+        const code = stateCodeOf(raw);
+        if (!code) throw new BadRequestException(`"${raw}" is not a recognised Indian state.`);
+        state = stateNameOf(code);
+      }
+    }
+    if (billingCycle !== undefined || state !== undefined || dto.city !== undefined) {
+      await this.dataSource.query(
+        `UPDATE finance_customers SET
+           billing_cycle = COALESCE($1, billing_cycle),
+           state = CASE WHEN $2::boolean THEN $3 ELSE state END,
+           city = CASE WHEN $4::boolean THEN $5 ELSE city END,
+           updated_at = now()
+         WHERE id = $6`,
+        [billingCycle ?? null, state !== undefined, state ?? null,
+         dto.city !== undefined, dto.city?.trim() || null, id],
+      );
+    }
     await this.dataSource.query(
       `UPDATE finance_customers SET
          customer_name = $1, address = $2, pan_card = $3,

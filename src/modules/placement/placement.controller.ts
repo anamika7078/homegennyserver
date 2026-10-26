@@ -151,13 +151,24 @@ export class PlacementController {
         management_fee: { type: 'number', example: 4500, description: 'Ignored if wage_config is also supplied' },
         wage_config: WAGE_CONFIG_SCHEMA,
         shift_start: { type: 'string', example: '08:00', description: 'HH:MM (IST) the shift starts; "" clears it. Used for "late" on the staff snapshot.' },
+        shift_hours: { type: 'number', example: 24, description: '1–24. 24 is a live-in (24×7) duty.' },
+        rate_basis: { type: 'string', enum: ['MONTHLY', 'HOURLY', 'PER_DUTY'], description: 'PER_DUTY bills duties × duty_billing_rate; null = default for the placement type' },
+        duty_rate: { type: 'number', example: 517, description: 'PER_DUTY: what the staff earns per duty' },
+        duty_billing_rate: { type: 'number', example: 585, description: 'PER_DUTY: what the client is billed per duty, before GST (all-in)' },
+        esic_applicable: { type: 'boolean', description: 'false = no ESIC for this placement' },
+        pf_applicable: { type: 'boolean', description: 'false = no PF for this placement' },
+        covers_placement_id: { type: 'string', description: 'Relief placement: the post (placement at the same client) it covers' },
       },
     },
   })
   updateTerms(
     @Req() req: { user: { id: string } },
     @Param('id') id: string,
-    @Body() body: { staff_salary?: number; management_fee?: number; wage_config?: WageConfigInput; shift_start?: string },
+    @Body() body: {
+      staff_salary?: number; management_fee?: number; wage_config?: WageConfigInput; shift_start?: string;
+      shift_hours?: number; rate_basis?: string | null; duty_rate?: number | null; duty_billing_rate?: number | null;
+      esic_applicable?: boolean; pf_applicable?: boolean; covers_placement_id?: string | null;
+    },
   ): Promise<PlacementRow> {
     return this.service.updateTerms(id, body, req.user.id);
   }

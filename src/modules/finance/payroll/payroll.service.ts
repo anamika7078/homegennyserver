@@ -552,10 +552,13 @@ export class FinancePayrollService {
          FROM placements p
          JOIN staff_applicants sa ON sa.id = p.staff_id
         WHERE p.status = 'CONFIRMED'
+          -- Not yet paid through the end of the month. A placement invoiced
+          -- for the 1st–7th has a row for those days and still needs the rest.
           AND NOT EXISTS (
             SELECT 1 FROM payroll_records pr
              WHERE pr.placement_id = p.id
                AND pr.period_month = $1 AND pr.period_year = $2
+               AND pr.period_to >= (make_date($2, $1, 1) + INTERVAL '1 month' - INTERVAL '1 day')::date
           )`,
       [month, year],
     );
@@ -653,8 +656,20 @@ export class FinancePayrollService {
               AND EXTRACT(MONTH FROM sda.attendance_date) = $1
               AND EXTRACT(YEAR  FROM sda.attendance_date) = $2
          ) a ON true
-         LEFT JOIN payroll_records pr
-           ON pr.placement_id = p.id AND pr.period_month = $1 AND pr.period_year = $2
+         -- A month invoiced in parts has several payroll rows for one
+         -- placement; summed, so the comparison is against the whole month
+         -- paid so far. The invoice shown is the latest part's.
+         LEFT JOIN LATERAL (
+           SELECT (array_agg(id ORDER BY period_to DESC))[1]                AS id,
+                  SUM(shift_days)                                            AS shift_days,
+                  SUM(hours_worked)                                          AS hours_worked,
+                  (array_agg(status ORDER BY period_to DESC))[1]            AS status,
+                  SUM(gross_salary)                                          AS gross_salary,
+                  (array_agg(client_invoice_id ORDER BY period_to DESC))[1] AS client_invoice_id
+             FROM payroll_records
+            WHERE placement_id = p.id AND period_month = $1 AND period_year = $2
+           HAVING COUNT(*) > 0
+         ) pr ON true
          LEFT JOIN client_invoices ci ON ci.id = pr.client_invoice_id
         WHERE p.status IN ('CONFIRMED','TRIAL')
         ORDER BY sa.staff_code`,

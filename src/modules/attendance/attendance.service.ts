@@ -242,6 +242,9 @@ export class AttendanceService {
           LEFT JOIN client_invoices ci ON ci.id = pr.client_invoice_id
          WHERE pr.placement_id = ${placementId}::uuid
            AND pr.period_month = ${month} AND pr.period_year = ${year}
+           -- Only the payroll whose days include this one: with a month paid in
+           -- parts, editing the 20th is not affected by the 1st–7th being paid.
+           AND ${attendanceDate}::date BETWEEN pr.period_from AND pr.period_to
          LIMIT 1`;
       if (!rows.length) return null;
 

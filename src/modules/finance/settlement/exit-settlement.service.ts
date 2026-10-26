@@ -185,17 +185,32 @@ export class ExitSettlementService {
     ).catch(() => [{ n: '0' }]);
     const finalMonthDays = parseInt(attendance[0]?.n ?? '0', 10);
 
-    const alreadyPaid = await this.dataSource.query<{ n: string }[]>(
-      `SELECT COUNT(*) AS n FROM payroll_records
-       WHERE staff_id = $1 AND period_month = $2 AND period_year = $3`,
-      [p.staff_id, exitDate.getMonth() + 1, exitDate.getFullYear()],
-    ).catch(() => [{ n: '0' }]);
-    const finalMonthAlreadyRun = parseInt(alreadyPaid[0]?.n ?? '0', 10) > 0;
+    // Payroll can cover part of a month now (a client invoiced on the 7th), so
+    // "has the exit month been run" became "up to which day". Only days after
+    // that are owed here.
+    const alreadyPaid = await this.dataSource.query<{ n: string; paid_to: string | null }[]>(
+      `SELECT COUNT(*) AS n, MAX(period_to)::text AS paid_to FROM payroll_records
+       WHERE placement_id = $1 AND period_month = $2 AND period_year = $3`,
+      [p.id, exitDate.getMonth() + 1, exitDate.getFullYear()],
+    ).catch(() => [{ n: '0', paid_to: null }]);
+    const paidTo = alreadyPaid[0]?.paid_to ?? null;
+    const exitIso = `${exitDate.getFullYear()}-${String(exitDate.getMonth() + 1).padStart(2, '0')}-${String(exitDate.getDate()).padStart(2, '0')}`;
+    const finalMonthAlreadyRun = paidTo != null && paidTo >= exitIso;
+    let unpaidDays = finalMonthDays;
+    if (paidTo && !finalMonthAlreadyRun) {
+      const unpaid = await this.dataSource.query<{ n: string }[]>(
+        `SELECT COUNT(*) AS n FROM staff_daily_attendance
+          WHERE placement_id = $1 AND attendance_date > $2::date AND attendance_date <= $3
+            AND status IN ('PRESENT','OVERTIME')`,
+        [p.id, paidTo, exitDate],
+      ).catch(() => [{ n: '0' }]);
+      unpaidDays = parseInt(unpaid[0]?.n ?? '0', 10);
+    }
 
     const daysInExitMonth = new Date(exitDate.getFullYear(), exitDate.getMonth() + 1, 0).getDate();
     const finalMonthAmount = finalMonthAlreadyRun
       ? 0
-      : round2(monthlySalary * (finalMonthDays / daysInExitMonth));
+      : round2(monthlySalary * (unpaidDays / daysInExitMonth));
 
     // Deposit, as it actually stands on the deposit row.
     const dep = await this.dataSource.query<{ id: string; amount: string; status: string; event: string | null }[]>(

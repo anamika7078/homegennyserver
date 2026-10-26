@@ -13,6 +13,9 @@ import {
   PF_RATE_DEFAULT,
   PF_WAGE_CEILING,
 } from '../../common/finance/statutory-calc.util';
+import { readSupplierSettings } from '../../common/finance/supplier-settings';
+import { applyPlacementTerms, dutiesFrom, effectiveRateBasis } from '../../common/finance/duty-billing.util';
+import { isoDate, monthBounds, nextDay, type Period } from '../../common/finance/period.util';
 import { StatutoryTaxService } from '../finance/tax/statutory-tax.service';
 import { ConsolidatedInvoiceService } from '../finance/invoice/consolidated-invoice.service';
 
@@ -107,6 +110,8 @@ export interface AttendanceSummary {
   absent_days: number;
   leave_days: number;
   overtime_days: number;
+  /** Counted so a per-duty placement can bill it as half a duty. */
+  half_days: number;
   billable_days: number;
   days_in_month: number;
 }
@@ -191,11 +196,13 @@ export class PayrollService {
     const absent_days = counts.ABSENT ?? 0;
     const leave_days = counts.LEAVE ?? 0;
     const overtime_days = counts.OVERTIME ?? 0;
+    const half_days = counts.HALF_DAY ?? 0;
     return {
       present_days,
       absent_days,
       leave_days,
       overtime_days,
+      half_days,
       billable_days: present_days + overtime_days,
       days_in_month: this.daysInMonth(month, year),
     };
@@ -406,23 +413,35 @@ export class PayrollService {
    * carries its share in proportion to what it paid.
    * See docs/HOURLY_MULTI_CLIENT_PLAN.md §B3.
    */
-  private async staffMonthEarnings(staffId: string, month: number, year: number) {
+  private async staffMonthEarnings(staffId: string, month: number, year: number, upTo?: string) {
+    // Month-to-date when a period ends before the month does: the statutory
+    // for an invoice raised on the 7th is worked out on what was earned by the
+    // 7th, and the later invoices of the month true it up. See previewAttendancePayroll.
+    const until = upTo ?? monthBounds(month, year).to;
     const rows = await this.dataSource.query<{
       id: string;
       placement_type: string;
+      rate_basis: string | null;
       staff_salary: string | null;
       hourly_rate: string | null;
+      duty_rate: string | null;
       present_days: string;
+      full_days: string;
+      half_days: string;
       hours: string;
     }[]>(
-      `SELECT p.id, p.placement_type, p.staff_salary, p.hourly_rate,
+      `SELECT p.id, p.placement_type, p.rate_basis, p.staff_salary, p.hourly_rate, p.duty_rate,
               COALESCE(a.present_days, 0)::text AS present_days,
+              COALESCE(a.full_days, 0)::text    AS full_days,
+              COALESCE(a.half_days, 0)::text    AS half_days,
               COALESCE(a.hours, 0)::text        AS hours
          FROM placements p
          LEFT JOIN LATERAL (
            SELECT COUNT(*) FILTER (
                     WHERE status IN ('PRESENT','HALF_DAY','OVERTIME')
                   ) AS present_days,
+                  COUNT(*) FILTER (WHERE status IN ('PRESENT','OVERTIME')) AS full_days,
+                  COUNT(*) FILTER (WHERE status = 'HALF_DAY')              AS half_days,
                   SUM(hours_worked) FILTER (
                     WHERE status IN ('PRESENT','HALF_DAY','OVERTIME')
                   ) AS hours
@@ -430,19 +449,25 @@ export class PayrollService {
             WHERE sda.placement_id = p.id
               AND EXTRACT(MONTH FROM sda.attendance_date) = $2
               AND EXTRACT(YEAR  FROM sda.attendance_date) = $3
+              AND sda.attendance_date <= $4::date
          ) a ON true
         WHERE p.staff_id = $1
           AND p.status IN ('CONFIRMED', 'TRIAL')`,
-      [staffId, month, year],
+      [staffId, month, year, until],
     );
 
     const daysInMonth = this.daysInMonth(month, year);
     const perPlacement = rows.map((r) => {
-      const gross = r.placement_type === 'TEMPORARY'
-        ? round2(parseFloat(r.hours) * parseFloat(r.hourly_rate ?? '0'))
-        : this.calculateProratedGross(
-            parseFloat(r.staff_salary ?? '0'), parseInt(r.present_days, 10), daysInMonth,
-          );
+      const basis = effectiveRateBasis(r.placement_type, r.rate_basis);
+      const gross = basis === 'PER_DUTY'
+        ? round2(dutiesFrom({
+            present: parseInt(r.full_days, 10), overtime: 0, halfDay: parseInt(r.half_days, 10),
+          }) * parseFloat(r.duty_rate ?? '0'))
+        : basis === 'HOURLY'
+          ? round2(parseFloat(r.hours) * parseFloat(r.hourly_rate ?? '0'))
+          : this.calculateProratedGross(
+              parseFloat(r.staff_salary ?? '0'), parseInt(r.present_days, 10), daysInMonth,
+            );
       return { placementId: r.id, gross };
     });
 
@@ -462,15 +487,20 @@ export class PayrollService {
     placementId: string,
     month: number,
     year: number,
+    period?: Period,
   ): Promise<AttendanceSummary & { hours_worked: number }> {
+    // A period inside the month (an invoice raised mid-month) counts only its
+    // own days; with none given it is the whole month, as before.
+    const range = period ?? monthBounds(month, year);
     const rows = await this.dataSource.query<AttendanceCountRow[]>(
       `SELECT status::text, COUNT(*)::text AS count
        FROM staff_daily_attendance
        WHERE placement_id = $1
          AND EXTRACT(MONTH FROM attendance_date) = $2
          AND EXTRACT(YEAR  FROM attendance_date) = $3
+         AND attendance_date BETWEEN $4::date AND $5::date
        GROUP BY status`,
-      [placementId, month, year],
+      [placementId, month, year, range.from, range.to],
     );
 
     // Only days that are actually worked carry hours. A LEAVE day with hours
@@ -481,8 +511,9 @@ export class PayrollService {
        WHERE placement_id = $1
          AND EXTRACT(MONTH FROM attendance_date) = $2
          AND EXTRACT(YEAR  FROM attendance_date) = $3
+         AND attendance_date BETWEEN $4::date AND $5::date
          AND status IN ('PRESENT', 'HALF_DAY', 'OVERTIME')`,
-      [placementId, month, year],
+      [placementId, month, year, range.from, range.to],
     );
 
     return {
@@ -491,17 +522,45 @@ export class PayrollService {
     };
   }
 
-  async previewAttendancePayroll(placementId: string, month: number, year: number) {
+  /**
+   * The first period still unpaid for a placement this month, ending on
+   * `till` (or the month's last day).
+   *
+   * Payroll rows never overlap for a placement, so the next one starts the day
+   * after the last one ends. Returns null when the month is already covered
+   * through `till`.
+   */
+  async nextPayrollPeriod(placementId: string, month: number, year: number, till?: string): Promise<Period | null> {
+    const bounds = monthBounds(month, year);
+    const to = till ?? bounds.to;
+    const last = await this.dataSource.query<{ period_to: unknown }[]>(
+      `SELECT MAX(period_to) AS period_to FROM payroll_records
+        WHERE placement_id = $1 AND period_month = $2 AND period_year = $3`,
+      [placementId, month, year],
+    );
+    const lastTo = isoDate(last[0]?.period_to);
+    const from = lastTo ? nextDay(lastTo) : bounds.from;
+    return from > to ? null : { from, to };
+  }
+
+  async previewAttendancePayroll(placementId: string, month: number, year: number, period?: Period) {
+    const range = period ?? monthBounds(month, year);
     const placements = await this.dataSource.query<
       (PlacementRow & {
         placement_type: string;
         hourly_rate: string | null;
         hourly_fee: string | null;
         shift_hours: string | null;
+        rate_basis: string | null;
+        duty_rate: string | null;
+        duty_billing_rate: string | null;
+        esic_applicable: boolean | null;
+        pf_applicable: boolean | null;
       })[]
     >(
       `SELECT staff_id, client_id, staff_salary, management_fee, metadata,
-              placement_type, hourly_rate, hourly_fee, shift_hours
+              placement_type, hourly_rate, hourly_fee, shift_hours,
+              rate_basis, duty_rate, duty_billing_rate, esic_applicable, pf_applicable
        FROM placements WHERE id = $1`,
       [placementId],
     );
@@ -510,8 +569,19 @@ export class PayrollService {
 
     // Counted at this client, not across the staff member's whole month — she
     // may be working three houses. See §B2.
-    const summary = await this.countAttendanceForPlacement(placementId, month, year);
-    const isHourly = p.placement_type === 'TEMPORARY';
+    const summary = await this.countAttendanceForPlacement(placementId, month, year, range);
+    const basis = effectiveRateBasis(p.placement_type, p.rate_basis);
+    const isHourly = basis === 'HOURLY';
+    const isPerDuty = basis === 'PER_DUTY';
+    const dutyRate = p.duty_rate != null ? parseFloat(p.duty_rate) : 0;
+    const dutyBillingRate = p.duty_billing_rate != null ? parseFloat(p.duty_billing_rate) : 0;
+    // Present and overtime days are a full duty each, a half day is half of one.
+    const duties = isPerDuty
+      ? dutiesFrom({ present: summary.present_days, overtime: summary.overtime_days, halfDay: summary.half_days })
+      : 0;
+    // What the client pays for those duties, before GST — fixed by the rate,
+    // whatever the statutory comes to. Null for the other bases.
+    const dutyBilled = isPerDuty ? round2(duties * dutyBillingRate) : null;
 
     const monthlySalary = parseFloat(p.staff_salary ?? '0');
     const monthlyFee = parseFloat(p.management_fee ?? '0');
@@ -521,7 +591,19 @@ export class PayrollService {
     let proratedGross: number;
     let proratedFee: number;
 
-    if (isHourly) {
+    if (isPerDuty) {
+      // 24×7 live-in: a fixed rate per duty, never divided by the days in the
+      // month — a duty in February pays what a duty in October pays.
+      if (!(dutyRate > 0) || !(dutyBillingRate > 0)) {
+        throw new BadRequestException(
+          `Placement ${placementId} is billed per duty but has no duty rate or billing rate set.`,
+        );
+      }
+      proratedGross = round2(duties * dutyRate);
+      // Provisional: the fee is whatever the billing rate leaves after pay and
+      // employer contributions, settled in applyPlacementTerms below.
+      proratedFee = round2((dutyBilled ?? 0) - proratedGross);
+    } else if (isHourly) {
       // Hours are the whole basis. A client who booked four hours owes four
       // hours, whether that was one visit or a month of them.
       if (!(hourlyRate > 0)) {
@@ -549,48 +631,84 @@ export class PayrollService {
     // An hourly placement has no agreed monthly base to pro-rate, so the hours
     // earned are the base.
     const agreedPfBase = pfBaseFromPlacementMetadata(p.metadata);
-    const proratedPfBase = isHourly
+    const proratedPfBase = isHourly || isPerDuty
       ? undefined
       : agreedPfBase != null
         ? this.calculateProratedGross(agreedPfBase, summary.billable_days, summary.days_in_month)
         : undefined;
     const rates = ratesFromPlacementMetadata(p.metadata);
 
-    // Statutory once on the month's whole earnings, then this client's share.
+    // Statutory once on the month's earnings, then this client's share — and,
+    // when the month is billed in parts, month-to-date: worked out on what was
+    // earned up to the end of this period, less what earlier periods of the
+    // month already carried. The ESIC ceiling and the PF cap are monthly, so
+    // computing each part on its own would apply them to fractions of a month.
+    // The last period of the month therefore always lands on the monthly figure.
     // See staffMonthEarnings() for why per-placement would be wrong.
-    const monthEarnings = await this.staffMonthEarnings(p.staff_id, month, year);
+    const monthEarnings = await this.staffMonthEarnings(p.staff_id, month, year, range.to);
+    const [prior] = await this.dataSource.query<{
+      n: string; gross: string; esic_e: string; esic_r: string; pf_e: string; pf_r: string;
+    }[]>(
+      `SELECT COUNT(*)::text AS n,
+              COALESCE(SUM(gross_salary), 0)::text  AS gross,
+              COALESCE(SUM(esic_employee), 0)::text AS esic_e,
+              COALESCE(SUM(esic_employer), 0)::text AS esic_r,
+              COALESCE(SUM(pf_employee), 0)::text   AS pf_e,
+              COALESCE(SUM(pf_employer), 0)::text   AS pf_r
+         FROM payroll_records
+        WHERE placement_id = $1 AND period_month = $2 AND period_year = $3
+          AND period_to < $4::date`,
+      [placementId, month, year, range.from],
+    );
+    const hasPrior = Number(prior?.n ?? 0) > 0;
+    const thisMonthToDate = monthEarnings.perPlacement.find((x) => x.placementId === placementId)?.gross
+      ?? round2(Number(prior?.gross ?? 0) + proratedGross);
     const share = monthEarnings.totalGross > 0
-      ? proratedGross / monthEarnings.totalGross
+      ? thisMonthToDate / monthEarnings.totalGross
       : 1;
 
     let calc = this.calculatePayrollWithAbsoluteFee(
       proratedGross, proratedFee, rates, proratedPfBase,
     );
 
-    // Only worth recomputing when the staff member actually works elsewhere —
-    // otherwise the share is 1 and the figures are already correct.
-    if (monthEarnings.perPlacement.length > 1) {
+    // Only worth recomputing when the staff member works elsewhere or the month
+    // is being billed in parts — otherwise the figures above are already right.
+    if (monthEarnings.perPlacement.length > 1 || hasPrior) {
+      // The agreed PF base, pro-rated to the days worked so far this month.
+      let pfBaseToDate: number | undefined;
+      if (agreedPfBase != null && !isHourly && !isPerDuty && monthEarnings.perPlacement.length <= 1) {
+        const toDate = await this.countAttendanceForPlacement(
+          placementId, month, year, { from: monthBounds(month, year).from, to: range.to },
+        );
+        pfBaseToDate = this.calculateProratedGross(agreedPfBase, toDate.billable_days, toDate.days_in_month);
+      }
       const whole = this.calculatePayrollWithAbsoluteFee(
-        monthEarnings.totalGross, proratedFee, rates,
+        monthEarnings.totalGross, proratedFee, rates, pfBaseToDate,
       );
+      const part = (wholeAmount: number, already: string | undefined) =>
+        round2(wholeAmount * share - Number(already ?? 0));
+      const esicEmployee = part(whole.esicEmployee, prior?.esic_e);
+      const esicEmployer = part(whole.esicEmployer, prior?.esic_r);
+      const pfEmployee = part(whole.pfEmployee, prior?.pf_e);
+      const pfEmployer = part(whole.pfEmployer, prior?.pf_r);
       calc = {
         ...calc,
-        esicEmployee: round2(whole.esicEmployee * share),
-        esicEmployer: round2(whole.esicEmployer * share),
-        pfEmployee: round2(whole.pfEmployee * share),
-        pfEmployer: round2(whole.pfEmployer * share),
-        netSalary: round2(
-          proratedGross - whole.esicEmployee * share - whole.pfEmployee * share,
-        ),
+        esicEmployee, esicEmployer, pfEmployee, pfEmployer,
+        netSalary: round2(proratedGross - esicEmployee - pfEmployee),
         clientTotalCharge: round2(
-          proratedGross
-            + whole.esicEmployer * share
-            + whole.pfEmployer * share
-            + calc.managementFee
-            + calc.gstOnFee,
+          proratedGross + esicEmployer + pfEmployer + calc.managementFee + calc.gstOnFee,
         ),
       };
     }
+
+    // The placement's own terms go last: ESIC/PF switched off where they do not
+    // apply, and a per-duty client charge held at exactly duties × billing rate.
+    calc = applyPlacementTerms(calc, {
+      esic: p.esic_applicable !== false,
+      pf: p.pf_applicable !== false,
+      billed: dutyBilled,
+      label: `Placement ${placementId}`,
+    });
 
     calc = await this.applySupplierGstPolicy(calc);
 
@@ -603,17 +721,27 @@ export class PayrollService {
       staff_id: p.staff_id,
       period_month: month,
       period_year: year,
+      period_from: range.from,
+      period_to: range.to,
       // What the figures above were derived from, so the invoice line can show
       // its working: "12 hours × ₹150" rather than a total nobody can check.
       placement_type: p.placement_type,
+      rate_basis: basis,
       shift_hours: p.shift_hours != null ? parseFloat(p.shift_hours) : null,
       hourly_rate: isHourly ? hourlyRate : null,
       hourly_fee: isHourly ? hourlyFee : null,
-      monthly_salary: isHourly ? null : monthlySalary,
-      monthly_management_fee: isHourly ? null : monthlyFee,
+      monthly_salary: isHourly || isPerDuty ? null : monthlySalary,
+      monthly_management_fee: isHourly || isPerDuty ? null : monthlyFee,
+      duties: isPerDuty ? duties : null,
+      duty_rate: isPerDuty ? dutyRate : null,
+      duty_billing_rate: isPerDuty ? dutyBillingRate : null,
+      esic_applicable: p.esic_applicable !== false,
+      pf_applicable: p.pf_applicable !== false,
       ...summary,
       prorated_gross: proratedGross,
-      prorated_management_fee: proratedFee,
+      // The fee actually billed. For per-duty it is only known once the
+      // statutory is settled, so it is read back from the final calculation.
+      prorated_management_fee: isPerDuty ? calc.managementFee : proratedFee,
       calculation: calc,
     };
   }
@@ -621,30 +749,42 @@ export class PayrollService {
   /**
    * Make the preview charge what the invoice will actually charge.
    *
-   * The calculation always applies 18% to the management fee, but
-   * ConsolidatedInvoiceService issues a **Bill of Supply** with no GST at all
-   * while `finance.supplier_gstin` is unset — an unregistered supplier cannot
-   * charge it. The two disagreed: a preview promising ₹18,633.06 against an
-   * invoice of ₹18,342.74, the difference being exactly the GST. Finance reads
-   * the preview before deciding to bill, so it has to tell the truth.
+   * ConsolidatedInvoiceService issues a **Bill of Supply** with no GST while
+   * HomeGenny has no valid GSTIN on file, and otherwise charges the one rate
+   * set under Finance → Company & GST. The preview used to differ on all
+   * three counts: it treated any non-empty GSTIN as registered (the invoice
+   * checks the format), it used the placement's wage_config rate (the invoice
+   * did not), and for a staff member at several clients it kept GST computed
+   * before ESIC/PF were re-shared, so its tax sat on a stale base.
+   *
+   * GST is therefore recomputed here, last, from the final base and the
+   * invoice's own settings. Finance reads the preview before deciding to bill,
+   * so it has to tell the truth.
    */
   private async applySupplierGstPolicy<T extends PayrollCalculation>(calc: T): Promise<T> {
-    const rows = await this.dataSource.query<{ value: unknown }[]>(
-      `SELECT value FROM system_settings WHERE key = 'finance.supplier_gstin' LIMIT 1`,
-    );
-    const raw = rows[0]?.value;
-    const gstin = String(typeof raw === 'string' ? raw : (raw as { value?: unknown })?.value ?? raw ?? '')
-      .replace(/^"|"$/g, '')
-      .trim();
-    if (gstin) return calc;
+    const supplier = await readSupplierSettings(this.dataSource);
+    const base = round2(calc.clientTotalCharge - calc.gstOnFee);
 
+    if (!supplier.isRegistered) {
+      return {
+        ...calc,
+        gstOnFee: 0,
+        clientTotalCharge: base,
+        ratesUsed: { ...calc.ratesUsed, gstPct: 0 },
+        documentType: 'BILL_OF_SUPPLY',
+        gstNote:
+          'No GST charged — HomeGenny has no valid GSTIN under Finance → Company & GST, ' +
+          'so this is issued as a Bill of Supply.',
+      };
+    }
+
+    const gst = calculateGstOnClientCharge(base, supplier.gstRatePct);
     return {
       ...calc,
-      gstOnFee: 0,
-      clientTotalCharge: round2(calc.clientTotalCharge - calc.gstOnFee),
-      documentType: 'BILL_OF_SUPPLY',
-      gstNote:
-        'No GST charged — finance.supplier_gstin is not set, so this is issued as a Bill of Supply.',
+      gstOnFee: gst,
+      clientTotalCharge: round2(base + gst),
+      ratesUsed: { ...calc.ratesUsed, gstPct: supplier.gstRatePct },
+      documentType: 'TAX_INVOICE',
     };
   }
 
@@ -664,31 +804,57 @@ export class PayrollService {
     placementId: string,
     month: number,
     year: number,
+    till?: string,
   ): Promise<Record<string, unknown>> {
-    const already = await this.dataSource.query<{ id: string }[]>(
-      `SELECT id FROM payroll_records
-       WHERE placement_id = $1 AND period_month = $2 AND period_year = $3
-       LIMIT 1`,
-      [placementId, month, year],
-    );
-    if (already.length) {
+    const { payroll, preview, calculation } = await this.runPayrollForPeriod(placementId, month, year, till);
+    this.logger.log(`[ATTENDANCE_PAYROLL_ONLY] placement ${placementId} ${preview.period_from}…${preview.period_to}`);
+    return { payroll, preview, calculation };
+  }
+
+  /**
+   * Pays the next unpaid stretch of the month for one placement — from the day
+   * after its last payroll row (or the 1st) up to `till` (or the month end).
+   *
+   * A month used to be one row, run once. Now a client can be invoiced on the
+   * 7th for the 1st–7th and later for the rest, so a placement can have
+   * several rows in a month, one after another. They never overlap: that is
+   * also enforced in the database (trg_payroll_records_no_overlap).
+   *
+   * The refusal message for a month already covered is unchanged, because the
+   * month-end cron and the batch screens read it as "nothing left to do".
+   */
+  async runPayrollForPeriod(
+    placementId: string,
+    month: number,
+    year: number,
+    till?: string,
+    runner?: { query: <T = any>(sql: string, params?: unknown[]) => Promise<T> },
+  ) {
+    const period = await this.nextPayrollPeriod(placementId, month, year, till);
+    if (!period) {
       throw new BadRequestException(
-        `Payroll already exists for placement ${placementId} in ${month}/${year}`,
+        till
+          ? `Payroll already exists for placement ${placementId} up to ${till}`
+          : `Payroll already exists for placement ${placementId} in ${month}/${year}`,
       );
     }
 
-    const preview = await this.previewAttendancePayroll(placementId, month, year);
+    const preview = await this.previewAttendancePayroll(placementId, month, year, period);
     // What makes a period billable depends on how the placement is priced:
-    // days for a permanent one, hours for an hourly one. A four-hour visit is
-    // one day and would otherwise be judged the same as a full month.
-    const nothingToBill = preview.placement_type === 'TEMPORARY'
-      ? preview.hours_worked <= 0
-      : preview.billable_days <= 0;
+    // duties, hours, or days. A four-hour visit is one day and would otherwise
+    // be judged the same as a full month.
+    const nothingToBill = preview.rate_basis === 'PER_DUTY'
+      ? !(Number(preview.duties) > 0)
+      : preview.rate_basis === 'HOURLY'
+        ? preview.hours_worked <= 0
+        : preview.billable_days <= 0;
     if (nothingToBill) {
       throw new BadRequestException(
-        preview.placement_type === 'TEMPORARY'
-          ? 'No hours recorded at this client for the period.'
-          : 'No billable attendance days for this period',
+        preview.rate_basis === 'PER_DUTY'
+          ? 'No duties recorded at this client for the period.'
+          : preview.rate_basis === 'HOURLY'
+            ? 'No hours recorded at this client for the period.'
+            : 'No billable attendance days for this period',
       );
     }
 
@@ -701,11 +867,9 @@ export class PayrollService {
     const calc = preview.calculation as PayrollCalculation;
 
     const [payroll] = await this.insertPayrollRecord(
-      this.dataSource, placementId, p.staff_id, month, year, preview, calc,
+      runner ?? this.dataSource, placementId, p.staff_id, month, year, preview, calc,
     );
-
-    this.logger.log(`[ATTENDANCE_PAYROLL_ONLY] placement ${placementId} ${month}/${year}`);
-    return { payroll, preview, calculation: calc };
+    return { payroll, clientId: p.client_id, preview, calculation: calc };
   }
 
   /**
@@ -727,18 +891,25 @@ export class PayrollService {
     year: number,
     preview: { billable_days: number; hours_worked?: number; placement_type?: string;
                hourly_rate?: number | null; hourly_fee?: number | null;
-               prorated_management_fee?: number },
+               prorated_management_fee?: number;
+               rate_basis?: string; duties?: number | null;
+               duty_rate?: number | null; duty_billing_rate?: number | null;
+               period_from?: string; period_to?: string },
     calc: PayrollCalculation,
   ) {
-    const isHourly = preview.placement_type === 'TEMPORARY';
+    const isHourly = preview.rate_basis
+      ? preview.rate_basis === 'HOURLY'
+      : preview.placement_type === 'TEMPORARY';
+    const isPerDuty = preview.rate_basis === 'PER_DUTY';
     return runner.query<Record<string, unknown>[]>(
       `INSERT INTO payroll_records
          (id, placement_id, staff_id, period_month, period_year, shift_days,
           gross_salary, deductions, net_salary,
           esic_employer, esic_employee, pf_employer, pf_employee,
-          placement_type, hours_worked, hourly_rate, hourly_fee, management_fee)
+          placement_type, hours_worked, hourly_rate, hourly_fee, management_fee,
+          rate_basis, duties, duty_rate, duty_billing_rate, period_from, period_to)
        VALUES (gen_random_uuid(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-               $13,$14,$15,$16,$17) RETURNING *`,
+               $13,$14,$15,$16,$17,$18,$19,$20,$21, $22::date, $23::date) RETURNING *`,
       [
         placementId,
         staffId,
@@ -757,6 +928,13 @@ export class PayrollService {
         isHourly ? preview.hourly_rate : null,
         isHourly ? preview.hourly_fee : null,
         preview.prorated_management_fee ?? calc.managementFee,
+        preview.rate_basis ?? null,
+        isPerDuty ? preview.duties : null,
+        isPerDuty ? preview.duty_rate : null,
+        isPerDuty ? preview.duty_billing_rate : null,
+        // Null falls back to the whole month (trg_payroll_records_fill_period).
+        preview.period_from ?? null,
+        preview.period_to ?? null,
       ],
     );
   }
@@ -765,54 +943,16 @@ export class PayrollService {
     placementId: string,
     month: number,
     year: number,
+    till?: string,
   ): Promise<Record<string, unknown>> {
     // Keyed off payroll, not off the invoice: a consolidated invoice covers a
     // whole client and carries no placement_id, so "has this placement already
     // been run?" can only be answered by payroll_records.
-    const existing = await this.dataSource.query<{ id: string }[]>(
-      `SELECT id FROM payroll_records
-       WHERE placement_id = $1 AND period_month = $2 AND period_year = $3
-       LIMIT 1`,
-      [placementId, month, year],
+    const result = await this.dataSource.transaction((manager) =>
+      this.runPayrollForPeriod(placementId, month, year, till, manager));
+    this.logger.log(
+      `[ATTENDANCE_PAYROLL] placement ${placementId} ${result.preview.period_from}…${result.preview.period_to}`,
     );
-    if (existing.length) {
-      throw new BadRequestException(
-        `Payroll already exists for placement ${placementId} in ${month}/${year}`,
-      );
-    }
-
-    const preview = await this.previewAttendancePayroll(placementId, month, year);
-    // What makes a period billable depends on how the placement is priced:
-    // days for a permanent one, hours for an hourly one. A four-hour visit is
-    // one day and would otherwise be judged the same as a full month.
-    const nothingToBill = preview.placement_type === 'TEMPORARY'
-      ? preview.hours_worked <= 0
-      : preview.billable_days <= 0;
-    if (nothingToBill) {
-      throw new BadRequestException(
-        preview.placement_type === 'TEMPORARY'
-          ? 'No hours recorded at this client for the period.'
-          : 'No billable attendance days for this period',
-      );
-    }
-
-    const placements = await this.dataSource.query<PlacementRow[]>(
-      `SELECT staff_id, client_id, staff_salary, management_fee
-       FROM placements WHERE id = $1`,
-      [placementId],
-    );
-    const p = placements[0];
-    const calc = preview.calculation as PayrollCalculation;
-
-    const result = await this.dataSource.transaction(async (manager) => {
-      const [payroll] = await this.insertPayrollRecord(
-        manager, placementId, p.staff_id, month, year, preview, calc,
-      );
-
-      this.logger.log(`[ATTENDANCE_PAYROLL] placement ${placementId} ${month}/${year}`);
-      return { payroll, clientId: p.client_id, preview, calculation: calc };
-    });
-
     // No invoice here either — see runPayroll above. Finance raises it from
     // the unit code, and it lands as a DRAFT they can look at before it goes.
     return result;
@@ -889,6 +1029,8 @@ export class PayrollService {
       absent_days,
       leave_days,
       overtime_days: 0,
+      // Already folded into present_days at half weight above.
+      half_days: 0,
       billable_days: present_days,
       days_in_month: this.daysInMonth(month, year),
     };

@@ -62,30 +62,22 @@ export class EnterpriseCronService {
       }
     }
 
-    // ── Pass 2: one invoice per client ──────────────────────────────────
-    const customers = await this.consolidatedInvoices.pendingForPeriod(month, year);
-
-    let invoiced = 0;
-    let invSkipped = 0;
-    for (const c of customers as { customer_id: string; customer_name: string }[]) {
-      try {
-        await this.consolidatedInvoices.generate(c.customer_id, month, year);
-        invoiced++;
-      } catch (e) {
-        // Already invoiced, nothing un-invoiced left, or the line items did
-        // not reconcile — the service refuses rather than issue a document a
-        // client would rightly query.
-        invSkipped++;
-        this.logger.warn(
-          `[AUTO-BILLING] Invoice skipped for ${c.customer_name} ${month}/${year}: ${(e as Error).message}`,
-        );
-      }
+    // ── Pass 2: one invoice per client, for what is left of the month ────
+    // Month end closes a period on every cycle (monthly, fortnightly, weekly),
+    // so this is the same cycle billing the morning job runs — MANUAL clients
+    // are left alone, and a client already invoiced through month end is
+    // skipped rather than billed twice.
+    const lastDay = new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
+    const cycle = await this.consolidatedInvoices.runCycleBilling(lastDay);
+    const invoiced = cycle.issued.length;
+    const invSkipped = cycle.skipped.length;
+    for (const sk of cycle.skipped) {
+      this.logger.warn(`[AUTO-BILLING] Invoice skipped for ${sk.customer} ${month}/${year}: ${sk.reason}`);
     }
 
     this.logger.log(
       `[AUTO-BILLING] ${month}/${year}: payroll=${paid}/${placements.length} ` +
-        `invoices=${invoiced}/${(customers as unknown[]).length} ` +
-        `(skipped payroll=${paySkipped} invoices=${invSkipped})`,
+        `invoices=${invoiced} (skipped payroll=${paySkipped} invoices=${invSkipped})`,
     );
     if (invoiced) {
       this.events.emit('cron.attendance_invoices_generated', {
@@ -93,6 +85,28 @@ export class EnterpriseCronService {
         year,
         generated: invoiced,
         skipped: invSkipped,
+      });
+    }
+  }
+
+  /**
+   * Every morning: the DRAFT invoices of clients whose billing period closed
+   * yesterday — weekly, fortnightly or monthly, per client. Finance approves
+   * and sends them as usual. Runs on IST whatever the server's own clock.
+   */
+  @Cron('0 6 * * *', { timeZone: 'Asia/Kolkata' })
+  async cycleBilling() {
+    const yesterday = new Date(Date.now() + 330 * 60_000 - 86_400_000).toISOString().slice(0, 10);
+    const r = await this.consolidatedInvoices.runCycleBilling(yesterday);
+    for (const sk of r.skipped) {
+      this.logger.warn(`[CYCLE_BILLING] ${yesterday} skipped ${sk.customer} (${sk.cycle}): ${sk.reason}`);
+    }
+    if (r.issued.length) {
+      this.events.emit('cron.attendance_invoices_generated', {
+        month: Number(yesterday.slice(5, 7)),
+        year: Number(yesterday.slice(0, 4)),
+        generated: r.issued.length,
+        skipped: r.skipped.length,
       });
     }
   }

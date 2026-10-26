@@ -6,6 +6,7 @@ import { AuditAction } from '@prisma/client';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { computeWageBreakup, WageConfigInput } from './wage-calculator.util';
 import { StaffRequestsService } from '../staff-requests/staff-requests.service';
+import { effectiveRateBasis } from '../../common/finance/duty-billing.util';
 
 // Spec (HomeGenny_StageDescriptions, S5 Trial Period): Maid/UC/DR = 7-day
 // trial, SC = 14-day trial. create() used to default every series to 14 days
@@ -49,6 +50,13 @@ export interface PlacementRow {
   shift_start?: string | null;
   hourly_rate?: number | null;
   hourly_fee?: number | null;
+  /** MONTHLY | HOURLY | PER_DUTY — how this placement is priced. */
+  rate_basis?: 'MONTHLY' | 'HOURLY' | 'PER_DUTY';
+  duty_rate?: number | null;
+  duty_billing_rate?: number | null;
+  esic_applicable?: boolean;
+  pf_applicable?: boolean;
+  covers_placement_id?: string | null;
   trial_start_date: Date | string | null;
   trial_end_date: Date | string | null;
   staff_code?: string;
@@ -79,6 +87,12 @@ export class PlacementService {
     shiftStart?: string | null;
     hourlyRate?: unknown;
     hourlyFee?: unknown;
+    rateBasis?: string | null;
+    dutyRate?: unknown;
+    dutyBillingRate?: unknown;
+    esicApplicable?: boolean | null;
+    pfApplicable?: boolean | null;
+    coversPlacementId?: string | null;
     trialStartDate: Date | null;
     trialEndDate: Date | null;
     metadata?: unknown;
@@ -101,6 +115,12 @@ export class PlacementService {
       shift_start: p.shiftStart ?? null,
       hourly_rate: p.hourlyRate != null ? Number(p.hourlyRate) : null,
       hourly_fee: p.hourlyFee != null ? Number(p.hourlyFee) : null,
+      rate_basis: effectiveRateBasis(p.placementType, p.rateBasis),
+      duty_rate: p.dutyRate != null ? Number(p.dutyRate) : null,
+      duty_billing_rate: p.dutyBillingRate != null ? Number(p.dutyBillingRate) : null,
+      esic_applicable: p.esicApplicable !== false,
+      pf_applicable: p.pfApplicable !== false,
+      covers_placement_id: p.coversPlacementId ?? null,
       trial_start_date: p.trialStartDate,
       trial_end_date: p.trialEndDate,
       wage_config: metadata.wage_config ?? null,
@@ -137,6 +157,86 @@ export class PlacementService {
    * Falls back to flat staff_salary/management_fee when wage_config is omitted
    * (existing callers, e.g. direct-CONFIRMED quick placements, keep working).
    */
+  /**
+   * Per-duty pricing, the ESIC/PF switches and the post a relief placement
+   * covers — read from a create/terms body. Only fields present in the body
+   * come back, so a terms update leaves the rest alone.
+   *
+   * A 24×7 live-in duty is priced per duty (rate_basis PER_DUTY, with
+   * duty_rate and duty_billing_rate). See common/finance/duty-billing.util.ts.
+   */
+  private async resolveDutyTerms(
+    data: Record<string, unknown>,
+    ctx: { clientId: string; placementType: string; selfId?: string },
+  ): Promise<{
+    rateBasis?: string | null; dutyRate?: number | null; dutyBillingRate?: number | null;
+    esicApplicable?: boolean; pfApplicable?: boolean; coversPlacementId?: string | null;
+  }> {
+    const out: Awaited<ReturnType<PlacementService['resolveDutyTerms']>> = {};
+    const num = (v: unknown, field: string) => {
+      if (v === null || v === '') return null;
+      const n = Number(v);
+      if (!Number.isFinite(n) || n <= 0) throw new BadRequestException(`${field} must be a positive number.`);
+      return Math.round(n * 100) / 100;
+    };
+    const bool = (v: unknown, field: string) => {
+      if (typeof v === 'boolean') return v;
+      if (v === 'true' || v === 'false') return v === 'true';
+      throw new BadRequestException(`${field} must be true or false.`);
+    };
+
+    if (data.rate_basis !== undefined) {
+      const rb = data.rate_basis == null || data.rate_basis === '' ? null : String(data.rate_basis).toUpperCase();
+      if (rb != null && !['MONTHLY', 'HOURLY', 'PER_DUTY'].includes(rb)) {
+        throw new BadRequestException(`rate_basis must be MONTHLY, HOURLY or PER_DUTY, not "${rb}".`);
+      }
+      if (rb === 'HOURLY' && ctx.placementType !== 'TEMPORARY') {
+        throw new BadRequestException('An hourly rate basis is only for a TEMPORARY placement.');
+      }
+      if (rb === 'MONTHLY' && ctx.placementType === 'TEMPORARY') {
+        throw new BadRequestException('A monthly rate basis is only for a PERMANENT placement.');
+      }
+      out.rateBasis = rb;
+    }
+    if (data.duty_rate !== undefined) out.dutyRate = num(data.duty_rate, 'duty_rate');
+    if (data.duty_billing_rate !== undefined) out.dutyBillingRate = num(data.duty_billing_rate, 'duty_billing_rate');
+    if (data.esic_applicable !== undefined) out.esicApplicable = bool(data.esic_applicable, 'esic_applicable');
+    if (data.pf_applicable !== undefined) out.pfApplicable = bool(data.pf_applicable, 'pf_applicable');
+
+    if (data.covers_placement_id !== undefined) {
+      const coverId = data.covers_placement_id ? String(data.covers_placement_id) : null;
+      if (coverId) {
+        if (coverId === ctx.selfId) throw new BadRequestException('A placement cannot cover itself.');
+        const covered = await this.prisma.placement.findUnique({
+          where: { id: coverId }, select: { clientId: true },
+        });
+        if (!covered) throw new BadRequestException(`covers_placement_id ${coverId} does not exist.`);
+        if (covered.clientId !== ctx.clientId) {
+          throw new BadRequestException('A relief placement can only cover a post at the same client.');
+        }
+      }
+      out.coversPlacementId = coverId;
+    }
+    return out;
+  }
+
+  /** Throws unless a per-duty placement has both rates, and bills at least what it pays. */
+  private assertDutyRates(dutyRate: unknown, dutyBillingRate: unknown) {
+    const rate = dutyRate != null ? Number(dutyRate) : NaN;
+    const bill = dutyBillingRate != null ? Number(dutyBillingRate) : NaN;
+    if (!(rate > 0) || !(bill > 0)) {
+      throw new BadRequestException(
+        'A per-duty placement needs duty_rate (what the staff earns per duty) and ' +
+          'duty_billing_rate (what the client is billed per duty).',
+      );
+    }
+    if (bill < rate) {
+      throw new BadRequestException(
+        `duty_billing_rate ₹${bill} is below duty_rate ₹${rate} — the client would be billed less than the staff is paid.`,
+      );
+    }
+  }
+
   private resolveWageTerms(data: Record<string, unknown>): {
     staffSalary?: number;
     managementFee?: number;
@@ -291,18 +391,26 @@ export class PlacementService {
     const hourlyRate = data.hourly_rate != null ? Number(data.hourly_rate) : null;
     const hourlyFee = data.hourly_fee != null ? Number(data.hourly_fee) : null;
     const shiftHours = data.shift_hours != null ? Number(data.shift_hours) : 8;
+    // 24 is a live-in (24×7) duty.
+    if (!(shiftHours > 0 && shiftHours <= 24)) {
+      throw new BadRequestException(`shift_hours must be between 1 and 24, not ${data.shift_hours}.`);
+    }
     const shiftStart = parseShiftStart(data.shift_start);
 
-    if (isHourly && !(hourlyRate != null && hourlyRate > 0)) {
+    const dutyTerms = await this.resolveDutyTerms(data, { clientId, placementType });
+    const isPerDuty = dutyTerms.rateBasis === 'PER_DUTY';
+    if (isPerDuty) this.assertDutyRates(dutyTerms.dutyRate, dutyTerms.dutyBillingRate);
+
+    if (isHourly && !isPerDuty && !(hourlyRate != null && hourlyRate > 0)) {
       throw new BadRequestException(
         'hourly_rate is required for a TEMPORARY placement — an hour with no price cannot be billed.',
       );
     }
 
     const directConfirm = String(data.status ?? '').toUpperCase() === 'CONFIRMED';
-    // An hourly placement prices itself by the hour, so the monthly pair is not
-    // what makes it billable.
-    if (directConfirm && !isHourly && (wageTerms.staffSalary == null || wageTerms.managementFee == null)) {
+    // An hourly or per-duty placement prices itself by its own rate, so the
+    // monthly pair is not what makes it billable.
+    if (directConfirm && !isHourly && !isPerDuty && (wageTerms.staffSalary == null || wageTerms.managementFee == null)) {
       throw new BadRequestException(
         'staff_salary and management_fee (directly, or computed via wage_config) are required to create a placement directly as CONFIRMED.',
       );
@@ -324,8 +432,9 @@ export class PlacementService {
         shiftStart: shiftStart ?? null,
         staffSalary: wageTerms.staffSalary,
         managementFee: wageTerms.managementFee,
-        hourlyRate: isHourly ? hourlyRate : null,
-        hourlyFee: isHourly ? hourlyFee : null,
+        hourlyRate: isHourly && !isPerDuty ? hourlyRate : null,
+        hourlyFee: isHourly && !isPerDuty ? hourlyFee : null,
+        ...dutyTerms,
         metadata: (staffRequestId
           ? { ...(wageTerms.metadataPatch as object), staff_request_id: staffRequestId, ...visitMeta }
           : wageTerms.metadataPatch) as Prisma.InputJsonValue,
@@ -379,13 +488,50 @@ export class PlacementService {
    */
   async updateTerms(
     id: string,
-    data: { staff_salary?: unknown; management_fee?: unknown; wage_config?: unknown; shift_start?: unknown },
+    data: {
+      staff_salary?: unknown; management_fee?: unknown; wage_config?: unknown; shift_start?: unknown;
+      shift_hours?: unknown; rate_basis?: unknown; duty_rate?: unknown; duty_billing_rate?: unknown;
+      esic_applicable?: unknown; pf_applicable?: unknown; covers_placement_id?: unknown;
+    },
     actorId?: string,
   ) {
     const existing = await this.prisma.placement.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Placement not found');
 
     const wageTerms = this.resolveWageTerms(data);
+    const dutyTerms = await this.resolveDutyTerms(data as Record<string, unknown>, {
+      clientId: existing.clientId, placementType: existing.placementType, selfId: existing.id,
+    });
+    // Validate the rates the placement will end up with, not just the ones sent.
+    const finalBasis = dutyTerms.rateBasis !== undefined ? dutyTerms.rateBasis : existing.rateBasis;
+    if (finalBasis === 'PER_DUTY') {
+      this.assertDutyRates(
+        dutyTerms.dutyRate !== undefined ? dutyTerms.dutyRate : existing.dutyRate,
+        dutyTerms.dutyBillingRate !== undefined ? dutyTerms.dutyBillingRate : existing.dutyBillingRate,
+      );
+    } else if (dutyTerms.rateBasis !== undefined) {
+      // Moving off per-duty: the basis being moved to has to have its own price,
+      // or payroll has nothing to run on (and a temporary placement without an
+      // hourly rate is refused by the database outright).
+      if (existing.placementType === 'TEMPORARY' && existing.hourlyRate == null) {
+        throw new BadRequestException(
+          'This relief placement has no hourly rate to fall back to — keep it per duty, or exit it and place them hourly.',
+        );
+      }
+      if (existing.placementType !== 'TEMPORARY'
+          && (wageTerms.staffSalary ?? existing.staffSalary) == null) {
+        throw new BadRequestException(
+          'Switching to a monthly salary needs staff_salary and management_fee (or a wage_config) in the same request.',
+        );
+      }
+    }
+    let shiftHours: number | undefined;
+    if (data.shift_hours !== undefined && data.shift_hours !== null && data.shift_hours !== '') {
+      shiftHours = Number(data.shift_hours);
+      if (!(shiftHours > 0 && shiftHours <= 24)) {
+        throw new BadRequestException(`shift_hours must be between 1 and 24, not ${String(data.shift_hours)}.`);
+      }
+    }
     // '' or null clears it (no start time → never late); absent leaves it alone.
     const shiftStart = data.shift_start === undefined ? undefined : parseShiftStart(data.shift_start) ?? null;
     const existingMetadata = (existing.metadata as Record<string, unknown> | null) ?? {};
@@ -396,6 +542,8 @@ export class PlacementService {
         ...(wageTerms.staffSalary != null ? { staffSalary: wageTerms.staffSalary } : {}),
         ...(wageTerms.managementFee != null ? { managementFee: wageTerms.managementFee } : {}),
         ...(shiftStart !== undefined ? { shiftStart } : {}),
+        ...(shiftHours !== undefined ? { shiftHours } : {}),
+        ...dutyTerms,
         ...(Object.keys(wageTerms.metadataPatch).length
           ? { metadata: { ...existingMetadata, ...wageTerms.metadataPatch } as Prisma.InputJsonValue }
           : {}),
@@ -407,7 +555,13 @@ export class PlacementService {
       action: AuditAction.DEPLOYMENT_ACTION,
       entityType: 'placement',
       entityId: row.id,
-      metadata: { action: 'terms_updated', staff_salary: wageTerms.staffSalary, management_fee: wageTerms.managementFee, via_wage_config: !!data.wage_config, ...(shiftStart !== undefined ? { shift_start: shiftStart } : {}) },
+      metadata: {
+        action: 'terms_updated', staff_salary: wageTerms.staffSalary, management_fee: wageTerms.managementFee,
+        via_wage_config: !!data.wage_config,
+        ...(shiftStart !== undefined ? { shift_start: shiftStart } : {}),
+        ...(shiftHours !== undefined ? { shift_hours: shiftHours } : {}),
+        ...dutyTerms,
+      },
     });
 
     const [staff, client] = await Promise.all([this.getStaffMeta(row.staffId), this.getClientMeta(row.clientId)]);
@@ -438,7 +592,9 @@ export class PlacementService {
     // pair for a permanent one, an hourly rate for a temporary one. Demanding
     // the monthly figures from an hourly placement would leave it permanently
     // stuck at TRIAL.
-    if (existing.placementType === 'TEMPORARY') {
+    if (existing.rateBasis === 'PER_DUTY') {
+      this.assertDutyRates(existing.dutyRate, existing.dutyBillingRate);
+    } else if (existing.placementType === 'TEMPORARY') {
       if (existing.hourlyRate == null) {
         throw new BadRequestException(
           'Cannot confirm — this is an hourly placement and has no hourly_rate. ' +
