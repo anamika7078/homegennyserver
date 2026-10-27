@@ -140,13 +140,20 @@ export class NotificationsService {
 
   // ── In-App Notifications Helpers ──────────────────────────────────────────
 
+  /**
+   * Notifications with no user are office-wide HR alerts (birthdays, expiring
+   * documents) — shown to HR and Admin only. Everyone else sees what was
+   * addressed to them: an RM the invoices Finance rejected, Finance the
+   * morning attention note.
+   */
+  private static audience(userId: string, role: string) {
+    return role === 'HR' || role === 'ADMIN' ? [{ userId }, { userId: null }] : [{ userId }];
+  }
+
   async findInAppNotifications(userId: string, role: string) {
     return this.prisma.notification.findMany({
       where: {
-        OR: [
-          { userId },
-          { userId: null },
-        ],
+        OR: NotificationsService.audience(userId, role),
         channel: 'IN_APP',
       },
       orderBy: { createdAt: 'desc' },
@@ -157,10 +164,7 @@ export class NotificationsService {
   async getUnreadInAppCount(userId: string, role: string) {
     const count = await this.prisma.notification.count({
       where: {
-        OR: [
-          { userId },
-          { userId: null },
-        ],
+        OR: NotificationsService.audience(userId, role),
         channel: 'IN_APP',
         readAt: null,
       },
@@ -168,11 +172,13 @@ export class NotificationsService {
     return { count };
   }
 
-  async markAsRead(id: string) {
-    return this.prisma.notification.update({
-      where: { id },
+  /** Only a notification the reader can see — one could mark anyone's as read before. */
+  async markAsRead(id: string, userId?: string, role?: string) {
+    const res = await this.prisma.notification.updateMany({
+      where: { id, ...(userId ? { OR: NotificationsService.audience(userId, role ?? '') } : {}) },
       data: { readAt: new Date() },
     });
+    return { id, updated: res.count };
   }
 
   async createInAppNotification(title: string, body: string, userId?: string | null) {

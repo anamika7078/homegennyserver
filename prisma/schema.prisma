@@ -475,6 +475,17 @@ model Placement {
   pfApplicable     Boolean         @default(true) @map("pf_applicable")
   /// A relief/substitute placement: the post it covers on the regular staff's off days.
   coversPlacementId String?        @map("covers_placement_id") @db.Uuid
+  /// REVIEW_NEEDED after Finance rejects an invoice built on this placement; the
+  /// client is not invoiced again until the RM corrects or confirms the rate.
+  rateReviewStatus    String?    @map("rate_review_status") @db.VarChar(20)
+  rateReviewReason    String?    @map("rate_review_reason")
+  rateReviewAt        DateTime?  @map("rate_review_at") @db.Timestamptz(6)
+  rateReviewInvoiceId String?    @map("rate_review_invoice_id") @db.Uuid
+  rateReviewBy        String?    @map("rate_review_by") @db.Uuid
+  /// Last time Finance approved an invoice on this placement. Rate changes after it are new to Finance.
+  rateVerifiedAt        DateTime? @map("rate_verified_at") @db.Timestamptz(6)
+  rateVerifiedBy        String?   @map("rate_verified_by") @db.Uuid
+  rateVerifiedInvoiceId String?   @map("rate_verified_invoice_id") @db.Uuid
   // Written by exit() (placement.service.ts) — used to silently no-op via a
   // raw-SQL catch fallback because these columns never existed until now.
   exitDate         DateTime?       @map("exit_date") @db.Date
@@ -645,9 +656,64 @@ model PayrollRecord {
   duties            Decimal?  @db.Decimal(6, 1)
   dutyRate          Decimal?  @map("duty_rate") @db.Decimal(10, 2)
   dutyBillingRate   Decimal?  @map("duty_billing_rate") @db.Decimal(10, 2)
+  /// Set when Finance approves the invoice this row is on (or an Admin releases it
+  /// with a reason). Until then it is not a payslip and cannot be paid.
+  releasedAt        DateTime? @map("released_at") @db.Timestamptz(6)
+  releasedBy        String?   @map("released_by") @db.Uuid
+  releaseReason     String?   @map("release_reason")
+  /// Arrears from a correction of an earlier, sent invoice — paid on top of this
+  /// period's net (net_salary includes it) and shown on the slip as its own line.
+  arrears           Decimal   @default(0) @db.Decimal(12, 2)
+  arrearsNote       String?   @map("arrears_note")
   placement         Placement @relation(fields: [placementId], references: [id])
 
   @@map("payroll_records")
+}
+
+/// Every change to a placement's rates: what applied before and after, from
+/// which date, who and why. Active rows (superseded_at null) form one timeline;
+/// payroll reads the rate in force on each day. scratch/_rate_history_migration.js
+model PlacementRateChange {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  placementId   String    @map("placement_id") @db.Uuid
+  effectiveFrom DateTime  @map("effective_from") @db.Date
+  before        Json
+  after         Json
+  reason        String?
+  source        String    @default("TERMS_EDIT") @db.VarChar(20)
+  changedBy     String?   @map("changed_by") @db.Uuid
+  changedAt     DateTime  @default(now()) @map("changed_at") @db.Timestamptz(6)
+  supersededAt  DateTime? @map("superseded_at") @db.Timestamptz(6)
+  supersededBy  String?   @map("superseded_by") @db.Uuid
+
+  @@map("placement_rate_changes")
+}
+
+/// A payroll row taken out of payroll_records — by an invoice rejection, a
+/// cancellation, or a re-run. Kept whole in `row` so nothing is lost; nothing
+/// that reads payroll can count it. scratch/_invoice_reject_migration.js
+model PayrollRecordVoided {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payrollId       String    @map("payroll_id") @db.Uuid
+  placementId     String    @map("placement_id") @db.Uuid
+  staffId         String    @map("staff_id") @db.Uuid
+  periodMonth     Int       @map("period_month")
+  periodYear      Int       @map("period_year")
+  periodFrom      DateTime? @map("period_from") @db.Date
+  periodTo        DateTime? @map("period_to") @db.Date
+  clientInvoiceId String?   @map("client_invoice_id") @db.Uuid
+  invoiceNumber   String?   @map("invoice_number") @db.VarChar(50)
+  grossSalary     Decimal?  @map("gross_salary") @db.Decimal(10, 2)
+  netSalary       Decimal?  @map("net_salary") @db.Decimal(10, 2)
+  row             Json
+  voidSource      String    @map("void_source") @db.VarChar(20)
+  voidReason      String    @map("void_reason")
+  voidedBy        String?   @map("voided_by") @db.Uuid
+  voidedAt        DateTime  @default(now()) @map("voided_at") @db.Timestamptz(6)
+
+  @@index([placementId, periodYear, periodMonth], map: "idx_payroll_voided_placement")
+  @@index([clientInvoiceId], map: "idx_payroll_voided_invoice")
+  @@map("payroll_records_voided")
 }
 
 model Invoice {
@@ -697,6 +763,11 @@ model Invoice {
   dueDate              DateTime          @map("due_date") @db.Date
   paidAt               DateTime?         @map("paid_at") @db.Timestamptz(6)
   status               String            @default("PENDING") @db.VarChar(20)
+  approvedBy           String?           @map("approved_by") @db.Uuid
+  approvedAt           DateTime?         @map("approved_at") @db.Timestamptz(6)
+  rejectedAt           DateTime?         @map("rejected_at") @db.Timestamptz(6)
+  rejectedBy           String?           @map("rejected_by") @db.Uuid
+  rejectReason         String?           @map("reject_reason")
   createdAt            DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
   payment_ref          String?           @db.VarChar(100)
   razorpay_order_id    String?           @db.VarChar(100)

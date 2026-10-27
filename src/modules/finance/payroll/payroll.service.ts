@@ -3,6 +3,8 @@ import { DataSource } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { PayrollService as CorePayrollService } from '../../payroll/payroll.service';
 import { PayoutService, type PayoutResult } from './payout.service';
+import { NotificationsService } from '../../notifications/notifications.service';
+import { assertReleased, monthLabel, RELEASE_GRACE_DAYS } from '../../../common/finance/payroll-release';
 
 interface PlacementRow {
   id: string;
@@ -59,6 +61,7 @@ export class FinancePayrollService {
     private readonly config: ConfigService,
     private readonly corePayroll: CorePayrollService,
     private readonly payouts: PayoutService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /** List all payroll records for a given month/year (placement EOR + HR employee payrolls) */
@@ -105,11 +108,18 @@ export class FinancePayrollService {
           pr.disbursed_at,
           pr.disbursement_ref,
           pr.client_invoice_id,
+          -- Which invoice it is on and whether its slip has been released, so
+          -- the list can say "waiting for invoice approval" and offer a re-run
+          -- only where one is allowed.
+          pr.released_at,
+          ci.invoice_number,
+          ci.status::text       AS invoice_status,
           pr.created_at,
           sa.full_name  AS staff_name,
           sa.staff_code AS staff_code
         FROM payroll_records pr
         JOIN staff_applicants sa ON sa.id = pr.staff_id
+        LEFT JOIN client_invoices ci ON ci.id = pr.client_invoice_id
         ${placementWhere ? `WHERE ${placementWhere}` : ''}
 
         UNION ALL
@@ -140,6 +150,9 @@ export class FinancePayrollService {
           ep.disbursed_at,
           NULL::text            AS disbursement_ref,
           NULL::uuid            AS client_invoice_id,
+          ep.created_at         AS released_at,
+          NULL::text            AS invoice_number,
+          NULL::text            AS invoice_status,
           ep.created_at,
           e.full_name           AS staff_name,
           e.employee_id         AS staff_code
@@ -736,6 +749,65 @@ export class FinancePayrollService {
     };
   }
 
+  /**
+   * Admin's way out when an invoice is stuck: release one payroll row as a
+   * payslip without an approved invoice. Finance gets RELEASE_GRACE_DAYS first,
+   * and the reason is kept on the row — this is the exception, and it is
+   * visible as one.
+   */
+  async releaseByAdmin(payrollId: string, reason: string, actorId?: string) {
+    const text = String(reason ?? '').trim();
+    if (text.length < 10) {
+      throw new BadRequestException('Write the reason for releasing this salary without an approved invoice (at least 10 characters).');
+    }
+    const rows = await this.dataSource.query<{
+      id: string; staff_id: string; period_month: number; period_year: number;
+      released_at: Date | null; created_at: Date; invoice_number: string | null;
+      invoice_status: string | null; invoice_created_at: Date | null; user_id: string | null;
+    }[]>(
+      `SELECT pr.id, pr.staff_id, pr.period_month, pr.period_year, pr.released_at, pr.created_at,
+              ci.invoice_number, ci.status AS invoice_status, ci.created_at AS invoice_created_at,
+              sa.user_id
+         FROM payroll_records pr
+         JOIN staff_applicants sa ON sa.id = pr.staff_id
+         LEFT JOIN client_invoices ci ON ci.id = pr.client_invoice_id
+        WHERE pr.id = $1`,
+      [payrollId],
+    );
+    const r = rows[0];
+    if (!r) throw new NotFoundException(`Payroll record ${payrollId} not found`);
+    if (r.released_at) throw new BadRequestException('This salary slip is already released.');
+
+    const waitingSince = new Date(r.invoice_created_at ?? r.created_at);
+    const openFrom = new Date(waitingSince.getTime() + RELEASE_GRACE_DAYS * 86_400_000);
+    if (Date.now() < openFrom.getTime()) {
+      throw new BadRequestException(
+        (r.invoice_number
+          ? `Invoice ${r.invoice_number} is waiting for Finance's approval. `
+          : 'This payroll is waiting for its invoice. ') +
+          `Finance has until ${openFrom.toISOString().slice(0, 10)} — release it by approving the invoice.`,
+      );
+    }
+
+    await this.dataSource.query(
+      `UPDATE payroll_records SET released_at = NOW(), released_by = $2, release_reason = $3 WHERE id = $1`,
+      [payrollId, actorId ?? null, `admin: ${text}`],
+    );
+    if (r.user_id) {
+      await this.notifications
+        .createInAppNotification(
+          'Salary slip ready',
+          `Your salary slip for ${monthLabel(r.period_month, r.period_year)} is ready. Open Salary in the app to see it.`,
+          r.user_id,
+        )
+        .catch(() => undefined);
+    }
+    this.logger.warn(
+      `[PAYROLL_RELEASED_BY_ADMIN] ${payrollId} (invoice ${r.invoice_number ?? 'none'} ${r.invoice_status ?? ''}) by ${actorId ?? 'unknown'}: ${text}`,
+    );
+    return { id: payrollId, released: true, release_reason: `admin: ${text}`, invoice_status: r.invoice_status };
+  }
+
   async approvePayrollRecord(payrollId: string, actorId?: string) {
     const rows = await this.dataSource.query<{ id: string; status: string; net_salary: string }[]>(
       `SELECT id, status, net_salary FROM payroll_records WHERE id = $1`, [payrollId],
@@ -748,13 +820,18 @@ export class FinancePayrollService {
         `Payroll ${payrollId} is ${current}; only a PENDING record can be approved.`,
       );
     }
+    // Not before Finance has approved the invoice it is on — see payroll-release.ts.
+    await assertReleased(this.dataSource, payrollId);
 
-    const [updated] = await this.dataSource.query<Record<string, unknown>[]>(
+    const res = await this.dataSource.query(
       `UPDATE payroll_records
        SET status = 'APPROVED', approved_by = $1, approved_at = NOW(), locked_at = NOW()
        WHERE id = $2 RETURNING *`,
       [actorId ?? null, payrollId],
     );
+    // TypeORM hands back `[rows, affectedCount]` for UPDATE ... RETURNING, so
+    // this used to return the array of rows, not the record.
+    const updated = (Array.isArray(res[0]) ? res[0][0] : res[0]) as Record<string, unknown>;
     this.logger.log(`[PAYROLL_APPROVE] ${payrollId} approved by ${actorId ?? 'unknown'}`);
     return updated;
   }
@@ -817,6 +894,9 @@ export class FinancePayrollService {
         `Payroll ${payrollId} is ${record.status ?? 'PENDING'}. Approve it before disbursing.`,
       );
     }
+
+    // ── Approval gate: nothing is paid off an invoice nobody has approved ────
+    if (!isEmployee) await assertReleased(this.dataSource, payrollId);
 
     // ── F-09: refuse rather than pay into nowhere ────────────────────────────
     if (!isEmployee && !record.account_number) {

@@ -122,9 +122,9 @@ async function main() {
       await db.query(`DELETE FROM finance_customers WHERE unit_code = $1`, [code]);
       const c = await db.query(
         `INSERT INTO finance_customers
-           (id, customer_name, unit_code, unit_name, address, pan_card, bill_no_prefix,
+           (id, customer_name, unit_code, unit_name, address, city, state, pan_card, bill_no_prefix,
             status, created_at, updated_at)
-         VALUES (gen_random_uuid(), $1, $2, $1, 'Somewhere', 'AAAPL8888C', $2,
+         VALUES (gen_random_uuid(), $1, $2, $1, 'Somewhere', 'New Delhi', 'Delhi', 'AAAPL8888C', $2,
                  'ACTIVE', now(), now()) RETURNING id`,
         [name, code],
       );
@@ -185,6 +185,20 @@ async function main() {
       [made.staffId, TEST_MONTH, TEST_YEAR],
     );
     check('two payroll rows exist, one per house', stored.rows.length === 2, stored.rows.length);
+
+    // A slip is issued when Finance approves the client's invoice (approval
+    // gate), so raise and approve both houses' invoices first.
+    for (const customerId of made.customerIds) {
+      const raised = await req('POST', '/finance/invoices/consolidated/generate', {
+        token: financeToken, body: { customer_id: customerId, month: TEST_MONTH, year: TEST_YEAR },
+      });
+      const invoiceId = (raised.body?.invoice ?? raised.body)?.id;
+      const approved = invoiceId
+        ? await req('POST', `/finance/invoices/${invoiceId}/approve`, { token: financeToken })
+        : raised;
+      check('house invoice raised and approved',
+        approved.status === 200 || approved.status === 201, { status: approved.status, body: approved.body });
+    }
 
     // ── the slip ──────────────────────────────────────────────────────────
     const slips = await req('GET', `/employees/${made.employeeId}/payslips`, { token });

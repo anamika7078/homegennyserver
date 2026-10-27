@@ -7,6 +7,11 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { computeWageBreakup, WageConfigInput } from './wage-calculator.util';
 import { StaffRequestsService } from '../staff-requests/staff-requests.service';
 import { effectiveRateBasis } from '../../common/finance/duty-billing.util';
+import { InvoiceCorrectionService } from '../finance/invoice/invoice-correction.service';
+import {
+  activeChanges, changedFields, currentRates, firstUnbilledDay, rateOn,
+} from '../../common/finance/rate-history';
+import { isoDate } from '../../common/finance/period.util';
 
 // Spec (HomeGenny_StageDescriptions, S5 Trial Period): Maid/UC/DR = 7-day
 // trial, SC = 14-day trial. create() used to default every series to 14 days
@@ -57,6 +62,8 @@ export interface PlacementRow {
   esic_applicable?: boolean;
   pf_applicable?: boolean;
   covers_placement_id?: string | null;
+  /** Set after Finance rejects an invoice built on this placement; the client is not invoiced until cleared. */
+  rate_review?: { status: 'REVIEW_NEEDED'; reason: string | null; at: Date | null; invoice_id: string | null } | null;
   trial_start_date: Date | string | null;
   trial_end_date: Date | string | null;
   staff_code?: string;
@@ -73,7 +80,99 @@ export class PlacementService {
     private readonly audit: AuditService,
     private readonly events: EventEmitter2,
     private readonly staffRequests: StaffRequestsService,
+    private readonly correction: InvoiceCorrectionService,
   ) {}
+
+  /** Prisma as a positional-parameter SQL runner, for the shared finance helpers. */
+  private get sql() {
+    return { query: (q: string, params: unknown[] = []) => this.prisma.$queryRawUnsafe(q, ...params) };
+  }
+
+  /**
+   * Things worth a second look before money is billed on this placement —
+   * not refusals, the RM decides:
+   *  - no margin (the client pays exactly what the staff is paid);
+   *  - a rate far from what comparable placements carry (an extra zero);
+   *  - a placement that does not match the client's request (24×7 asked,
+   *    monthly placed; different hours; permanent vs temporary).
+   */
+  async rateWarnings(placementId: string): Promise<string[]> {
+    const p = await this.prisma.placement.findUnique({ where: { id: placementId } });
+    if (!p) return [];
+    const warnings: string[] = [];
+    const basis = effectiveRateBasis(p.placementType, p.rateBasis);
+    const num = (v: unknown) => (v == null ? null : Number(v));
+    const inr = (v: number) => `₹${v.toLocaleString('en-IN')}`;
+
+    if (basis === 'PER_DUTY' && num(p.dutyRate) != null && num(p.dutyRate) === num(p.dutyBillingRate)) {
+      warnings.push('Client billing equals staff pay — nothing is left for ESIC/PF or the fee.');
+    }
+    if (basis === 'HOURLY' && !((num(p.hourlyFee) ?? 0) > 0)) {
+      warnings.push('No hourly fee — HomeGenny earns nothing on these hours.');
+    }
+    if (basis === 'MONTHLY' && !((num(p.managementFee) ?? 0) > 0)) {
+      warnings.push('No management fee — HomeGenny earns nothing on this placement.');
+    }
+
+    // Compared with other live placements priced the same way (needs a few to compare with).
+    const field = basis === 'PER_DUTY' ? 'duty_rate' : basis === 'HOURLY' ? 'hourly_rate' : 'staff_salary';
+    const value = basis === 'PER_DUTY' ? num(p.dutyRate) : basis === 'HOURLY' ? num(p.hourlyRate) : num(p.staffSalary);
+    if (value && value > 0) {
+      const [m] = await this.prisma.$queryRawUnsafe<{ n: number; median: number | null }[]>(
+        `SELECT COUNT(*)::int AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY ${field})::float AS median
+           FROM placements
+          WHERE id <> $1::uuid AND status IN ('TRIAL','CONFIRMED') AND placement_type = $2 AND ${field} > 0
+            AND COALESCE(rate_basis, CASE WHEN placement_type = 'TEMPORARY' THEN 'HOURLY' ELSE 'MONTHLY' END) = $3`,
+        p.id, p.placementType, basis,
+      );
+      if (m && m.n >= 5 && m.median) {
+        const ratio = value / m.median;
+        if (ratio >= 3 || ratio <= 1 / 3) {
+          const unit = basis === 'PER_DUTY' ? '/duty' : basis === 'HOURLY' ? '/hour' : '/month';
+          const how = ratio >= 1 ? `${Math.round(ratio)}× more than` : `${Math.round(1 / ratio)}× less than`;
+          warnings.push(`${inr(value)}${unit} is ${how} the usual ${inr(Math.round(m.median))}${unit} — check for a typo.`);
+        }
+      }
+    }
+
+    const requestId = ((p.metadata as Record<string, unknown> | null) ?? {}).staff_request_id as string | undefined;
+    if (requestId) {
+      const req = await this.prisma.staffRequest.findUnique({ where: { id: requestId } });
+      if (req) {
+        const asked = Number(req.shiftHours ?? 0);
+        const placedHours = Number(p.shiftHours ?? 0);
+        if (asked >= 24 && basis !== 'PER_DUTY') {
+          warnings.push(`The client asked for 24×7 live-in (${req.requestNo}), but this placement is ${basis.toLowerCase()}.`);
+        } else if (asked > 0 && asked < 24 && placedHours >= 24) {
+          warnings.push(`The client asked for ${asked} hours a day (${req.requestNo}), but this placement is a 24-hour duty.`);
+        } else if (asked > 0 && placedHours > 0 && asked !== placedHours) {
+          warnings.push(`The client asked for ${asked} hours a day (${req.requestNo}); this placement is ${placedHours}.`);
+        }
+        if (req.placementType && req.placementType !== p.placementType) {
+          warnings.push(
+            `The client asked for a ${req.placementType.toLowerCase()} placement (${req.requestNo}); ` +
+              `this one is ${p.placementType.toLowerCase()}.`,
+          );
+        }
+      }
+    }
+    return warnings;
+  }
+
+  /** Every rate change on the placement, and the day a new change would apply from by default. */
+  async rateHistory(placementId: string) {
+    const p = await this.prisma.placement.findUnique({ where: { id: placementId }, select: { id: true } });
+    if (!p) throw new NotFoundException('Placement not found');
+    const changes = await this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
+      `SELECT c.id, c.effective_from::text AS effective_from, c.before, c.after, c.reason, c.source,
+              c.changed_at, u.full_name AS changed_by_name, c.superseded_at
+         FROM placement_rate_changes c LEFT JOIN users u ON u.id = c.changed_by
+        WHERE c.placement_id = $1::uuid
+        ORDER BY c.changed_at DESC`,
+      placementId,
+    );
+    return { next_unbilled_day: await firstUnbilledDay(this.sql, placementId), changes };
+  }
 
   private mapRow(p: {
     id: string;
@@ -93,6 +192,10 @@ export class PlacementService {
     esicApplicable?: boolean | null;
     pfApplicable?: boolean | null;
     coversPlacementId?: string | null;
+    rateReviewStatus?: string | null;
+    rateReviewReason?: string | null;
+    rateReviewAt?: Date | null;
+    rateReviewInvoiceId?: string | null;
     trialStartDate: Date | null;
     trialEndDate: Date | null;
     metadata?: unknown;
@@ -121,6 +224,14 @@ export class PlacementService {
       esic_applicable: p.esicApplicable !== false,
       pf_applicable: p.pfApplicable !== false,
       covers_placement_id: p.coversPlacementId ?? null,
+      rate_review: p.rateReviewStatus === 'REVIEW_NEEDED'
+        ? {
+            status: 'REVIEW_NEEDED',
+            reason: p.rateReviewReason ?? null,
+            at: p.rateReviewAt ?? null,
+            invoice_id: p.rateReviewInvoiceId ?? null,
+          }
+        : null,
       trial_start_date: p.trialStartDate,
       trial_end_date: p.trialEndDate,
       wage_config: metadata.wage_config ?? null,
@@ -475,7 +586,7 @@ export class PlacementService {
     });
 
     const [staffMeta, client] = await Promise.all([this.getStaffMeta(row.staffId), this.getClientMeta(row.clientId)]);
-    return this.mapRow(row, staffMeta, client);
+    return { ...this.mapRow(row, staffMeta, client), warnings: await this.rateWarnings(row.id) };
   }
 
   /**
@@ -492,11 +603,47 @@ export class PlacementService {
       staff_salary?: unknown; management_fee?: unknown; wage_config?: unknown; shift_start?: unknown;
       shift_hours?: unknown; rate_basis?: unknown; duty_rate?: unknown; duty_billing_rate?: unknown;
       esic_applicable?: unknown; pf_applicable?: unknown; covers_placement_id?: unknown;
+      hourly_rate?: unknown; hourly_fee?: unknown; effective_from?: unknown; reason?: unknown;
     },
     actorId?: string,
   ) {
     const existing = await this.prisma.placement.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Placement not found');
+
+    // Hourly price, editable now (it could only be set at creation).
+    let hourlyRate: number | undefined;
+    let hourlyFee: number | undefined;
+    if (data.hourly_rate !== undefined && data.hourly_rate !== null && data.hourly_rate !== '') {
+      hourlyRate = Number(data.hourly_rate);
+      if (!(hourlyRate > 0)) throw new BadRequestException('hourly_rate must be more than 0.');
+    }
+    if (data.hourly_fee !== undefined && data.hourly_fee !== null && data.hourly_fee !== '') {
+      hourlyFee = Number(data.hourly_fee);
+      if (!(hourlyFee >= 0)) throw new BadRequestException('hourly_fee cannot be negative.');
+    }
+
+    // A change to what is paid or billed is a dated change: it applies from
+    // effective_from (default: the first day no payroll covers yet). Reaching
+    // back over payroll already run re-runs it — refused if that payroll is
+    // already past Finance. Checked before anything is written.
+    const rateKeys = ['staff_salary', 'management_fee', 'wage_config', 'rate_basis', 'duty_rate', 'duty_billing_rate',
+      'hourly_rate', 'hourly_fee', 'esic_applicable', 'pf_applicable'];
+    const touchesRates = rateKeys.some((k) => (data as Record<string, unknown>)[k] !== undefined);
+    let effectiveFrom: string | null = null;
+    let impact: Awaited<ReturnType<InvoiceCorrectionService['rateChangeImpact']>> = Object.assign([], { invoicesToCorrect: [] as string[] });
+    const rateBefore = touchesRates ? await currentRates(this.sql, id) : null;
+    if (touchesRates) {
+      if (data.effective_from !== undefined && data.effective_from !== null && data.effective_from !== '') {
+        const d = String(data.effective_from);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || isNaN(Date.parse(`${d}T00:00:00Z`))) {
+          throw new BadRequestException('effective_from must be a date (YYYY-MM-DD).');
+        }
+        effectiveFrom = d;
+      } else {
+        effectiveFrom = await firstUnbilledDay(this.sql, id);
+      }
+      impact = await this.correction.rateChangeImpact(id, effectiveFrom);
+    }
 
     const wageTerms = this.resolveWageTerms(data);
     const dutyTerms = await this.resolveDutyTerms(data as Record<string, unknown>, {
@@ -535,10 +682,20 @@ export class PlacementService {
     // '' or null clears it (no start time → never late); absent leaves it alone.
     const shiftStart = data.shift_start === undefined ? undefined : parseShiftStart(data.shift_start) ?? null;
     const existingMetadata = (existing.metadata as Record<string, unknown> | null) ?? {};
+    // A rate sent after Finance rejected an invoice is the RM's answer to the
+    // review: the client can be invoiced again (at the new rate).
+    const ratesSent = ['staff_salary', 'management_fee', 'wage_config', 'rate_basis', 'duty_rate', 'duty_billing_rate']
+      .some((k) => (data as Record<string, unknown>)[k] !== undefined);
+    const clearsReview = ratesSent && existing.rateReviewStatus === 'REVIEW_NEEDED';
 
     const row = await this.prisma.placement.update({
       where: { id },
       data: {
+        ...(clearsReview
+          ? { rateReviewStatus: null, rateReviewReason: null, rateReviewAt: null, rateReviewInvoiceId: null, rateReviewBy: null }
+          : {}),
+        ...(hourlyRate !== undefined ? { hourlyRate } : {}),
+        ...(hourlyFee !== undefined ? { hourlyFee } : {}),
         ...(wageTerms.staffSalary != null ? { staffSalary: wageTerms.staffSalary } : {}),
         ...(wageTerms.managementFee != null ? { managementFee: wageTerms.managementFee } : {}),
         ...(shiftStart !== undefined ? { shiftStart } : {}),
@@ -557,15 +714,145 @@ export class PlacementService {
       entityId: row.id,
       metadata: {
         action: 'terms_updated', staff_salary: wageTerms.staffSalary, management_fee: wageTerms.managementFee,
+        ...(clearsReview ? { rate_review_cleared: true, rejected_for: existing.rateReviewReason } : {}),
+        before: {
+          staff_salary: existing.staffSalary != null ? Number(existing.staffSalary) : null,
+          management_fee: existing.managementFee != null ? Number(existing.managementFee) : null,
+          duty_rate: existing.dutyRate != null ? Number(existing.dutyRate) : null,
+          duty_billing_rate: existing.dutyBillingRate != null ? Number(existing.dutyBillingRate) : null,
+          rate_basis: existing.rateBasis,
+        },
         via_wage_config: !!data.wage_config,
         ...(shiftStart !== undefined ? { shift_start: shiftStart } : {}),
         ...(shiftHours !== undefined ? { shift_hours: shiftHours } : {}),
         ...dutyTerms,
       },
     });
+    if (clearsReview) await this.tellFinanceRateAnswered(existing, 'corrected the rate');
+
+    // Record the change on the timeline, and re-run what it reaches back over.
+    let rateChange: {
+      effective_from: string; fields: string[]; rebuilt: { invoice_number: string | null; period: string; error?: string }[];
+      /** Sent invoices covering days the change reaches: Finance corrects them (credit note / supplementary / arrears). */
+      invoices_to_correct: string[];
+    } | null = null;
+    if (touchesRates && rateBefore && effectiveFrom) {
+      const rateAfter = await currentRates(this.sql, id);
+      const fields = rateAfter ? changedFields(rateBefore, rateAfter) : [];
+      if (rateAfter && fields.length) {
+        // "Before" is what applied on the day before the change — the original
+        // rate when there is no history yet.
+        const timeline = await activeChanges(this.sql, id);
+        const dayBefore = isoDate(new Date(Date.parse(`${effectiveFrom}T00:00:00Z`) - 86_400_000))!;
+        const before = rateOn(timeline, dayBefore) ?? rateBefore;
+        const reason = data.reason ? String(data.reason).trim() || null : null;
+        const from = effectiveFrom;
+        await this.prisma.$transaction(async (tx) => {
+          const [created] = await tx.$queryRawUnsafe<{ id: string }[]>(
+            `INSERT INTO placement_rate_changes (placement_id, effective_from, before, after, reason, source, changed_by)
+             VALUES ($1::uuid, $2::date, $3::jsonb, $4::jsonb, $5, $6, $7::uuid) RETURNING id`,
+            id, from, JSON.stringify(before), JSON.stringify(rateAfter), reason,
+            clearsReview ? 'REVIEW_FIX' : 'TERMS_EDIT', actorId ?? null,
+          );
+          // A later edit reaching back supersedes the changes it overlaps, so
+          // the active rows stay one timeline.
+          await tx.$executeRawUnsafe(
+            `UPDATE placement_rate_changes SET superseded_at = NOW(), superseded_by = $3::uuid
+              WHERE placement_id = $1::uuid AND superseded_at IS NULL AND effective_from >= $2::date AND id <> $3::uuid`,
+            id, from, created.id,
+          );
+          // rate_verified_at is left as it is: it says when Finance last
+          // approved an invoice on this placement, and every change made after
+          // it is what the next invoice shows Finance as new.
+        });
+        const rebuilt = await this.correction.reapplyAfterRateChange(
+          id, impact, `rate change from ${from}${reason ? `: ${reason}` : ''}`, actorId,
+        );
+        rateChange = { effective_from: from, fields, rebuilt, invoices_to_correct: impact.invoicesToCorrect };
+      }
+    }
 
     const [staff, client] = await Promise.all([this.getStaffMeta(row.staffId), this.getClientMeta(row.clientId)]);
+    const fresh = await this.prisma.placement.findUnique({ where: { id } });
+    return {
+      ...this.mapRow(fresh ?? row, staff, client),
+      rate_change: rateChange,
+      warnings: await this.rateWarnings(id),
+    };
+  }
+
+  /**
+   * The RM's answer to a rejected invoice when the rate was right after all
+   * (the rejection was about something else, or the figure was checked and
+   * stands). Clears the review so the client can be invoiced again, and keeps
+   * the RM's note on the audit trail.
+   */
+  async confirmRateReview(id: string, note: unknown, actorId?: string) {
+    const existing = await this.prisma.placement.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Placement not found');
+    if (existing.rateReviewStatus !== 'REVIEW_NEEDED') {
+      throw new BadRequestException('This placement is not waiting for a rate review.');
+    }
+    const text = String(note ?? '').trim();
+    if (text.length < 10) {
+      throw new BadRequestException('Say why the rate stands (at least 10 characters) — Finance rejected the last invoice.');
+    }
+    const row = await this.prisma.placement.update({
+      where: { id },
+      data: { rateReviewStatus: null, rateReviewReason: null, rateReviewAt: null, rateReviewInvoiceId: null, rateReviewBy: null },
+    });
+    await this.audit.log({
+      actorId,
+      action: AuditAction.DEPLOYMENT_ACTION,
+      entityType: 'placement',
+      entityId: id,
+      metadata: {
+        action: 'rate_review_confirmed', note: text, rejected_for: existing.rateReviewReason,
+        invoice_id: existing.rateReviewInvoiceId,
+      },
+    });
+    await this.tellFinanceRateAnswered(existing, `confirmed the rate stands: "${text}"`);
+    const [staff, client] = await Promise.all([this.getStaffMeta(row.staffId), this.getClientMeta(row.clientId)]);
     return this.mapRow(row, staff, client);
+  }
+
+  /**
+   * The RM has answered a rejection — corrected the rate or confirmed it. The
+   * Finance user who rejected the invoice is told, and once no placement of
+   * that client is still under review, that the invoice can be raised again
+   * (it shows under "Ready to re-invoice").
+   */
+  private async tellFinanceRateAnswered(
+    placement: { id: string; clientId: string; staffId: string; rateReviewInvoiceId: string | null },
+    what: string,
+  ) {
+    if (!placement.rateReviewInvoiceId) return;
+    const [inv] = await this.prisma.$queryRawUnsafe<{ invoice_number: string; rejected_by: string | null; customer_name: string | null }[]>(
+      `SELECT ci.invoice_number, ci.rejected_by, fc.customer_name
+         FROM client_invoices ci LEFT JOIN finance_customers fc ON fc.id = ci.client_id
+        WHERE ci.id = $1::uuid`,
+      placement.rateReviewInvoiceId,
+    );
+    if (!inv?.rejected_by) return;
+    const [staff, open] = await Promise.all([
+      this.prisma.staffApplicant.findUnique({ where: { id: placement.staffId }, select: { fullName: true } }),
+      this.prisma.placement.count({ where: { clientId: placement.clientId, rateReviewStatus: 'REVIEW_NEEDED' } }),
+    ]);
+    await this.prisma.notification.create({
+      data: {
+        userId: inv.rejected_by,
+        title: open ? 'RM answered a rejected invoice' : 'Ready to re-invoice',
+        body:
+          `The RM ${what} for ${staff?.fullName ?? 'a staff member'} (invoice ${inv.invoice_number}, ` +
+          `${inv.customer_name ?? 'client'}). ` +
+          (open
+            ? `${open} more placement(s) of this client are still waiting for the RM.`
+            : `Nothing is waiting any more — raise the invoice again from Finance → Invoices → Ready to re-invoice.`),
+        channel: 'IN_APP',
+        status: 'SENT',
+        sentAt: new Date(),
+      },
+    }).catch(() => undefined);
   }
 
   /**

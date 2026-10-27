@@ -6,6 +6,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PayrollService } from '../payroll/payroll.service';
 import { ConsolidatedInvoiceService } from '../finance/invoice/consolidated-invoice.service';
+import { FinanceOversightService } from '../finance/invoice/finance-oversight.service';
 
 @Injectable()
 export class EnterpriseCronService {
@@ -18,6 +19,7 @@ export class EnterpriseCronService {
     private readonly notifications: NotificationsService,
     private readonly payroll: PayrollService,
     private readonly consolidatedInvoices: ConsolidatedInvoiceService,
+    private readonly oversight: FinanceOversightService,
   ) {}
 
   /**
@@ -109,6 +111,16 @@ export class EnterpriseCronService {
         skipped: r.skipped.length,
       });
     }
+  }
+
+  /**
+   * The morning note on what is stuck: draft invoices holding salary, slips
+   * held past the grace period, rate reviews waiting on RMs, sent invoices to
+   * correct, arrears waiting. Finance gets the counts; each RM their reviews.
+   */
+  @Cron('30 9 * * *', { timeZone: 'Asia/Kolkata' })
+  async financeAttention() {
+    await this.oversight.notifyDaily().catch((e: Error) => this.logger.warn(`[FINANCE_ATTENTION] ${e.message}`));
   }
 
   @Cron(CronExpression.EVERY_DAY_AT_6AM)

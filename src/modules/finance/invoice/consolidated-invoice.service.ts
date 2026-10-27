@@ -7,6 +7,7 @@ import { assertTransition } from '../../../common/finance/invoice-status';
 import {
   cycleEndsOn, formatPeriod, isoDate, monthBounds, nextDay, type Period,
 } from '../../../common/finance/period.util';
+import { releaseInvoicePayroll } from '../../../common/finance/payroll-release';
 import { PayrollService } from '../../payroll/payroll.service';
 
 interface PayrollLine {
@@ -363,6 +364,34 @@ export class ConsolidatedInvoiceService {
    * asked for — e.g. the whole month was run, and now an invoice up to the 7th
    * is wanted. Billing it would put the 8th–31st on an invoice that says 1–7.
    */
+  /**
+   * Refuses while any of the client's placements is waiting for its RM after
+   * Finance rejected an invoice built on it. Billing again before the rate is
+   * looked at would only produce the same rejected invoice.
+   */
+  private async assertNoRateReview(customerId: string) {
+    const rows = await this.dataSource.query<{
+      staff_name: string; rate_review_reason: string | null; invoice_number: string | null;
+    }[]>(
+      `SELECT sa.full_name AS staff_name, p.rate_review_reason, ci.invoice_number
+         FROM placements p
+         JOIN staff_applicants sa ON sa.id = p.staff_id
+         LEFT JOIN client_invoices ci ON ci.id = p.rate_review_invoice_id
+        WHERE p.client_id = $1 AND p.rate_review_status = 'REVIEW_NEEDED'
+        ORDER BY sa.full_name`,
+      [customerId],
+    );
+    if (!rows.length) return;
+    const who = rows.map((r) => r.staff_name).join(', ');
+    const first = rows[0];
+    throw new BadRequestException(
+      `Waiting for the RM to check the rate for ${who}` +
+        (first.invoice_number ? ` — invoice ${first.invoice_number} was rejected` : '') +
+        (first.rate_review_reason ? `: "${first.rate_review_reason}"` : '') +
+        `. The RM corrects or confirms the rate on the placement, then this client can be invoiced.`,
+    );
+  }
+
   private async assertNoStraddle(customerId: string, month: number, year: number, to: string) {
     const rows = await this.dataSource.query<{ staff_name: string; period_from: unknown; period_to: unknown }[]>(
       `SELECT sa.full_name AS staff_name, pr.period_from, pr.period_to
@@ -411,6 +440,7 @@ export class ConsolidatedInvoiceService {
     }
     const period: Period = { from, to };
 
+    await this.assertNoRateReview(customerId);
     const payrollSkipped = await this.runClientPayroll(customerId, month, year, to);
     await this.assertNoStraddle(customerId, month, year, to);
 
@@ -607,6 +637,7 @@ export class ConsolidatedInvoiceService {
     customerId: string, month: number, year: number, actorId?: string,
   ) {
     const period: Period = { from: inv.period_from, to: inv.period_to };
+    await this.assertNoRateReview(customerId);
     const payrollSkipped = await this.runClientPayroll(customerId, month, year, period.to);
     await this.assertNoStraddle(customerId, month, year, period.to);
 
@@ -726,6 +757,8 @@ export class ConsolidatedInvoiceService {
         // It was approved before; only the figures were refreshed, so put the
         // approval back rather than make Finance approve it twice.
         await this.dataSource.query(`UPDATE client_invoices SET status = 'APPROVED' WHERE id = $1`, [inv.id]);
+        // Anyone folded in by the refresh is on an approved invoice now.
+        await releaseInvoicePayroll(this.dataSource, inv.id, actorId);
       }
       this.logger.log(
         `[CONSOLIDATED_INVOICE] recalculated ${inv.invoice_number} — ` +

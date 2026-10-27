@@ -186,7 +186,9 @@ function todayUtc() {
       if (staffToken) {
         const ci = await req('POST', '/staff/attendance/check-in', {
           token: staffToken,
-          body: { latitude: 28.6139, longitude: 77.209 },
+          // Named explicitly: the candidate picked may already work at another
+          // house, and then the app has to say which one this check-in is for.
+          body: { latitude: 28.6139, longitude: 77.209, placement_id: placementId },
         });
         check('POST /staff/attendance/check-in succeeds', [200, 201].includes(ci.status), ci.rawBody);
         usedRealEndpoint = [200, 201].includes(ci.status);

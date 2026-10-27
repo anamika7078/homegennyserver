@@ -134,6 +134,30 @@ export class PlacementController {
     });
   }
 
+  @Get(':id/rate-history')
+  @ApiOperation({
+    summary: 'Every rate change on this placement, and the default date a new change applies from',
+    description:
+      'changes: newest first — effective_from, before/after rates, reason, who (changed_by_name), and ' +
+      'superseded_at when a later edit reaching further back replaced it. next_unbilled_day: the first ' +
+      'day no payroll covers yet — what PATCH :id/terms uses when effective_from is not sent.',
+  })
+  rateHistory(@Param('id') id: string) {
+    return this.service.rateHistory(id);
+  }
+
+  @Post(':id/rate-review/confirm')
+  @ApiOperation({
+    summary: 'RM: the rate is right — clear the review after Finance rejected an invoice',
+    description:
+      'Use when the rate on the placement stands (correcting it via PATCH :id/terms clears the review ' +
+      'too). Body { note } — why it stands, min 10 characters; kept on the audit trail. The client can ' +
+      'be invoiced again once no placement of theirs is under review.',
+  })
+  confirmRateReview(@Req() req: { user: { id: string } }, @Param('id') id: string, @Body() body: { note?: string }) {
+    return this.service.confirmRateReview(id, body?.note, req.user.id);
+  }
+
   @Patch(':id/terms')
   @ApiOperation({
     summary: 'Set/update staff_salary and management_fee on a placement',
@@ -158,6 +182,16 @@ export class PlacementController {
         esic_applicable: { type: 'boolean', description: 'false = no ESIC for this placement' },
         pf_applicable: { type: 'boolean', description: 'false = no PF for this placement' },
         covers_placement_id: { type: 'string', description: 'Relief placement: the post (placement at the same client) it covers' },
+        hourly_rate: { type: 'number', example: 150, description: 'HOURLY: what the staff earns per hour' },
+        hourly_fee: { type: 'number', example: 30, description: 'HOURLY: HomeGenny fee per hour' },
+        effective_from: {
+          type: 'string', example: '2026-10-15',
+          description:
+            'YYYY-MM-DD the new rates apply from. Default: the first day no payroll covers yet. Earlier ' +
+            'than that re-runs the payroll it reaches (draft invoices rebuilt, same number); refused if ' +
+            'that payroll is on an approved/sent invoice or already released.',
+        },
+        reason: { type: 'string', example: 'Increment agreed with the client', description: 'Kept on the rate history' },
       },
     },
   })
@@ -168,8 +202,9 @@ export class PlacementController {
       staff_salary?: number; management_fee?: number; wage_config?: WageConfigInput; shift_start?: string;
       shift_hours?: number; rate_basis?: string | null; duty_rate?: number | null; duty_billing_rate?: number | null;
       esic_applicable?: boolean; pf_applicable?: boolean; covers_placement_id?: string | null;
+      hourly_rate?: number; hourly_fee?: number; effective_from?: string; reason?: string;
     },
-  ): Promise<PlacementRow> {
+  ): Promise<PlacementRow & { warnings: string[] }> {
     return this.service.updateTerms(id, body, req.user.id);
   }
 

@@ -296,7 +296,11 @@ async function ensurePlacementFor(db, staffId, label = 'Fixture') {
  * a restore function — call it in `finally`, or the database is left claiming
  * a registration HomeGenny does not have.
  */
-async function withSupplierRegistered(db, { state = 'Delhi', gstin = '07AABCH1234A1Z8', sacCode = '998513' } = {}) {
+// The supplier's state is read from its GSTIN (the first two digits are the
+// state code), so a fixture that says Haryana must carry a Haryana GSTIN.
+const FIXTURE_GSTIN_PREFIX = { Delhi: '07', Haryana: '06', Maharashtra: '27', Karnataka: '29', Uttarakhand: '05' };
+async function withSupplierRegistered(db, { state = 'Delhi', gstin, sacCode = '998513' } = {}) {
+  gstin = gstin ?? `${FIXTURE_GSTIN_PREFIX[state] ?? '07'}AABCH1234A1Z8`;
   assertSafeTarget(db.connectionParameters?.connectionString || process.env.DATABASE_URL || '');
   const before = (await db.query(
     `SELECT key, value FROM system_settings WHERE key LIKE 'finance.%'`)).rows;

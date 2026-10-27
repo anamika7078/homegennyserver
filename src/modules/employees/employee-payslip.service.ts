@@ -23,6 +23,8 @@ export interface UnifiedPayslip {
   totalDeductions: number;
   netSalary: number;
   deductionBreakdown: Record<string, number>;
+  /** Arrears from a corrected earlier invoice, paid with this month (included in netSalary). */
+  arrears?: number;
   status: string;
   payslipNumber: string | null;
   storedPdfUrl: string | null;
@@ -107,7 +109,7 @@ export class EmployeePayslipService {
       id: string; periodMonth: number; periodYear: number; shiftDays: number | null;
       grossSalary: unknown; netSalary: unknown; esicEmployee: unknown; pfEmployee: unknown;
       disbursedAt: Date | null; createdAt: Date | null; placementId: string | null;
-      placementType?: string | null; hoursWorked?: unknown;
+      placementType?: string | null; hoursWorked?: unknown; arrears?: unknown;
     }[],
   ): Promise<UnifiedPayslip[]> {
     if (!rows.length) return [];
@@ -155,6 +157,8 @@ export class EmployeePayslipService {
         totalDeductions: round2(esic + pf),
         netSalary: round2(group.reduce((s, r) => s + num(r.netSalary), 0)),
         deductionBreakdown: { esic: round2(esic), pf: round2(pf) },
+        // Arrears from a corrected earlier invoice — part of the net, shown as its own line.
+        arrears: round2(group.reduce((s, r) => s + num(r.arrears), 0)),
         // payroll_records carries no status column — disbursement is the only
         // state it records, so derive rather than invent one. Not paid until
         // every client's share is.
@@ -206,9 +210,11 @@ export class EmployeePayslipService {
       // `payroll_entries`, a table nothing in the codebase has ever written —
       // so a deployed staff member's payslip could never appear here no matter
       // how correctly their payroll ran. See F-04 in FINANCE_MODULE_AUDIT.md.
+      // Released rows only: a row on a DRAFT invoice is not a payslip yet —
+      // Finance has not accepted its rate. See common/finance/payroll-release.ts.
       employee.staffApplicantId
         ? this.prisma.payrollRecord.findMany({
-            where: { staffId: employee.staffApplicantId },
+            where: { staffId: employee.staffApplicantId, releasedAt: { not: null } },
             orderBy: [{ periodYear: 'desc' }, { periodMonth: 'desc' }],
           })
         : Promise.resolve([]),
@@ -366,6 +372,9 @@ export class EmployeePayslipService {
         // Null when payroll ran but the client's invoice could not be touched
         // — an already-sent invoice, for instance.
         invoiced: group.every((r) => Boolean(r.client_invoice_id)),
+        // HR sees the whole month, but a slip is issued only once Finance has
+        // approved the invoice. False = the staff member cannot see it yet.
+        released: group.every((r) => Boolean(r.releasedAt)),
         /** Which houses this month's pay came from, when it came from several. */
         clients: group.length > 1
           ? group.map((r) => ({
@@ -378,6 +387,7 @@ export class EmployeePayslipService {
                   : `${r.shiftDays ?? 0} days`,
               grossSalary: round2(Number(r.grossSalary ?? 0)),
               invoiced: Boolean(r.client_invoice_id),
+              released: Boolean(r.releasedAt),
             }))
           : undefined,
       };
@@ -587,11 +597,22 @@ export class EmployeePayslipService {
       doc.moveDown(0.6);
       rule(0.5, '#666');
 
+      // Arrears from a corrected earlier invoice are paid with this month but
+      // are not this month's wages, so they sit between the register and the net.
+      const arrears = slip.arrears ?? 0;
+      if (arrears > 0) {
+        y = doc.y;
+        doc.font('Helvetica').fontSize(8).fillColor('#000')
+          .text('ARREARS (correction of an earlier invoice)', left, y, { width: width * 0.6 });
+        doc.text(inr(arrears), left + width * 0.6, y, { width: width * 0.4, align: 'right' });
+        doc.y = y + 14;
+      }
+
       // ── net, and somewhere to sign ───────────────────────────────────────
       y = doc.y;
       doc.font('Helvetica-Bold').fontSize(9).fillColor('#000')
         .text('NET SALARY PAYABLE', left, y, { width: width * 0.6 });
-      doc.fontSize(11).text(inr(reg.netPayable), left + width * 0.6, y - 2,
+      doc.fontSize(11).text(inr(round2(reg.netPayable + arrears)), left + width * 0.6, y - 2,
         { width: width * 0.4, align: 'right' });
       doc.y = y + 18;
       rule(1.2);

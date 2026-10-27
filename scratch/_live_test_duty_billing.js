@@ -303,7 +303,11 @@ async function main() {
       round2(nc?.clientTotalCharge - nc?.gstOnFee) === 5510 && nc?.managementFee === 190, nc);
 
     // A billing rate that cannot cover pay + PF is refused, not billed at a loss.
-    r = await req('PATCH', `/placements/${kiran}/terms`, { token: rm, body: { duty_billing_rate: 520 } });
+    // Back-dated to the 1st so November is re-priced; the re-run it triggers
+    // cannot go through, and says so rather than failing the rate change.
+    r = await req('PATCH', `/placements/${kiran}/terms`, { token: rm, body: { duty_billing_rate: 520, effective_from: dayN(1) } });
+    check('rate saved; the November re-run reports why it could not run',
+      r.status === 200 && (r.body?.rate_change?.rebuilt ?? []).some((x) => /does not cover/.test(x.error ?? '')), r.body?.rate_change ?? r.body);
     await db.query(`DELETE FROM payroll_records WHERE placement_id = $1 AND period_month = $2`, [kiran, NOV]);
     r = await req('POST', '/finance/payroll/attendance-generate', { token: finance, body: { code: 'DUTYT4', month: NOV, year: YEAR } });
     check('billing rate too low for pay + PF → refused with a reason',

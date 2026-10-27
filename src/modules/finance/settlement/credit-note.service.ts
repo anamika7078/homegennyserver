@@ -58,10 +58,17 @@ export class CreditNoteService {
    */
   private static readonly CREDITABLE_FROM = ['SENT', 'PARTIALLY_PAID', 'OVERDUE'];
 
-  async preview(invoiceId: string, amount?: number) {
+  /**
+   * `allowPaid`: the correction of a sent invoice (InvoiceCorrectionService)
+   * may credit part of an invoice the client has already paid — the difference
+   * is owed back to them. Only a part: a full reversal of a PAID invoice would
+   * have to reopen a closed document, which the status rules refuse.
+   */
+  async preview(invoiceId: string, amount?: number, opts: { allowPaid?: boolean } = {}) {
     const inv = await this.loadInvoice(invoiceId);
+    const paidPartial = opts.allowPaid && inv.status === 'PAID';
 
-    if (!CreditNoteService.CREDITABLE_FROM.includes(inv.status)) {
+    if (!CreditNoteService.CREDITABLE_FROM.includes(inv.status) && !paidPartial) {
       throw new BadRequestException(
         `Invoice ${inv.invoice_number} is ${inv.status} and cannot be credited. ` +
         `Credit notes apply to an invoice the client has received (${CreditNoteService.CREDITABLE_FROM.join(', ')}); ` +
@@ -92,6 +99,11 @@ export class CreditNoteService {
     // Full only when it clears the entire invoice, not merely the remainder of
     // one already partly credited — the invoice's status turns on this.
     const isFull = alreadyCredited === 0 && Math.abs(creditAmount - invoiceTotal) <= 0.01;
+    if (paidPartial && Math.abs(creditAmount - remaining) <= 0.01) {
+      throw new BadRequestException(
+        `Invoice ${inv.invoice_number} is PAID — it can be credited in part, not reversed in full.`,
+      );
+    }
 
     // Tax reverses in the same proportion as the value credited. GST only ever
     // sits on the management fee, so the taxable share of an invoice is rarely
@@ -121,12 +133,14 @@ export class CreditNoteService {
     };
   }
 
-  async issue(invoiceId: string, reason: string, amount?: number, actorId?: string) {
+  async issue(
+    invoiceId: string, reason: string, amount?: number, actorId?: string, opts: { allowPaid?: boolean } = {},
+  ) {
     if (!reason?.trim()) {
       throw new BadRequestException('A reason is required to issue a credit note.');
     }
 
-    const p = await this.preview(invoiceId, amount);
+    const p = await this.preview(invoiceId, amount, opts);
 
     // What closes the invoice is the *cumulative* credit reaching its total,
     // not whether this single note happened to reverse everything at once.

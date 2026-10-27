@@ -196,6 +196,19 @@ async function main() {
     check('cancel → 201', r.status === 201, r.body);
     const linked = (await db.query(`SELECT COUNT(*)::int n FROM payroll_records WHERE client_invoice_id = $1`, [d?.id])).rows[0].n;
     check('cancel released the payroll', linked === 0, linked);
+    // An unsent invoice's payroll is voided on cancel (kept whole), so the next
+    // invoice is built from a fresh run rather than the cancelled figures.
+    const kept = (await db.query(`SELECT COUNT(*)::int n FROM payroll_records_voided WHERE client_invoice_id = $1`, [d?.id])).rows[0].n;
+    check('…the cancelled payroll is kept in payroll_records_voided', kept === 1, kept);
+    // This fixture has no attendance to re-run from: stand in for the re-run.
+    await db.query(
+      `INSERT INTO payroll_records (id, placement_id, staff_id, period_month, period_year, shift_days,
+                                    gross_salary, deductions, net_salary, esic_employer, esic_employee,
+                                    pf_employer, pf_employee, placement_type, management_fee)
+       SELECT gen_random_uuid(), p.id, p.staff_id, $2, $3, 31, 15500, '{}', 13583.75, 503.75, 116.25, 1800, 1800, 'PERMANENT', 1550
+         FROM placements p WHERE p.client_id = $1`,
+      [delhi, MONTH, YEAR],
+    );
     r = await req('POST', '/finance/invoices/consolidated/generate', { token, body: { customer_id: delhi, month: MONTH, year: YEAR } });
     check('corrected invoice can be issued after cancel', r.status === 201 && r.body?.invoice?.id !== d?.id, r.body);
 
@@ -216,6 +229,7 @@ async function main() {
       await db.query(`DELETE FROM invoice_items WHERE invoice_id = $1`, [id]);
       await db.query(`DELETE FROM client_invoices WHERE id = $1`, [id]);
     }
+    await db.query(`DELETE FROM payroll_records_voided WHERE staff_id = ANY($1::uuid[])`, [made.staff]).catch(() => {});
     await db.query(`DELETE FROM payroll_records WHERE staff_id = ANY($1::uuid[])`, [made.staff]);
     await db.query(`DELETE FROM placements WHERE id = ANY($1::uuid[])`, [made.placements]);
     await db.query(`DELETE FROM staff_applicants WHERE id = ANY($1::uuid[])`, [made.staff]);

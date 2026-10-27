@@ -7,6 +7,9 @@ import { readSupplierSettings } from '../../../common/finance/supplier-settings'
 import { formatPeriod, isoDate, monthBounds, type Period } from '../../../common/finance/period.util';
 import { designationFor } from '../../../common/finance/service-lines.util';
 import { NotificationsService } from '../../notifications/notifications.service';
+import {
+  monthLabel, releaseInvoicePayroll, unreleaseInvoicePayroll, type ReleasedRow,
+} from '../../../common/finance/payroll-release';
 
 export interface InvoiceRow {
   id: string;
@@ -80,6 +83,9 @@ export class FinanceInvoiceService {
             -- An invoice can cover part of a month now; the list shows its dates.
             ci.period_from,
             ci.period_to,
+            -- A rejected invoice says why in the list, not only when opened.
+            ci.reject_reason,
+            ci.rejected_at,
             c.customer_name AS client_name,
             -- Only a legacy per-placement invoice has a single staff member.
             -- A consolidated invoice covers a whole client, so it reports how
@@ -119,6 +125,8 @@ export class FinanceInvoiceService {
             NULL::varchar        AS document_type,
             NULL::date           AS period_from,
             NULL::date           AS period_to,
+            NULL::text           AS reject_reason,
+            NULL::timestamptz    AS rejected_at,
             'Internal HR'        AS client_name,
             emp.full_name        AS staff_name,
             emp.employee_id      AS staff_code,
@@ -130,9 +138,11 @@ export class FinanceInvoiceService {
       `;
 
       const queryParams: unknown[] = [];
-      if (params.status) {
+      if (params.status?.toUpperCase() === 'REJECTED') {
+        sql += ` WHERE u.status = 'CANCELLED' AND u.rejected_at IS NOT NULL`;
+      } else if (params.status) {
         queryParams.push(params.status.toUpperCase());
-        sql += ` WHERE u.status = $${queryParams.length}`;
+        sql += ` WHERE u.status = ${queryParams.length}`;
       }
       
       sql += ` ORDER BY u.created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
@@ -149,7 +159,9 @@ export class FinanceInvoiceService {
         ) AS u
       `;
       const countParams: unknown[] = [];
-      if (params.status) {
+      if (params.status?.toUpperCase() === 'REJECTED') {
+        countSql = `SELECT COUNT(*) AS total FROM client_invoices WHERE status = 'CANCELLED' AND rejected_at IS NOT NULL`;
+      } else if (params.status) {
         countParams.push(params.status.toUpperCase());
         countSql += ` WHERE u.status = $1`;
       }
@@ -165,7 +177,7 @@ export class FinanceInvoiceService {
 
   async getInvoice(
     id: string,
-  ): Promise<InvoiceRow & { line_items: object; reconciles?: boolean; line_items_total?: number }> {
+  ): Promise<InvoiceRow & { line_items: object; reconciles?: boolean; line_items_total?: number; rate_notes?: unknown[] }> {
     // 1. Try to get from client_invoices
     //
     // Joined to `finance_customers`, not the legacy `clients` table:
@@ -250,6 +262,7 @@ export class FinanceInvoiceService {
         // rendered as if it balanced.
         reconciles: Math.abs(itemsTotal - total) <= 0.01,
         line_items_total: itemsTotal,
+        rate_notes: await this.rateNotes(id),
       };
     }
 
@@ -637,7 +650,7 @@ export class FinanceInvoiceService {
    */
   async generateSalarySlipsHtml(invoiceId: string): Promise<string> {
     const [inv] = await this.dataSource.query<Record<string, unknown>[]>(
-      `SELECT ci.id, ci.invoice_number, ci.period_month, ci.period_year, ci.period_from, ci.period_to,
+      `SELECT ci.id, ci.invoice_number, ci.status, ci.period_month, ci.period_year, ci.period_from, ci.period_to,
               fc.customer_name, fc.address, fc.city
          FROM client_invoices ci
          LEFT JOIN finance_customers fc ON fc.id = ci.client_id
@@ -652,13 +665,14 @@ export class FinanceInvoiceService {
       duties: string | null; duty_rate: string | null; shift_days: number | null;
       hours_worked: string | null; hourly_rate: string | null;
       gross_salary: string; esic_employee: string; pf_employee: string; net_salary: string;
+      arrears: string | null; arrears_note: string | null;
       bank_account: string | null; bank_ifsc: string | null;
     }[]>(
       `SELECT sa.full_name AS staff_name, sa.staff_code, sa.series::text AS series,
               pr.placement_type, pr.rate_basis, pr.period_from, pr.period_to,
               COALESCE(p.trial_start_date, p.confirmed_at::date) AS join_date,
               pr.duties, pr.duty_rate, pr.shift_days, pr.hours_worked, pr.hourly_rate,
-              pr.gross_salary, pr.esic_employee, pr.pf_employee, pr.net_salary,
+              pr.gross_salary, pr.esic_employee, pr.pf_employee, pr.net_salary, pr.arrears, pr.arrears_note,
               sba.account_number AS bank_account, sba.ifsc AS bank_ifsc
          FROM payroll_records pr
          JOIN placements p ON p.id = pr.placement_id
@@ -677,7 +691,7 @@ export class FinanceInvoiceService {
                 pr.placement_type, pr.rate_basis, pr.period_from, pr.period_to,
                 COALESCE(p.trial_start_date, p.confirmed_at::date) AS join_date,
                 pr.duties, pr.duty_rate, pr.shift_days, pr.hours_worked, pr.hourly_rate,
-                pr.gross_salary, pr.esic_employee, pr.pf_employee, pr.net_salary,
+                pr.gross_salary, pr.esic_employee, pr.pf_employee, pr.net_salary, pr.arrears, pr.arrears_note,
                 NULL AS bank_account, NULL AS bank_ifsc
            FROM payroll_records pr
            JOIN placements p ON p.id = pr.placement_id
@@ -697,6 +711,13 @@ export class FinanceInvoiceService {
       String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
     const dmy = (v: unknown) => (isoDate(v) ?? '').split('-').reverse().join('/');
 
+    // Finance can print these to check the figures before approving, but a
+    // draft slip is not issued: the staff member cannot see it, and the rate
+    // may still be corrected. The print says so on every page.
+    const isDraft = inv.status === 'DRAFT';
+    const draftBanner = isDraft
+      ? `<div class="draft">DRAFT — not issued. Invoice ${esc(inv.invoice_number)} is awaiting Finance approval.</div>`
+      : '';
     const slips = rows.map((r) => {
       const from = isoDate(r.period_from)!;
       const join = isoDate(r.join_date);
@@ -710,7 +731,7 @@ export class FinanceInvoiceService {
       const esic = Number(r.esic_employee ?? 0);
       const pf = Number(r.pf_employee ?? 0);
       return `
-  <section class="slip">
+  <section class="slip">${draftBanner}
     <div class="head">
       <div><div class="co">${esc(supplier.legalName)}</div>
         ${supplier.address ? `<div class="muted">${esc(supplier.address)}</div>` : ''}</div>
@@ -731,6 +752,9 @@ export class FinanceInvoiceService {
       <tr class="tot"><td>Gross</td><td class="r">${fmt(r.gross_salary)}</td>
           <td>Total deductions</td><td class="r">${fmt(pf + esic)}</td></tr>
     </table>
+    ${Number(r.arrears ?? 0) > 0
+      ? `<div class="muted">Arrears (correction of an earlier invoice): ₹${fmt(r.arrears ?? 0)}${r.arrears_note ? ` — ${esc(r.arrears_note)}` : ''}</div>`
+      : ''}
     <div class="net">Net pay <strong>₹${fmt(r.net_salary)}</strong></div>
     ${r.bank_account ? `<div class="muted">Paid to A/c ${esc(String(r.bank_account).replace(/.(?=.{4})/g, '•'))} · IFSC ${esc(r.bank_ifsc ?? '')}</div>` : ''}
     <div class="foot"><span>Against invoice ${esc(inv.invoice_number)}</span><span>Computer-generated — no signature required</span></div>
@@ -758,6 +782,7 @@ export class FinanceInvoiceService {
   .r{text-align:right;font-variant-numeric:tabular-nums}
   .net{font-size:16px;padding:10px 12px;background:#f8fafc;border-left:3px solid #0f172a;margin-bottom:8px}
   .foot{display:flex;justify-content:space-between;color:#94a3b8;font-size:11px;margin-top:12px}
+  .draft{background:#fef3c7;border:1px dashed #d97706;color:#92400e;font-weight:600;text-align:center;padding:6px;margin:-8px 0 12px;border-radius:4px}
   @media print{body{padding:0}.slip{border:0}}
 </style></head><body>${slips}</body></html>`;
   }
@@ -798,8 +823,124 @@ export class FinanceInvoiceService {
     throw new NotFoundException(`Invoice or payroll ${id} not found`);
   }
 
-  async approveInvoice(id: string) {
-    return this.transition(id, 'APPROVED', 'Invoice approved successfully');
+  /**
+   * Finance's approval of an invoice is the moment its figures — rates, duties,
+   * totals — are accepted, so it is also the moment the salary built from them
+   * is released: the payslips appear in the staff app and the rows become
+   * payable. Before this, a DRAFT invoice's payroll was already on payslips and
+   * could be paid out at a rate nobody had checked.
+   */
+  async approveInvoice(id: string, actorId?: string) {
+    const out = await this.dataSource.transaction(async (m) => {
+      const rows = await m.query(
+        `SELECT id, status, invoice_number FROM client_invoices WHERE id = $1 FOR UPDATE`, [id],
+      ) as { id: string; status: string; invoice_number: string }[];
+      if (!rows.length) return null;
+      const inv = rows[0];
+      assertTransition(inv.status, 'APPROVED', inv.invoice_number);
+      await m.query(
+        `UPDATE client_invoices SET status = 'APPROVED', approved_by = $2, approved_at = NOW() WHERE id = $1`,
+        [id, actorId ?? null],
+      );
+      const released = await releaseInvoicePayroll(m, id, actorId);
+      // Finance has now looked at these rates on a real invoice. Cleared again
+      // whenever the rate changes, so the next invoice flags what is new.
+      await m.query(
+        `UPDATE placements SET rate_verified_at = NOW(), rate_verified_by = $2, rate_verified_invoice_id = $1
+          WHERE id IN (SELECT placement_id FROM payroll_records WHERE client_invoice_id = $1)`,
+        [id, actorId ?? null],
+      );
+      return { from: inv.status, invoice_number: inv.invoice_number, released };
+    });
+    // Not a client invoice: an HR employee_payrolls row shown alongside them.
+    if (!out) return this.transition(id, 'APPROVED', 'Invoice approved successfully');
+
+    await this.notifyPayslipsReady(out.released);
+    this.logger.log(
+      `[INVOICE_APPROVED] ${out.invoice_number} by ${actorId ?? 'unknown'} — ${out.released.length} payslip(s) released`,
+    );
+    return {
+      id, from: out.from, status: 'APPROVED' as const,
+      message: 'Invoice approved successfully',
+      payslips_released: out.released.length,
+    };
+  }
+
+  /**
+   * What Finance should look at before approving: for each placement on the
+   * invoice, whether its rate has ever been through an approved invoice, and
+   * every rate change since it last was — with who made it and why. Finance
+   * reading the invoice is the rate check, so it has to show what is new.
+   */
+  async rateNotes(invoiceId: string) {
+    const placements = await this.dataSource.query(
+      `SELECT DISTINCT p.id AS placement_id, sa.full_name AS staff_name, p.rate_verified_at
+         FROM payroll_records pr
+         JOIN placements p ON p.id = pr.placement_id
+         JOIN staff_applicants sa ON sa.id = p.staff_id
+        WHERE pr.client_invoice_id = $1
+        ORDER BY sa.full_name`,
+      [invoiceId],
+    ).catch(() => []) as { placement_id: string; staff_name: string; rate_verified_at: Date | null }[];
+    if (!placements.length) return [];
+    const changes = await this.dataSource.query(
+      `SELECT c.placement_id, c.effective_from::text AS effective_from, c.before, c.after, c.reason,
+              c.changed_at, u.full_name AS changed_by_name
+         FROM placement_rate_changes c
+         JOIN placements p ON p.id = c.placement_id
+         LEFT JOIN users u ON u.id = c.changed_by
+        WHERE c.placement_id = ANY($1::uuid[]) AND c.superseded_at IS NULL
+          AND (p.rate_verified_at IS NULL OR c.changed_at > p.rate_verified_at)
+        ORDER BY c.changed_at`,
+      [placements.map((p) => p.placement_id)],
+    ).catch(() => []) as {
+      placement_id: string; effective_from: string; before: Record<string, unknown>; after: Record<string, unknown>;
+      reason: string | null; changed_at: Date; changed_by_name: string | null;
+    }[];
+    const fields = ['staff_salary', 'management_fee', 'hourly_rate', 'hourly_fee', 'duty_rate', 'duty_billing_rate', 'rate_basis'];
+    return placements
+      .map((p) => ({
+        placement_id: p.placement_id,
+        staff_name: p.staff_name,
+        first_invoice: !p.rate_verified_at,
+        changes: changes
+          .filter((c) => c.placement_id === p.placement_id)
+          .map((c) => ({
+            effective_from: c.effective_from,
+            changed_at: c.changed_at,
+            changed_by: c.changed_by_name,
+            reason: c.reason,
+            fields: fields
+              .filter((f) => JSON.stringify(c.before?.[f] ?? null) !== JSON.stringify(c.after?.[f] ?? null))
+              .map((f) => ({ field: f, before: c.before?.[f] ?? null, after: c.after?.[f] ?? null })),
+          })),
+      }))
+      .filter((p) => p.first_invoice || p.changes.length);
+  }
+
+  /** One in-app note per staff member: their slip for the month is ready. */
+  async notifyPayslipsReady(rows: ReleasedRow[]) {
+    if (!rows.length) return;
+    const staffIds = [...new Set(rows.map((r) => r.staff_id))];
+    const users = await this.dataSource.query(
+      `SELECT id, user_id FROM staff_applicants WHERE id = ANY($1::uuid[]) AND user_id IS NOT NULL`,
+      [staffIds],
+    ) as { id: string; user_id: string }[];
+    const userOf = new Map(users.map((u) => [u.id, u.user_id]));
+    for (const staffId of staffIds) {
+      const userId = userOf.get(staffId);
+      if (!userId) continue;
+      const months = [...new Set(
+        rows.filter((r) => r.staff_id === staffId).map((r) => monthLabel(r.period_month, r.period_year)),
+      )];
+      await this.notifications
+        .createInAppNotification(
+          'Salary slip ready',
+          `Your salary slip for ${months.join(', ')} is ready. Open Salary in the app to see it.`,
+          userId,
+        )
+        .catch((e: Error) => this.logger.warn(`payslip note for ${staffId}: ${e.message}`));
+    }
   }
 
   /**
@@ -903,6 +1044,9 @@ export class FinanceInvoiceService {
       `UPDATE client_invoices SET payment_ref = COALESCE(payment_ref, $1) WHERE id = $2`,
       [`cancelled: ${reason.trim().slice(0, 80)}`, id],
     ).catch(() => undefined);
+    // The payslips go back with it: what the cancelled invoice said is no
+    // longer agreed. A row already paid out keeps its slip.
+    await unreleaseInvoicePayroll(this.dataSource, id);
     // Hand the work back so it can be billed again. Left linked, the payroll
     // stayed "already invoiced" against a cancelled document and the corrected
     // invoice had nothing to bill.

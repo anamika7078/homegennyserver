@@ -7,6 +7,8 @@ import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guards/roles.guard';
 import { Roles, UserRole } from '../../auth/decorators/roles.decorator';
 import { FinancePayrollService } from './payroll.service';
+import { InvoiceCorrectionService } from '../invoice/invoice-correction.service';
+import { SentInvoiceCorrectionService } from '../invoice/sent-invoice-correction.service';
 
 // Spec: EOR Payroll — RM=Y, BM=Y, Finance=Y, Admin=Y, Staff/Client=no access.
 // Confirmed live in the audit: GET /finance/payroll returned 200 for STAFF and CLIENT.
@@ -15,7 +17,22 @@ import { FinancePayrollService } from './payroll.service';
 @Roles(UserRole.RM, UserRole.BM, UserRole.FINANCE, UserRole.ADMIN)
 @Controller({ path: 'finance/payroll', version: '1' })
 export class FinancePayrollController {
-  constructor(private readonly service: FinancePayrollService) {}
+  constructor(
+    private readonly service: FinancePayrollService,
+    private readonly correction: InvoiceCorrectionService,
+    private readonly sentCorrection: SentInvoiceCorrectionService,
+  ) {}
+
+  // Declared before the ':id' routes so "adjustments" is not read as an id.
+  @Get('adjustments')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Arrears owed and overpayments absorbed, from invoice corrections',
+    description: 'status: PENDING (arrears waiting for the next payroll), APPLIED, RECORDED (overpaid, never deducted).',
+  })
+  adjustments(@Query('status') status?: string) {
+    return this.sentCorrection.adjustments(status || undefined);
+  }
 
   @Get()
   @ApiOperation({ summary: 'List payroll records with optional month/year filter' })
@@ -49,6 +66,7 @@ export class FinancePayrollController {
   }
 
   @Post('attendance-generate')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
   @ApiOperation({ summary: 'Generate attendance-based payroll / invoice by employee code' })
   generateAttendanceByCode(
     @Body() body: { code: string; month: number; year: number },
@@ -84,6 +102,7 @@ export class FinancePayrollController {
   }
 
   @Post('confirm-batch')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
   @ApiOperation({ summary: 'Confirm and post payroll batch for all CONFIRMED placements' })
   confirmBatch(@Body() body: { month: number; year: number }) {
     return this.service.confirmPayrollBatch(body.month, body.year);
@@ -144,6 +163,33 @@ export class FinancePayrollController {
     @Req() req: { user?: { id?: string } },
   ) {
     return this.service.upsertStaffBankAccount(staffId, body, req.user?.id);
+  }
+
+  @Post(':id/release')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Admin: release a salary slip without an approved invoice',
+    description:
+      'Normally a payroll row becomes a payslip when Finance approves its invoice. If the invoice ' +
+      'is stuck, an Admin can release one row after 3 days, with a written reason (min 10 characters) ' +
+      'that stays on the row. 400 before the 3 days are up.',
+  })
+  release(@Param('id') id: string, @Body() body: { reason?: string }, @Req() req: { user?: { id?: string } }) {
+    return this.service.releaseByAdmin(id, body?.reason ?? '', req.user?.id);
+  }
+
+  @Post(':id/rerun')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: "Re-run one payroll row at the placement's current rate and attendance",
+    description:
+      'For a row not yet issued as a payslip (no invoice, or a DRAFT one). The old row is voided ' +
+      '(kept in payroll_records_voided) and the period run again; a DRAFT invoice is rebuilt in ' +
+      'place, keeping its number. Returns before/after. 400 on an approved/sent invoice (reject it ' +
+      'instead), on a paid row, or when a later row for the same person exists this month.',
+  })
+  rerun(@Param('id') id: string, @Body() body: { reason?: string }, @Req() req: { user?: { id?: string } }) {
+    return this.correction.rerunPayroll(id, body?.reason, req.user?.id);
   }
 
   @Post(':id/approve')

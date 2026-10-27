@@ -168,6 +168,12 @@ async function main() {
       [made.placementId, MONTH, YEAR],
     )).rows[0]?.id;
     if (payrollId) {
+      // A payroll is approvable once Finance has approved the invoice it is on
+      // (approval gate). This suite is about drift, so stand in for that.
+      await db.query(
+        `UPDATE payroll_records SET released_at = NOW(), release_reason = 'test: invoice approved' WHERE id = $1`,
+        [payrollId],
+      );
       const approved = await req('POST', `/finance/payroll/${payrollId}/approve`, { token: finance });
       check('payroll approves', approved.status === 200 || approved.status === 201, approved.status);
 

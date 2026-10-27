@@ -415,13 +415,21 @@ export class StaffMobileController {
    *
    * A maid working three houses is paid once, so one month is one figure with
    * the houses named underneath it, not three payslips.
+   *
+   * Only released rows — those on an invoice Finance has approved. A row on a
+   * DRAFT invoice is still a working figure that may be corrected, so it is not
+   * shown as a payslip; `pending_houses` says how many of the month's houses
+   * are still being checked.
    */
   private async payMonths(staffId: string) {
-    const rows = await this.prisma.payrollRecord.findMany({
+    const all = await this.prisma.payrollRecord.findMany({
       where: { staffId },
       orderBy: [{ periodYear: 'desc' }, { periodMonth: 'desc' }],
     });
+    const rows = all.filter((r) => r.releasedAt);
     if (!rows.length) return [];
+    const heldIn = (m: number, y: number) =>
+      all.filter((r) => !r.releasedAt && r.periodMonth === m && r.periodYear === y).length;
 
     const placementIds = [...new Set(rows.map((r) => r.placementId).filter(Boolean))] as string[];
     const placements = placementIds.length
@@ -453,16 +461,23 @@ export class StaffMobileController {
       const net = group.reduce((s, r) => s + num(r.netSalary), 0);
       const esic = group.reduce((s, r) => s + num(r.esicEmployee), 0);
       const pf = group.reduce((s, r) => s + num(r.pfEmployee), 0);
+      // Arrears from a corrected earlier invoice ride on top of the month's net.
+      const arrears = group.reduce((s, r) => s + num(r.arrears), 0);
       const round2 = (n: number) => Math.round(n * 100) / 100;
 
       return {
         period_month: group[0].periodMonth,
         period_year: group[0].periodYear,
+        pending_houses: heldIn(group[0].periodMonth, group[0].periodYear),
         days_worked: group.reduce((s, r) => s + Number(r.shiftDays ?? 0), 0),
         gross_salary: round2(gross),
         esic_employee: round2(esic),
         pf_employee: round2(pf),
-        total_deductions: round2(gross - net),
+        // ESIC + PF. Read as gross − net, this went negative once arrears
+        // were part of the net.
+        total_deductions: round2(esic + pf),
+        arrears: round2(arrears),
+        arrears_note: group.map((r) => r.arrearsNote).filter(Boolean).join('; ') || null,
         net_salary: round2(net),
         // PENDING until Finance approves it. Saying so stops "why is my money
         // not here yet" being a mystery.
@@ -486,6 +501,19 @@ export class StaffMobileController {
     });
   }
 
+  /** Months with pay still being checked by Finance — not payslips yet. */
+  private async heldMonths(staffId: string) {
+    const rows = await this.prisma.payrollRecord.findMany({
+      where: { staffId, releasedAt: null },
+      select: { periodMonth: true, periodYear: true },
+      orderBy: [{ periodYear: 'desc' }, { periodMonth: 'desc' }],
+    });
+    const seen = new Set<string>();
+    return rows
+      .filter((r) => !seen.has(`${r.periodYear}-${r.periodMonth}`) && seen.add(`${r.periodYear}-${r.periodMonth}`))
+      .map((r) => ({ period_month: r.periodMonth, period_year: r.periodYear }));
+  }
+
   @Get('salary')
   @Roles(UserRole.STAFF, UserRole.RM, UserRole.BM, UserRole.ADMIN)
   @ApiOperation({
@@ -503,18 +531,26 @@ export class StaffMobileController {
     const staff = await this.prisma.staffApplicant.findFirst({ where: { userId: req.user.id } });
     if (!staff) return { salary: null, message: 'No staff record is linked to this login.' };
 
-    const months = await this.payMonths(staff.id);
-    if (!months.length) {
-      return { salary: null, message: 'No payroll has been run for you yet.' };
-    }
+    const [months, held] = await Promise.all([this.payMonths(staff.id), this.heldMonths(staff.id)]);
+    const checking = (m: number, y: number) =>
+      `Your salary for ${m}/${y} is being checked by Finance. The slip appears here once it is approved.`;
     const wanted = month && year
       ? months.find((m) => m.period_month === Number(month) && m.period_year === Number(year))
       : months[0];
+    if (!wanted) {
+      const isHeld = month && year
+        ? held.find((h) => h.period_month === Number(month) && h.period_year === Number(year))
+        : held[0];
+      return {
+        salary: null,
+        awaiting_approval: held,
+        message: isHeld
+          ? checking(isHeld.period_month, isHeld.period_year)
+          : month && year ? `No payroll for ${month}/${year}.` : 'No payroll has been run for you yet.',
+      };
+    }
 
-    return {
-      salary: wanted ?? null,
-      ...(wanted ? {} : { message: `No payroll for ${month}/${year}.` }),
-    };
+    return { salary: wanted, awaiting_approval: held };
   }
 
   @Get('payslips')
@@ -525,9 +561,9 @@ export class StaffMobileController {
   })
   async getPayslips(@Req() req: any) {
     const staff = await this.prisma.staffApplicant.findFirst({ where: { userId: req.user.id } });
-    if (!staff) return { payslips: [], total: 0 };
-    const months = await this.payMonths(staff.id);
-    return { payslips: months, total: months.length };
+    if (!staff) return { payslips: [], total: 0, awaiting_approval: [] };
+    const [months, held] = await Promise.all([this.payMonths(staff.id), this.heldMonths(staff.id)]);
+    return { payslips: months, total: months.length, awaiting_approval: held };
   }
 
   @Get('payslips/pdf')

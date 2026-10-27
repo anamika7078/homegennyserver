@@ -8,6 +8,9 @@ import { RolesGuard } from '../../auth/guards/roles.guard';
 import { Roles, UserRole } from '../../auth/decorators/roles.decorator';
 import { FinanceInvoiceService } from './invoice.service';
 import { ConsolidatedInvoiceService } from './consolidated-invoice.service';
+import { InvoiceCorrectionService } from './invoice-correction.service';
+import { SentInvoiceCorrectionService } from './sent-invoice-correction.service';
+import { FinanceOversightService } from './finance-oversight.service';
 import { parseTillDate } from '../../../common/finance/period.util';
 
 // Spec: Client Invoicing — RM=R, BM=R, Finance=Y, Admin=Y. (Client=Y refers to a
@@ -22,6 +25,9 @@ export class FinanceInvoiceController {
   constructor(
     private readonly service: FinanceInvoiceService,
     private readonly consolidated: ConsolidatedInvoiceService,
+    private readonly correction: InvoiceCorrectionService,
+    private readonly sentCorrection: SentInvoiceCorrectionService,
+    private readonly oversight: FinanceOversightService,
   ) {}
 
   @Get()
@@ -133,6 +139,27 @@ export class FinanceInvoiceController {
     return this.consolidated.runCycleBilling(date, req.user?.id);
   }
 
+  // Literal paths before ':id' — a literal after a parameter route is swallowed by it.
+  @Get('attention')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'What is stuck: draft invoices holding salary, held slips, rate reviews, sent invoices to correct, arrears',
+    description:
+      'draft_invoices_waiting / slips_held: older than the 3-day grace. rate_reviews_open: placements waiting ' +
+      'for their RM after a rejection. sent_invoices_needing_correction: a rate back-dated over a sent invoice, ' +
+      'not corrected since. arrears_pending: owed to staff, waiting for their next payroll. counts summarises.',
+  })
+  attention() {
+    return this.oversight.attention();
+  }
+
+  @Post('attention/notify')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Send the morning attention note now (it also runs daily at 09:30 IST)' })
+  notifyAttention() {
+    return this.oversight.notifyDaily();
+  }
+
   @Get('summary')
   @ApiOperation({ summary: 'Invoice status summary for dashboard' })
   getSummary() {
@@ -169,13 +196,24 @@ export class FinanceInvoiceController {
     return this.service.getInvoice(id);
   }
 
+  // Finance only. The class allows RM and BM to read invoices, and approve and
+  // send used to inherit that — so the RM who typed a placement's rate could
+  // approve the invoice built on it and send it to the client.
   @Post(':id/approve')
-  @ApiOperation({ summary: 'Approve an invoice' })
-  approve(@Param('id') id: string) {
-    return this.service.approveInvoice(id);
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Approve an invoice — and release the salary slips on it',
+    description:
+      'Records who approved it and when. The payroll rows on the invoice become payslips in the ' +
+      'staff app and become payable; each staff member gets an in-app note. Until then a DRAFT ' +
+      "invoice's payroll is not visible to staff and cannot be approved or paid.",
+  })
+  approve(@Param('id') id: string, @Req() req: { user?: { id?: string } }) {
+    return this.service.approveInvoice(id, req.user?.id);
   }
 
   @Post(':id/send')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
   @ApiOperation({ summary: 'Mark invoice as sent to client' })
   send(@Param('id') id: string) {
     return this.service.sendInvoice(id);
@@ -199,10 +237,76 @@ export class FinanceInvoiceController {
   @ApiOperation({
     summary: 'Cancel an invoice',
     description:
-      'Requires a reason. Releases the invoice’s payroll so the same work can be billed on a ' +
-      'corrected invoice.',
+      'Requires a reason. An unsent (DRAFT/APPROVED) invoice: its payroll is voided, so the work ' +
+      "is billed again at today's figures. A sent invoice: its payroll is handed back unchanged " +
+      '(correct it with a credit note).',
   })
-  cancel(@Param('id') id: string, @Body() body: { reason?: string }) {
-    return this.service.cancelInvoice(id, body?.reason ?? '');
+  cancel(@Param('id') id: string, @Body() body: { reason?: string }, @Req() req: { user?: { id?: string } }) {
+    return this.correction.cancel(id, body?.reason, req.user?.id);
+  }
+
+  @Post(':id/reject')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Reject an unsent invoice — wrong rate, wrong days, anything',
+    description:
+      'DRAFT or APPROVED only, and only the latest invoice of the month for the client. Reason ' +
+      'required (min 10 characters). The invoice is cancelled with the reason recorded; its payroll ' +
+      'rows are voided (kept in payroll_records_voided); every placement on it is marked ' +
+      'REVIEW_NEEDED and its RM is notified. The client cannot be invoiced again until the RM ' +
+      'corrects the rate (PATCH /placements/:id/terms) or confirms it ' +
+      '(POST /placements/:id/rate-review/confirm). 400 if any salary on it was already paid.',
+  })
+  reject(@Param('id') id: string, @Body() body: { reason?: string }, @Req() req: { user?: { id?: string } }) {
+    return this.correction.rejectUnsent(id, body?.reason, req.user?.id);
+  }
+
+  @Get(':id/correction')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Correcting a sent invoice — what it should have said, and the difference (changes nothing)',
+    description:
+      'SENT, PARTIALLY_PAID, OVERDUE or PAID. Each payroll line recomputed at the rate in force for its ' +
+      'days and the current attendance, net of earlier corrections. totals.client_delta (before GST) and ' +
+      'staff deltas; actions says what applying it would do: credit note, supplementary invoice, ' +
+      'arrears to pay, overpayment recorded (never deducted).',
+  })
+  correctionPreview(@Param('id') id: string) {
+    return this.sentCorrection.preview(id);
+  }
+
+  @Post(':id/correct')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Correct a sent invoice: credit note / supplementary invoice / arrears',
+    description:
+      'Body { reason } (min 10). The sent invoice is never edited. Over-billed → a credit note for the ' +
+      'difference incl. GST (partial allowed on PAID). Under-billed → a DRAFT supplementary invoice. ' +
+      'Staff under-paid → arrears added to their next payroll row. Staff over-paid → recorded only. ' +
+      '400 when there is nothing to correct (change the rate on the placement first, back-dated).',
+  })
+  correct(@Param('id') id: string, @Body() body: { reason?: string }, @Req() req: { user?: { id?: string } }) {
+    return this.sentCorrection.apply(id, body?.reason, req.user?.id);
+  }
+
+  @Get(':id/corrections')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Corrections made to this invoice, with their lines, credit notes and supplementary invoices' })
+  corrections(@Param('id') id: string) {
+    return this.sentCorrection.history(id);
+  }
+
+  @Get(':id/history')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Everything that happened to this invoice: raised, approved (who), rejected (why), payroll voided, corrected, credit notes' })
+  history(@Param('id') id: string) {
+    return this.oversight.invoiceHistory(id);
+  }
+
+  @Get(':id/voided-payroll')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Payroll rows voided from this invoice (rejection, cancel, re-run), with the reason' })
+  voidedPayroll(@Param('id') id: string) {
+    return this.correction.voidedFor({ invoiceId: id });
   }
 }

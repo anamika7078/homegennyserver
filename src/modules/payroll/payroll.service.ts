@@ -16,6 +16,9 @@ import {
 import { readSupplierSettings } from '../../common/finance/supplier-settings';
 import { applyPlacementTerms, dutiesFrom, effectiveRateBasis } from '../../common/finance/duty-billing.util';
 import { isoDate, monthBounds, nextDay, type Period } from '../../common/finance/period.util';
+import {
+  activeChanges, applyRates, changeDatesWithin, rateOn, ratesAt, splitPeriod, type RateSnapshot,
+} from '../../common/finance/rate-history';
 import { StatutoryTaxService } from '../finance/tax/statutory-tax.service';
 import { ConsolidatedInvoiceService } from '../finance/invoice/consolidated-invoice.service';
 
@@ -457,19 +460,47 @@ export class PayrollService {
     );
 
     const daysInMonth = this.daysInMonth(month, year);
-    const perPlacement = rows.map((r) => {
-      const basis = effectiveRateBasis(r.placement_type, r.rate_basis);
-      const gross = basis === 'PER_DUTY'
+    const grossOf = (
+      rates: { rate_basis: string | null; staff_salary: string | number | null; hourly_rate: string | number | null; duty_rate: string | number | null },
+      placementType: string,
+      c: { present_days: string; full_days: string; half_days: string; hours: string },
+    ) => {
+      const basis = effectiveRateBasis(placementType, rates.rate_basis);
+      return basis === 'PER_DUTY'
         ? round2(dutiesFrom({
-            present: parseInt(r.full_days, 10), overtime: 0, halfDay: parseInt(r.half_days, 10),
-          }) * parseFloat(r.duty_rate ?? '0'))
+            present: parseInt(c.full_days, 10), overtime: 0, halfDay: parseInt(c.half_days, 10),
+          }) * parseFloat(String(rates.duty_rate ?? '0')))
         : basis === 'HOURLY'
-          ? round2(parseFloat(r.hours) * parseFloat(r.hourly_rate ?? '0'))
+          ? round2(parseFloat(c.hours) * parseFloat(String(rates.hourly_rate ?? '0')))
           : this.calculateProratedGross(
-              parseFloat(r.staff_salary ?? '0'), parseInt(r.present_days, 10), daysInMonth,
+              parseFloat(String(rates.staff_salary ?? '0')), parseInt(c.present_days, 10), daysInMonth,
             );
-      return { placementId: r.id, gross };
-    });
+    };
+    const perPlacement = await Promise.all(rows.map(async (r) => {
+      // A rate that changed during the month: each stretch at its own rate.
+      const changes = await activeChanges(this.dataSource, r.id);
+      const cuts = changes.map((c) => c.effective_from);
+      const stretch = { from: monthBounds(month, year).from, to: until };
+      const parts = changes.length ? splitPeriod(stretch, cuts) : [];
+      if (parts.length <= 1 && !changes.length) {
+        return { placementId: r.id, gross: grossOf(r, r.placement_type, r) };
+      }
+      let gross = 0;
+      for (const part of parts.length ? parts : [stretch]) {
+        const rates = rateOn(changes, part.from) as RateSnapshot;
+        const [c] = await this.dataSource.query<{ present_days: string; full_days: string; half_days: string; hours: string }[]>(
+          `SELECT COUNT(*) FILTER (WHERE status IN ('PRESENT','HALF_DAY','OVERTIME'))::text AS present_days,
+                  COUNT(*) FILTER (WHERE status IN ('PRESENT','OVERTIME'))::text            AS full_days,
+                  COUNT(*) FILTER (WHERE status = 'HALF_DAY')::text                         AS half_days,
+                  COALESCE(SUM(hours_worked) FILTER (WHERE status IN ('PRESENT','HALF_DAY','OVERTIME')), 0)::text AS hours
+             FROM staff_daily_attendance
+            WHERE placement_id = $1 AND attendance_date BETWEEN $2::date AND $3::date`,
+          [r.id, part.from, part.to],
+        );
+        gross += grossOf(rates, r.placement_type, c);
+      }
+      return { placementId: r.id, gross: round2(gross) };
+    }));
 
     const totalGross = round2(perPlacement.reduce((s, x) => s + x.gross, 0));
     return { perPlacement, totalGross };
@@ -565,7 +596,10 @@ export class PayrollService {
       [placementId],
     );
     if (!placements.length) throw new NotFoundException(`Placement ${placementId} not found`);
-    const p = placements[0];
+    // The rate in force on the period's first day — runPayrollForPeriod cuts a
+    // period at every rate change, so one rate covers the whole of it.
+    const inForce = await ratesAt(this.dataSource, placementId, range.from);
+    const p = inForce ? applyRates(placements[0], inForce) : placements[0];
 
     // Counted at this client, not across the staff member's whole month — she
     // may be working three houses. See §B2.
@@ -839,6 +873,39 @@ export class PayrollService {
       );
     }
 
+    // A rate that changes inside the period: one row per stretch, each at its
+    // own rate. Each part is committed before the next is worked out, so the
+    // month-to-date ESIC/PF of the later part sees the earlier one — which is
+    // why a caller's transaction is not used when the period is cut.
+    const cuts = await changeDatesWithin(this.dataSource, placementId, period.from, period.to);
+    if (cuts.length) {
+      const parts = splitPeriod(period, cuts);
+      let last: Awaited<ReturnType<PayrollService['runOnePeriod']>> | null = null;
+      let lastError: unknown = null;
+      for (const part of parts) {
+        try {
+          last = await this.runOnePeriod(placementId, month, year, part);
+        } catch (e) {
+          // A stretch with nothing worked in it is not a failure of the whole.
+          if (!/^No (duties|hours|billable)/.test((e as Error).message)) throw e;
+          lastError = e;
+        }
+      }
+      if (!last) throw lastError;
+      return last;
+    }
+
+    return this.runOnePeriod(placementId, month, year, period, runner);
+  }
+
+  /** Writes the payroll row for one period priced at one rate. */
+  private async runOnePeriod(
+    placementId: string,
+    month: number,
+    year: number,
+    period: { from: string; to: string },
+    runner?: { query: <T = any>(sql: string, params?: unknown[]) => Promise<T> },
+  ) {
     const preview = await this.previewAttendancePayroll(placementId, month, year, period);
     // What makes a period billable depends on how the placement is priced:
     // duties, hours, or days. A four-hour visit is one day and would otherwise
@@ -866,10 +933,46 @@ export class PayrollService {
     const p = placements[0];
     const calc = preview.calculation as PayrollCalculation;
 
-    const [payroll] = await this.insertPayrollRecord(
+    const [inserted] = await this.insertPayrollRecord(
       runner ?? this.dataSource, placementId, p.staff_id, month, year, preview, calc,
     );
+    const payroll = await this.applyPendingArrears(runner ?? this.dataSource, inserted);
     return { payroll, clientId: p.client_id, preview, calculation: calc };
+  }
+
+  /**
+   * Arrears owed from the correction of an earlier, sent invoice (the staff
+   * member was paid too little) ride on the next payroll row written for them,
+   * at any client: added to the net, named on the slip. The client's invoice
+   * is not touched — billing was settled by the correction itself.
+   */
+  private async applyPendingArrears(
+    runner: { query: <T = any>(sql: string, params?: unknown[]) => Promise<T> },
+    row: Record<string, unknown>,
+  ) {
+    const pending = await runner.query<{ id: string; amount: string; reason: string }[]>(
+      `SELECT id, amount, reason FROM pay_adjustments
+        WHERE staff_id = $1 AND kind = 'ARREARS' AND status = 'PENDING'
+        ORDER BY created_at`,
+      [row.staff_id],
+    ).catch(() => [] as { id: string; amount: string; reason: string }[]);
+    if (!pending.length) return row;
+    const total = round2(pending.reduce((s, a) => s + Number(a.amount), 0));
+    const note = pending.map((a) => `₹${Number(a.amount).toLocaleString('en-IN')} — ${a.reason}`).join('; ');
+    const res = await runner.query(
+      `UPDATE payroll_records
+          SET arrears = $2, arrears_note = $3, net_salary = net_salary + $2
+        WHERE id = $1 RETURNING *`,
+      [row.id, total, note],
+    );
+    await runner.query(
+      `UPDATE pay_adjustments SET status = 'APPLIED', applied_payroll_id = $2, applied_at = NOW()
+        WHERE id = ANY($1::uuid[])`,
+      [pending.map((a) => a.id), row.id],
+    );
+    this.logger.log(`[ARREARS] ₹${total} added to payroll ${String(row.id)} for staff ${String(row.staff_id)}`);
+    const rows = (Array.isArray((res as unknown[])[0]) ? (res as unknown[][])[0] : res) as Record<string, unknown>[];
+    return rows[0] ?? row;
   }
 
   /**

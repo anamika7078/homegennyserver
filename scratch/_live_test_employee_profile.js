@@ -295,6 +295,14 @@ async function req(method, path, { token, body, raw } = {}) {
       body: { code: target.staffCode, month: MONTH, year: YEAR },
     });
     check('payroll generated for the period', [200, 201].includes(gen.status), gen.rawBody);
+    // This suite is about the HR profile, not billing: stand in for Finance
+    // approving the client's invoice, which is what releases a slip (the gate
+    // itself is covered by _live_test_approval_gate.js).
+    await db.query(
+      `UPDATE payroll_records SET released_at = NOW(), release_reason = 'test: invoice approved'
+        WHERE placement_id IN (SELECT id FROM placements WHERE staff_id = $1) AND released_at IS NULL`,
+      [target.id],
+    );
     const slips = await req('GET', `/employees/${employeeId}/payslips`, { token });
     check('returns 200', slips.status === 200, slips.status);
     check('at least one payslip is listed', Number(slips.body?.total) >= 1, slips.body);

@@ -12,23 +12,23 @@ export class NotificationsController {
   constructor(private readonly service: NotificationsService) {}
 
   @Get('in-app')
-  @Roles(UserRole.HR, UserRole.ADMIN)
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.FINANCE)
   @ApiOperation({ summary: 'Get in-app notifications for the user' })
   async findAll(@Req() req: any) {
     return this.service.findInAppNotifications(req.user.id, req.user.role);
   }
 
   @Get('in-app/unread-count')
-  @Roles(UserRole.HR, UserRole.ADMIN)
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.FINANCE)
   @ApiOperation({ summary: 'Get unread notification count' })
   async getUnreadCount(@Req() req: any) {
     return this.service.getUnreadInAppCount(req.user.id, req.user.role);
   }
 
   @Patch('in-app/:id/read')
-  @Roles(UserRole.HR, UserRole.ADMIN)
+  @Roles(UserRole.HR, UserRole.ADMIN, UserRole.RM, UserRole.BM, UserRole.FINANCE)
   @ApiOperation({ summary: 'Mark in-app notification as read' })
-  async markRead(@Param('id') id: string) {
-    return this.service.markAsRead(id);
+  async markRead(@Param('id') id: string, @Req() req: any) {
+    return this.service.markAsRead(id, req.user.id, req.user.role);
   }
 }

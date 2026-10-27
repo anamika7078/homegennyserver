@@ -262,7 +262,8 @@ export class AttendanceService {
         action: settled
           ? 'Raise a credit note, or carry it into next month — the billed figure cannot be changed quietly.'
           : status === 'PENDING'
-            ? 'Re-run payroll for this staff member to include it.'
+            ? 'Finance can re-run this payroll (Finance → Payroll → Re-run) to include it' +
+              (invoice_number ? `; draft invoice ${invoice_number} is rebuilt with it.` : '.')
             : `Payroll is ${status}; the figure is locked. Finance has to reopen it.`,
       };
     } catch {

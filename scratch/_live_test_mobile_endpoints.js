@@ -187,12 +187,15 @@ async function main() {
     if (first) {
       const detail = await req('GET', `/client/invoices/${encodeURIComponent(first.id)}`, { token: clientToken });
       check('an invoice opens by its number', detail.status === 200, detail.status);
-      check('it carries line items',
-        Array.isArray(detail.body?.lineItems) && detail.body.lineItems.length > 0,
-        detail.body?.lineItems?.length);
+      // The client sees service lines (strength × duties × all-in rate), not
+      // the salary / ESIC / PF / fee split — see getInvoiceDetail.
+      check('it carries service lines',
+        Array.isArray(detail.body?.serviceLines) && detail.body.serviceLines.length > 0,
+        detail.body?.serviceLines?.length);
       // A breakdown a customer cannot add up is worse than no breakdown.
-      const sum = (detail.body?.lineItems ?? []).reduce((t, i) => t + Number(i.amount), 0);
-      check('the line items add up to the total',
+      const sum = (detail.body?.serviceLines ?? []).reduce((t, i) => t + Number(i.amount), 0)
+        + Number(detail.body?.gstAmount ?? 0);
+      check('the service lines plus GST add up to the total',
         Math.abs(sum - Number(detail.body?.totalAmount)) < 0.02,
         { sum, total: detail.body?.totalAmount });
       check('paid + due equals the total',

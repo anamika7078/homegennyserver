@@ -718,11 +718,22 @@ export class ClientMobileController {
       placeOfSupply: (invoice as any).placeOfSupply ?? null,
       sacCode: (invoice as any).sacCode ?? null,
       staffCount: billed.length,
-      serviceLines: serviceLines.map((l) => ({
-        strength: l.strength,
-        description: l.description,
-        amount: l.amount,
-      })),
+      // A supplementary invoice (the correction of an earlier one) bills no
+      // payroll of its own — its lines are the differences it charges.
+      serviceLines: serviceLines.length
+        ? serviceLines.map((l) => ({
+            strength: l.strength,
+            description: l.description,
+            amount: l.amount,
+          }))
+        : (await this.prisma.$queryRaw<{ description: string; amount: string }[]>`
+            SELECT description, amount FROM invoice_items
+             WHERE invoice_id = ${invoice.id}::uuid AND is_taxable = true
+             ORDER BY sort_order NULLS LAST, created_at`).map((i) => ({
+            strength: null,
+            description: i.description,
+            amount: Number(i.amount),
+          })),
       taxableValue,
       cgst,
       sgst,

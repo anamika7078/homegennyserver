@@ -251,6 +251,14 @@ const round2 = (n) => Math.round(n * 100) / 100;
       raised.status === 200 || raised.status === 201, { status: raised.status, body: raised.body });
     made.invoiceId = (raised.body?.invoice ?? raised.body)?.id ?? null;
 
+    // A payslip is issued when Finance approves the invoice it is on
+    // (approval gate) — approve it so the slip assertions below have one.
+    if (made.invoiceId) {
+      const approved = await req('POST', `/finance/invoices/${made.invoiceId}/approve`, { token: financeToken });
+      check('Finance approves the invoice, releasing the slip',
+        approved.status === 200 || approved.status === 201, { status: approved.status, body: approved.body });
+    }
+
     if (!made.invoiceId) {
       console.log('  no invoice id returned — stopping before the invoice assertions');
       process.exitCode = 1;
