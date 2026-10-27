@@ -28,6 +28,10 @@ export interface OnboardFromPipelineDto {
   joiningDate: string;
   gender: string;
   // Optional overrides for fields the pipeline may have left blank.
+  // Mobile self-registration never asks for address or date of birth, but
+  // both are NOT NULL on `employees`, so HR supplies them when missing.
+  address?: string;
+  dateOfBirth?: string;
   city?: string;
   state?: string;
   pincode?: string;
@@ -91,6 +95,8 @@ export class EmployeeOnboardingService {
         series: true,
         mobile: true,
         email: true,
+        address: true,
+        dateOfBirth: true,
         branchId: true,
         pipelineStage: true,
         restrictedListFlag: true,
@@ -227,6 +233,18 @@ export class EmployeeOnboardingService {
       throw new BadRequestException(`Missing required HR fields: ${missing.join(', ')}`);
     }
 
+    const address = dto.address?.trim() || applicant.address?.trim() || null;
+    const dateOfBirth = dto.dateOfBirth || applicant.dateOfBirth || null;
+    const missingIdentity = [!address && 'address', !dateOfBirth && 'date of birth'].filter(Boolean);
+    if (missingIdentity.length) {
+      throw new BadRequestException(
+        `${applicant.staffCode}'s pipeline profile has no ${missingIdentity.join(' or ')} — enter it on the onboarding form`,
+      );
+    }
+    if (Number.isNaN(new Date(dateOfBirth as string | Date).getTime())) {
+      throw new BadRequestException('Date of birth is not a valid date');
+    }
+
     const warnings: string[] = [];
     const salary = await this.resolveSalary(applicant.id, dto.salary, warnings);
     if (!applicant.agreements.some((a) => a.status === 'SIGNED')) {
@@ -245,11 +263,11 @@ export class EmployeeOnboardingService {
       mobile: applicant.mobile,
       alternateMobile: dto.alternateMobile ?? applicant.emergencyContactMobile ?? null,
       email: applicant.email,
-      dateOfBirth: applicant.dateOfBirth,
+      dateOfBirth,
       gender: dto.gender,
       bloodGroup: dto.bloodGroup,
       maritalStatus: dto.maritalStatus,
-      address: applicant.address,
+      address,
       city: dto.city || 'NOT_SET',
       state: dto.state || 'NOT_SET',
       pincode: dto.pincode || 'NOT_SET',
