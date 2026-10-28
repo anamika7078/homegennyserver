@@ -430,6 +430,11 @@ export class FinanceInvoiceService {
   async generateInvoiceHtml(id: string): Promise<string> {
     const inv = await this.getInvoice(id);
     const supplier = await this.supplierIdentity();
+    // The invoice is dated the day it was raised. It used to print its due date
+    // under "Date", so an invoice raised on 27 Oct read 5 Nov. IST, whatever
+    // the server's own zone.
+    const istDate = (v: unknown) =>
+      v ? new Date(v as string).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—';
 
     const fmt = (n: number | string) =>
       new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -597,7 +602,8 @@ export class FinanceInvoiceService {
 
   <div class="meta">
     <div><span>${isPayslip ? 'Payslip' : 'Invoice'} no.</span><strong>${esc(inv.invoice_number)}</strong></div>
-    <div><span>Date</span><strong>${new Date(inv.due_date).toLocaleDateString('en-IN')}</strong></div>
+    <div><span>Date</span><strong>${istDate((inv as { created_at?: unknown }).created_at ?? inv.due_date)}</strong></div>
+    ${!isPayslip ? `<div><span>Due</span><strong>${istDate(inv.due_date)}</strong></div>` : ''}
     <div><span>Period</span><strong>${isPayslip
       ? `${String(inv.period_month).padStart(2, '0')}/${inv.period_year}`
       : `${asDate(period.from)} – ${asDate(period.to)}`}</strong></div>
