@@ -184,6 +184,14 @@ export class ClientMobileController {
       this.resolveActivePlacement(customer.id),
     ]);
 
+    const paidRows = unpaidInvoices.length
+      ? await this.prisma.$queryRaw<{ invoice_id: string; paid: string }[]>`
+          SELECT invoice_id, COALESCE(SUM(amount), 0)::text AS paid FROM invoice_payments
+           WHERE status = 'SUCCESS' AND invoice_id = ANY(${unpaidInvoices.map((i) => i.id)}::uuid[])
+           GROUP BY invoice_id`
+      : [];
+    const paidByInvoice = new Map(paidRows.map((r) => [r.invoice_id, Number(r.paid)]));
+
     let todayAttendanceStatus: string | null = null;
     if (placement) {
       // Counts a live-in stay or night shift that began before midnight.
@@ -195,8 +203,15 @@ export class ClientMobileController {
       activePlacementsCount: placementsCount,
       todayAttendanceStatus,
       pendingInvoicesCount: unpaidInvoices.length,
-      totalUnpaidAmount:
-        Math.round(unpaidInvoices.reduce((sum, i) => sum + Number(i.totalAmount), 0) * 100) / 100,
+      // What is still owed: each invoice's total less its credit notes and the
+      // payments received. It used to add up whole totals, so a part-paid or
+      // credited invoice was counted in full.
+      totalUnpaidAmount: Math.round(
+        unpaidInvoices.reduce(
+          (sum, i) => sum + Math.max(0, Number(i.totalAmount) - Number(i.creditedAmount ?? 0) - (paidByInvoice.get(i.id) ?? 0)),
+          0,
+        ) * 100,
+      ) / 100,
     };
   }
 
@@ -366,6 +381,8 @@ export class ClientMobileController {
         managementFee: Number(i.managementFee),
         gstAmount: Number(i.gstAmount),
         totalAmount: Number(i.totalAmount),
+        // Credit notes against it (corrections); 0 when none.
+        creditedAmount: Number(i.creditedAmount ?? 0),
         status: i.status,
         dueDate: i.dueDate.toISOString(),
       })),
@@ -740,8 +757,11 @@ export class ClientMobileController {
       igst,
       gstAmount: Number(invoice.gstAmount),
       totalAmount,
+      // A credit note (a correction of this invoice) reduces what is owed. It
+      // was ignored, so a credited invoice still showed its full total as due.
+      creditedAmount: Number(invoice.creditedAmount ?? 0),
       amountPaid: paidTotal,
-      amountDue: Math.round((totalAmount - paidTotal) * 100) / 100,
+      amountDue: Math.max(0, Math.round((totalAmount - Number(invoice.creditedAmount ?? 0) - paidTotal) * 100) / 100),
     };
   }
 

@@ -198,8 +198,8 @@ async function main() {
       check('the service lines plus GST add up to the total',
         Math.abs(sum - Number(detail.body?.totalAmount)) < 0.02,
         { sum, total: detail.body?.totalAmount });
-      check('paid + due equals the total',
-        Math.abs((Number(detail.body?.amountPaid) + Number(detail.body?.amountDue))
+      check('paid + credited + due equals the total',
+        Math.abs((Number(detail.body?.amountPaid) + Number(detail.body?.creditedAmount ?? 0) + Number(detail.body?.amountDue))
           - Number(detail.body?.totalAmount)) < 0.02, detail.body);
     }
 
