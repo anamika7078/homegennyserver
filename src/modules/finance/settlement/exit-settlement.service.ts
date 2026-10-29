@@ -180,7 +180,8 @@ export class ExitSettlementService {
       `SELECT COUNT(*) AS n FROM staff_daily_attendance
        WHERE staff_id = $1
          AND attendance_date >= $2 AND attendance_date <= $3
-         AND status IN ('PRESENT','OVERTIME')`,
+         AND status IN ('PRESENT','OVERTIME')
+         AND client_status <> 'DISPUTED'`,
       [p.staff_id, monthStart, exitDate],
     ).catch(() => [{ n: '0' }]);
     const finalMonthDays = parseInt(attendance[0]?.n ?? '0', 10);
@@ -201,7 +202,8 @@ export class ExitSettlementService {
       const unpaid = await this.dataSource.query<{ n: string }[]>(
         `SELECT COUNT(*) AS n FROM staff_daily_attendance
           WHERE placement_id = $1 AND attendance_date > $2::date AND attendance_date <= $3
-            AND status IN ('PRESENT','OVERTIME')`,
+            AND status IN ('PRESENT','OVERTIME')
+            AND client_status <> 'DISPUTED'`,
         [p.id, paidTo, exitDate],
       ).catch(() => [{ n: '0' }]);
       unpaidDays = parseInt(unpaid[0]?.n ?? '0', 10);

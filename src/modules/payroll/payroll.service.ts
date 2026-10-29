@@ -396,6 +396,8 @@ export class PayrollService {
        WHERE staff_id = $1
          AND EXTRACT(MONTH FROM attendance_date) = $2
          AND EXTRACT(YEAR  FROM attendance_date) = $3
+         -- A day the client disputed waits for the RM.
+         AND client_status <> 'DISPUTED'
        GROUP BY status`,
       [staffId, month, year],
     );
@@ -453,6 +455,7 @@ export class PayrollService {
               AND EXTRACT(MONTH FROM sda.attendance_date) = $2
               AND EXTRACT(YEAR  FROM sda.attendance_date) = $3
               AND sda.attendance_date <= $4::date
+              AND sda.client_status <> 'DISPUTED'
          ) a ON true
         WHERE p.staff_id = $1
           AND p.status IN ('CONFIRMED', 'TRIAL')`,
@@ -494,7 +497,8 @@ export class PayrollService {
                   COUNT(*) FILTER (WHERE status = 'HALF_DAY')::text                         AS half_days,
                   COALESCE(SUM(hours_worked) FILTER (WHERE status IN ('PRESENT','HALF_DAY','OVERTIME')), 0)::text AS hours
              FROM staff_daily_attendance
-            WHERE placement_id = $1 AND attendance_date BETWEEN $2::date AND $3::date`,
+            WHERE placement_id = $1 AND attendance_date BETWEEN $2::date AND $3::date
+              AND client_status <> 'DISPUTED'`,
           [r.id, part.from, part.to],
         );
         gross += grossOf(rates, r.placement_type, c);
@@ -530,6 +534,8 @@ export class PayrollService {
          AND EXTRACT(MONTH FROM attendance_date) = $2
          AND EXTRACT(YEAR  FROM attendance_date) = $3
          AND attendance_date BETWEEN $4::date AND $5::date
+         -- Not paid or billed while the client disputes it; the RM resolves it.
+         AND client_status <> 'DISPUTED'
        GROUP BY status`,
       [placementId, month, year, range.from, range.to],
     );
@@ -543,7 +549,8 @@ export class PayrollService {
          AND EXTRACT(MONTH FROM attendance_date) = $2
          AND EXTRACT(YEAR  FROM attendance_date) = $3
          AND attendance_date BETWEEN $4::date AND $5::date
-         AND status IN ('PRESENT', 'HALF_DAY', 'OVERTIME')`,
+         AND status IN ('PRESENT', 'HALF_DAY', 'OVERTIME')
+         AND client_status <> 'DISPUTED'`,
       [placementId, month, year, range.from, range.to],
     );
 

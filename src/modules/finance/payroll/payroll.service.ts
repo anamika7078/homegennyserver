@@ -668,6 +668,8 @@ export class FinancePayrollService {
             WHERE sda.placement_id = p.id
               AND EXTRACT(MONTH FROM sda.attendance_date) = $1
               AND EXTRACT(YEAR  FROM sda.attendance_date) = $2
+              -- Disputed days are not payable yet, so they are not drift either.
+              AND sda.client_status <> 'DISPUTED'
          ) a ON true
          -- A month invoiced in parts has several payroll rows for one
          -- placement; summed, so the comparison is against the whole month

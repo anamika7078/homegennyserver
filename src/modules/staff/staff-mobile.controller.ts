@@ -397,14 +397,34 @@ export class StaffMobileController {
       take: 30,
     });
 
+    // Whether the client has confirmed each day (or disputed it, and what the
+    // RM decided) — the staff member sees why a day may not be paid yet.
+    const days = shifts.length
+      ? await this.prisma.staffDailyAttendance.findMany({
+          where: { staffId: staff.id, attendanceDate: { in: [...new Set(shifts.map((s) => s.shiftDate))] } },
+          select: { placementId: true, attendanceDate: true, clientStatus: true, clientNote: true, resolutionNote: true },
+        })
+      : [];
+    const dayOf = (s: { placementId: string | null; shiftDate: Date }) =>
+      days.find((d) => d.attendanceDate.getTime() === s.shiftDate.getTime() && (!s.placementId || d.placementId === s.placementId));
+
     return {
-      history: shifts.map((s) => ({
-        date: s.shiftDate.toISOString().slice(0, 10),
-        check_in: s.checkInAt?.toISOString() ?? null,
-        check_out: s.checkOutAt?.toISOString() ?? null,
-        status: s.checkInAt && s.checkOutAt ? 'present' : s.checkInAt ? 'in_progress' : 'absent',
-        location: s.checkInLat && s.checkInLng ? `${s.checkInLat},${s.checkInLng}` : null,
-      })),
+      history: shifts.map((s) => {
+        const d = dayOf(s);
+        return {
+          date: s.shiftDate.toISOString().slice(0, 10),
+          check_in: s.checkInAt?.toISOString() ?? null,
+          check_out: s.checkOutAt?.toISOString() ?? null,
+          status: s.checkInAt && s.checkOutAt ? 'present' : s.checkInAt ? 'in_progress' : 'absent',
+          location: s.checkInLat && s.checkInLng ? `${s.checkInLat},${s.checkInLng}` : null,
+          /** PENDING | APPROVED | DEEMED | DISPUTED | APPROVED_PAPER | NOT_REQUIRED; null when no attendance day yet. */
+          client_status: d?.clientStatus ?? null,
+          /** The client's reason, when disputed. */
+          client_note: d?.clientStatus === 'DISPUTED' ? d.clientNote : null,
+          /** The RM's decision on a dispute. */
+          resolution_note: d?.resolutionNote ?? null,
+        };
+      }),
     };
   }
 
