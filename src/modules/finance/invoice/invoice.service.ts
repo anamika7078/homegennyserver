@@ -356,18 +356,40 @@ export class FinanceInvoiceService {
       rate_basis: string | null; duties: string | null; duty_billing_rate: string | null;
     }[]>(
       `SELECT sa.full_name AS staff_name, sa.series::text AS series,
-              pr.placement_type, pr.shift_days, pr.hours_worked, pr.hourly_rate,
-             pr.rate_basis, pr.duties, pr.duty_billing_rate,
-              p.shift_hours,
+              pr.placement_type::text AS placement_type, pr.shift_days::text AS shift_days,
+              pr.hours_worked::text AS hours_worked, pr.hourly_rate::text AS hourly_rate,
+              pr.rate_basis::text AS rate_basis, pr.duties::text AS duties,
+              pr.duty_billing_rate::text AS duty_billing_rate,
+              p.shift_hours::text AS shift_hours,
               (SELECT COALESCE(SUM(ii.amount), 0) FROM invoice_items ii
-                WHERE ii.invoice_id = $1 AND ii.staff_id = pr.staff_id) AS amount
+                WHERE ii.invoice_id = $1 AND ii.staff_id = pr.staff_id)::text AS amount,
+              sa.staff_code
          FROM payroll_records pr
          JOIN placements p ON p.id = pr.placement_id
          JOIN staff_applicants sa ON sa.id = pr.staff_id
         WHERE pr.client_invoice_id = $1
-        ORDER BY sa.staff_code`,
+       UNION ALL
+       -- A rejected or cancelled invoice had its payroll voided: the rows are
+       -- kept whole in payroll_records_voided, so its copy still prints the
+       -- way it was issued instead of falling back to the internal breakdown.
+       SELECT sa.full_name, sa.series::text,
+              v.row->>'placement_type', v.row->>'shift_days', v.row->>'hours_worked', v.row->>'hourly_rate',
+              v.row->>'rate_basis', v.row->>'duties', v.row->>'duty_billing_rate',
+              p.shift_hours::text,
+              (SELECT COALESCE(SUM(ii.amount), 0) FROM invoice_items ii
+                WHERE ii.invoice_id = $1 AND ii.staff_id = v.staff_id)::text,
+              sa.staff_code
+         FROM payroll_records_voided v
+         JOIN placements p ON p.id = v.placement_id
+         JOIN staff_applicants sa ON sa.id = v.staff_id
+        WHERE v.client_invoice_id = $1
+          AND NOT EXISTS (SELECT 1 FROM payroll_records x WHERE x.client_invoice_id = $1)
+        ORDER BY staff_code`,
       [invoiceId],
-    );
+    ).catch((e: Error) => {
+      this.logger.warn(`clientServiceLines ${invoiceId}: ${e.message}`);
+      return [];
+    });
     if (!rows.length) return null;
 
     const { days } = periodRange(month, year);
