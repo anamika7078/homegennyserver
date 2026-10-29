@@ -171,6 +171,7 @@ export class StaffService {
     if (patch.languages !== undefined) metaPatch.languages = patch.languages;
     if (patch.alternatePhone !== undefined) metaPatch.alternate_phone = patch.alternatePhone;
     if (patch.experienceYears !== undefined) metaPatch.experience_years = patch.experienceYears;
+    if (patch.fatherOrHusbandName !== undefined) metaPatch.father_or_husband_name = patch.fatherOrHusbandName;
     const updated = await this.prisma.staffApplicant.update({
       where: { id: staff.id },
       data: {
@@ -464,6 +465,22 @@ export class StaffService {
       patch.assignedRm = { connect: { id: String(data.assigned_rm_id) } };
     }
     if (data.metadata) patch.metadata = data.metadata as Prisma.InputJsonValue;
+    // The muster roll needs these; merged into metadata, never replacing it.
+    if (data.father_or_husband_name !== undefined || data.gender !== undefined) {
+      const extra: Record<string, unknown> = {};
+      if (data.father_or_husband_name !== undefined) {
+        const v = String(data.father_or_husband_name ?? '').trim();
+        if (v && (v.length < 2 || v.length > 150)) throw new BadRequestException('father_or_husband_name must be 2–150 characters.');
+        extra.father_or_husband_name = v || null;
+      }
+      if (data.gender !== undefined) {
+        const g = String(data.gender ?? '').trim().toUpperCase();
+        if (g && !['MALE', 'FEMALE', 'OTHER'].includes(g)) throw new BadRequestException('gender must be MALE, FEMALE or OTHER.');
+        extra.gender = g || null;
+      }
+      const base = (patch.metadata ?? before.metadata ?? {}) as Record<string, unknown>;
+      patch.metadata = { ...base, ...extra } as Prisma.InputJsonValue;
+    }
     if (data.pv_status) patch.pvStatus = data.pv_status as never;
     if (data.video_cert_id) patch.videoCertId = String(data.video_cert_id);
 

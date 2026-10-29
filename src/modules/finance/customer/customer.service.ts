@@ -265,7 +265,7 @@ export class FinanceCustomerService implements OnModuleInit {
 
   async listCustomers(search?: string) {
     let sql = `
-      SELECT c.id, c.customer_name, c.address, c.city, c.state, c.pincode, c.pan_card, c.gstn, c.billing_cycle,
+      SELECT c.id, c.customer_name, c.address, c.city, c.state, c.pincode, c.pan_card, c.gstn, c.billing_cycle, c.attendance_proof_mode,
              c.bill_no_prefix, c.bill_seq, c.unit_code, c.unit_name,
              c.status, c.metadata, c.created_at, c.updated_at
       FROM finance_customers c
@@ -283,7 +283,7 @@ export class FinanceCustomerService implements OnModuleInit {
     const rows = await this.dataSource.query(
       `SELECT c.id, c.customer_name, c.address, c.city, c.state, c.pincode, c.pan_card, c.gstn,
               c.bill_no_prefix, c.bill_seq, c.unit_code, c.unit_name,
-              c.status, c.metadata, c.created_at, c.updated_at, c.billing_cycle
+              c.status, c.metadata, c.created_at, c.updated_at, c.billing_cycle, c.attendance_proof_mode
        FROM finance_customers c
        WHERE c.id = $1`,
       [id],
@@ -506,9 +506,19 @@ export class FinanceCustomerService implements OnModuleInit {
 
   async updateCustomer(
     id: string,
-    dto: Partial<CreateCustomerDto> & { status?: string; billing_cycle?: string },
+    dto: Partial<CreateCustomerDto> & { status?: string; billing_cycle?: string; attendance_proof_mode?: string },
   ) {
     const existing = await this.getCustomer(id);
+
+    // How the client confirms attendance: APP (taps in the client app), PAPER
+    // (signs the printed muster roll), BOTH.
+    let proofMode: string | undefined;
+    if (dto.attendance_proof_mode !== undefined) {
+      proofMode = String(dto.attendance_proof_mode).toUpperCase();
+      if (!['APP', 'PAPER', 'BOTH'].includes(proofMode)) {
+        throw new BadRequestException('attendance_proof_mode must be APP, PAPER or BOTH.');
+      }
+    }
 
     // How often this client is invoiced automatically. MANUAL: never.
     let billingCycle: string | undefined;
@@ -529,6 +539,12 @@ export class FinanceCustomerService implements OnModuleInit {
         if (!code) throw new BadRequestException(`"${raw}" is not a recognised Indian state.`);
         state = stateNameOf(code);
       }
+    }
+    if (proofMode !== undefined) {
+      await this.dataSource.query(
+        `UPDATE finance_customers SET attendance_proof_mode = $1, updated_at = now() WHERE id = $2`,
+        [proofMode, id],
+      );
     }
     if (billingCycle !== undefined || state !== undefined || dto.city !== undefined) {
       await this.dataSource.query(

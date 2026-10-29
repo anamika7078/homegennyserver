@@ -23,6 +23,7 @@ const STAFF_PROFILE_SCHEMA = {
     alternate_phone: { type: 'string' },
     email: { type: 'string' },
     experience_years: { type: 'integer', example: 3 },
+    father_or_husband_name: { type: 'string', example: 'Ramesh Kumar', description: 'For the muster roll (Form XVI). Optional; 2–150 letters.' },
   },
 };
 

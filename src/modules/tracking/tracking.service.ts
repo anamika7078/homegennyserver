@@ -280,6 +280,9 @@ export class TrackingService {
         status: 'PRESENT' as const,
         markedBy: actorId ?? placement.rmId ?? shift.staffId,
         notes: 'Live-in: on duty at noon',
+        // The staff member's own stay — the client confirms it like a check-in.
+        source: 'STAFF_APP',
+        clientStatus: 'PENDING',
       })),
       skipDuplicates: true,
     });
@@ -428,7 +431,10 @@ export class TrackingService {
       await this.prisma.staffDailyAttendance
         .upsert({
           where: { staffId_placementId_attendanceDate: { staffId: staff.id, placementId: placement.id, attendanceDate: day } },
-          create: { staffId: staff.id, placementId: placement.id, branchId: placement.branchId, attendanceDate: day, status: 'PRESENT', markedBy: userId },
+          // From the staff app, so the client confirms it (M1). An HR or RM
+          // entry for the same day keeps its own source: the update below
+          // leaves source and client_status alone.
+          create: { staffId: staff.id, placementId: placement.id, branchId: placement.branchId, attendanceDate: day, status: 'PRESENT', markedBy: userId, source: 'STAFF_APP', clientStatus: 'PENDING' },
           update: { status: 'PRESENT', branchId: placement.branchId, markedBy: userId },
         })
         .catch((e) => this.logger.warn(`attendance sync on check-in failed: ${e.message}`));

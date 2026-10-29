@@ -99,6 +99,8 @@ export interface StaffProfilePatch {
   alternatePhone?: string;
   email?: string;
   experienceYears?: number;
+  /** Form XVI muster roll column "Father's/Husband's Name". Optional. */
+  fatherOrHusbandName?: string;
 }
 
 /**
@@ -199,6 +201,13 @@ export function parseStaffProfile(
   if (email !== undefined) {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 200) throw new BadRequestException('email is not valid.');
     out.email = email.toLowerCase();
+  }
+  const guardian = str('father_or_husband_name');
+  if (guardian !== undefined) {
+    if (guardian.length < 2 || guardian.length > 150 || !/^[\p{L} .'-]+$/u.test(guardian)) {
+      throw new BadRequestException('father_or_husband_name must be 2–150 letters.');
+    }
+    out.fatherOrHusbandName = guardian;
   }
   const exp = str('experience_years');
   if (exp !== undefined) {

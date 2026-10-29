@@ -486,6 +486,8 @@ model Placement {
   rateVerifiedAt        DateTime? @map("rate_verified_at") @db.Timestamptz(6)
   rateVerifiedBy        String?   @map("rate_verified_by") @db.Uuid
   rateVerifiedInvoiceId String?   @map("rate_verified_invoice_id") @db.Uuid
+  /// 0 = Sunday … 6 = Saturday. A muster roll marks it WO, not absent. Null = none fixed.
+  weeklyOffDay          Int?      @map("weekly_off_day") @db.SmallInt
   // Written by exit() (placement.service.ts) — used to silently no-op via a
   // raw-SQL catch fallback because these columns never existed until now.
   exitDate         DateTime?       @map("exit_date") @db.Date
@@ -1012,6 +1014,19 @@ model StaffDailyAttendance {
   hoursWorked    Decimal?              @map("hours_worked") @db.Decimal(4, 1)
   markedBy       String                @map("marked_by") @db.Uuid
   notes          String?
+  /// Where the day came from: STAFF_APP (check-in, live-in duty, RM-approved
+  /// shift) | HR | RM | SYSTEM. Only STAFF_APP days wait on the client.
+  source         String                @default("SYSTEM") @db.VarChar(20)
+  /// NOT_REQUIRED | PENDING | APPROVED | DEEMED (no answer in 48h) | DISPUTED |
+  /// APPROVED_PAPER (covered by a signed muster roll). See
+  /// scratch/_muster_roll_foundation_migration.js.
+  clientStatus   String                @default("NOT_REQUIRED") @map("client_status") @db.VarChar(20)
+  clientActionAt DateTime?             @map("client_action_at") @db.Timestamptz(6)
+  clientActionBy String?               @map("client_action_by") @db.Uuid
+  clientNote     String?               @map("client_note")
+  resolvedAt     DateTime?             @map("resolved_at") @db.Timestamptz(6)
+  resolvedBy     String?               @map("resolved_by") @db.Uuid
+  resolutionNote String?               @map("resolution_note")
   createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
   branch         Branch                @relation(fields: [branchId], references: [id])
@@ -1420,6 +1435,9 @@ model FinanceCustomer {
   /// MONTHLY | FORTNIGHTLY | WEEKLY | MANUAL — when a DRAFT invoice is raised
   /// automatically (the morning after each period closes). MANUAL: never.
   billingCycle                    String                            @default("MONTHLY") @map("billing_cycle") @db.VarChar(20)
+  /// How this client confirms attendance: APP (approves in the client app), PAPER
+  /// (signs the printed Form XVI muster roll), BOTH.
+  attendanceProofMode             String                            @default("APP") @map("attendance_proof_mode") @db.VarChar(10)
   pincode                         String?                           @db.VarChar(20)
   /// The client's home, for the check-in distance on the RM map
   lat                             Decimal?                          @db.Decimal(10, 7)

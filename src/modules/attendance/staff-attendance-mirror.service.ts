@@ -207,6 +207,10 @@ export class StaffAttendanceMirrorService {
         hoursWorked: params.hoursWorked ?? null,
         markedBy: params.actorId,
         notes: note,
+        // HR entries need no client approval; their proof is the signed
+        // paper muster roll.
+        source: 'HR',
+        clientStatus: 'NOT_REQUIRED',
       },
       update: {
         status: mappedStatus,
@@ -219,6 +223,9 @@ export class StaffAttendanceMirrorService {
           : {}),
         markedBy: params.actorId,
         notes: note,
+        // HR overriding a staff check-in: the office entry wins.
+        source: 'HR',
+        clientStatus: 'NOT_REQUIRED',
       },
     });
 

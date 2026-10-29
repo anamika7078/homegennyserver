@@ -107,6 +107,9 @@ function todayUtc() {
     token: hrToken,
     body: {
       staffApplicantId: target.id,
+      // A candidate who signed up on the app has no address or DOB; HR supplies them.
+      ...(target.address ? {} : { address: 'Test address, New Delhi' }),
+      ...(target.dateOfBirth ? {} : { dateOfBirth: '1993-01-01' }),
       department: 'Field Operations',
       designation: 'Housemaid',
       categoryId: cat.rows[0].id,

@@ -26,6 +26,22 @@ const TRIAL_DAYS_BY_SERIES: Record<string, number> = {
 };
 const DEFAULT_TRIAL_DAYS = 7;
 
+const WEEKDAYS = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
+/**
+ * The placement's weekly off: 0–6 (0 = Sunday) or a day name. The muster roll
+ * marks that day WO instead of absent. '' or null = none fixed.
+ */
+function parseWeeklyOff(v: unknown): number | null {
+  if (v === undefined || v === null || v === '') return null;
+  const s = String(v).trim().toUpperCase();
+  const byName = WEEKDAYS.findIndex((d) => d === s || d.slice(0, 3) === s);
+  const n = /^\d$/.test(s) ? Number(s) : byName;
+  if (!(n >= 0 && n <= 6)) {
+    throw new BadRequestException('weekly_off_day must be 0–6 (0 = Sunday) or a day name, e.g. SUNDAY.');
+  }
+  return n;
+}
+
 /** HH:MM, 24 h (IST). Blank → undefined (not given). */
 export function parseShiftStart(v: unknown): string | undefined {
   if (v === undefined || v === null || String(v).trim() === '') return undefined;
@@ -53,6 +69,8 @@ export interface PlacementRow {
   shift_hours?: number | null;
   /** HH:MM (IST) the shift starts; null = not known (never shown as late). */
   shift_start?: string | null;
+  /** 0 = Sunday … 6 = Saturday; the muster roll marks it WO. Null = none fixed. */
+  weekly_off_day?: number | null;
   hourly_rate?: number | null;
   hourly_fee?: number | null;
   /** MONTHLY | HOURLY | PER_DUTY — how this placement is priced. */
@@ -184,6 +202,7 @@ export class PlacementService {
     placementType?: string | null;
     shiftHours?: unknown;
     shiftStart?: string | null;
+    weeklyOffDay?: number | null;
     hourlyRate?: unknown;
     hourlyFee?: unknown;
     rateBasis?: string | null;
@@ -216,6 +235,7 @@ export class PlacementService {
       placement_type: (p.placementType as 'PERMANENT' | 'TEMPORARY' | null) ?? 'PERMANENT',
       shift_hours: p.shiftHours != null ? Number(p.shiftHours) : null,
       shift_start: p.shiftStart ?? null,
+      weekly_off_day: p.weeklyOffDay ?? null,
       hourly_rate: p.hourlyRate != null ? Number(p.hourlyRate) : null,
       hourly_fee: p.hourlyFee != null ? Number(p.hourlyFee) : null,
       rate_basis: effectiveRateBasis(p.placementType, p.rateBasis),
@@ -507,6 +527,7 @@ export class PlacementService {
       throw new BadRequestException(`shift_hours must be between 1 and 24, not ${data.shift_hours}.`);
     }
     const shiftStart = parseShiftStart(data.shift_start);
+    const weeklyOffDay = parseWeeklyOff(data.weekly_off_day);
 
     const dutyTerms = await this.resolveDutyTerms(data, { clientId, placementType });
     const isPerDuty = dutyTerms.rateBasis === 'PER_DUTY';
@@ -541,6 +562,7 @@ export class PlacementService {
         placementType,
         shiftHours,
         shiftStart: shiftStart ?? null,
+        weeklyOffDay: weeklyOffDay ?? null,
         staffSalary: wageTerms.staffSalary,
         managementFee: wageTerms.managementFee,
         hourlyRate: isHourly && !isPerDuty ? hourlyRate : null,
@@ -681,6 +703,10 @@ export class PlacementService {
     }
     // '' or null clears it (no start time → never late); absent leaves it alone.
     const shiftStart = data.shift_start === undefined ? undefined : parseShiftStart(data.shift_start) ?? null;
+    // '' or null clears it; absent leaves it alone.
+    const weeklyOffDay = (data as Record<string, unknown>).weekly_off_day === undefined
+      ? undefined
+      : parseWeeklyOff((data as Record<string, unknown>).weekly_off_day) ?? null;
     const existingMetadata = (existing.metadata as Record<string, unknown> | null) ?? {};
     // A rate sent after Finance rejected an invoice is the RM's answer to the
     // review: the client can be invoiced again (at the new rate).
@@ -699,6 +725,7 @@ export class PlacementService {
         ...(wageTerms.staffSalary != null ? { staffSalary: wageTerms.staffSalary } : {}),
         ...(wageTerms.managementFee != null ? { managementFee: wageTerms.managementFee } : {}),
         ...(shiftStart !== undefined ? { shiftStart } : {}),
+        ...(weeklyOffDay !== undefined ? { weeklyOffDay } : {}),
         ...(shiftHours !== undefined ? { shiftHours } : {}),
         ...dutyTerms,
         ...(Object.keys(wageTerms.metadataPatch).length
@@ -724,6 +751,7 @@ export class PlacementService {
         },
         via_wage_config: !!data.wage_config,
         ...(shiftStart !== undefined ? { shift_start: shiftStart } : {}),
+        ...(weeklyOffDay !== undefined ? { weekly_off_day: weeklyOffDay } : {}),
         ...(shiftHours !== undefined ? { shift_hours: shiftHours } : {}),
         ...dutyTerms,
       },

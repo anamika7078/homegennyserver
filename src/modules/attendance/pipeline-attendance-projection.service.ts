@@ -131,7 +131,13 @@ export class PipelineAttendanceProjectionService {
     >(
       `
       WITH source AS (
-        SELECT e.id            AS employee_id,
+        -- One row per employee per day. A staff member who worked two houses
+        -- that day has two pipeline rows, and the HR ledger holds one: both
+        -- went into one upsert, which Postgres refuses outright ("cannot affect
+        -- row a second time"), failing the whole sync. The day takes the best
+        -- status of the two — present at one house is present.
+        SELECT DISTINCT ON (e.id, sda.attendance_date)
+               e.id            AS employee_id,
                sda.attendance_date,
                CASE sda.status::text
                  WHEN 'PRESENT'  THEN 'Present'
@@ -145,6 +151,10 @@ export class PipelineAttendanceProjectionService {
          WHERE e.deleted_at IS NULL
            AND sda.attendance_date BETWEEN $1::date AND $2::date
            AND ($3::uuid IS NULL OR e.id = $3::uuid)
+         ORDER BY e.id, sda.attendance_date,
+                  CASE sda.status::text
+                    WHEN 'PRESENT' THEN 1 WHEN 'OVERTIME' THEN 1 WHEN 'HALF_DAY' THEN 2
+                    WHEN 'LEAVE' THEN 3 WHEN 'ABSENT' THEN 4 ELSE 5 END
       ),
       upserted AS (
         INSERT INTO attendance

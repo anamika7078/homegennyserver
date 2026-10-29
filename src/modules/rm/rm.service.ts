@@ -777,6 +777,9 @@ export class RmService {
             status: 'PRESENT',
             hoursWorked: shiftHours,
             markedBy: user.id,
+            // Still the staff member's own check-in, so the client confirms it.
+            source: 'STAFF_APP',
+            clientStatus: 'PENDING',
           },
           update: {
             status: 'PRESENT',
@@ -1294,6 +1297,10 @@ export class RmService {
         hoursWorked: body.hours_worked ?? null,
         overtimeHours: body.overtime_hours,
         markedBy: user.id,
+        // Entered by the RM: proved by the signed paper muster roll, not
+        // the client's app.
+        source: 'RM',
+        clientStatus: 'NOT_REQUIRED',
       },
       update: {
         status: body.status,
@@ -1301,6 +1308,8 @@ export class RmService {
         overtimeHours: body.overtime_hours,
         markedBy: user.id,
         branchId: placement.branchId,
+        source: 'RM',
+        clientStatus: 'NOT_REQUIRED',
       },
     });
 

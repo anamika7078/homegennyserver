@@ -117,6 +117,8 @@ export class OnboardingService {
       languages: Array.isArray(m.languages) ? m.languages : [],
       alternatePhone: (m.alternate_phone as string | undefined) ?? null,
       experienceYears: (m.experience_years as number | undefined) ?? null,
+      /** Printed on the muster roll (Form XVI). Optional. */
+      fatherOrHusbandName: (m.father_or_husband_name as string | undefined) ?? null,
       profile_complete: !inS1,
       missing: inS1 ? staffProfileMissing(s) : [],
       /** Name, DOB, gender and category can't be changed in the app once S2 has started. */

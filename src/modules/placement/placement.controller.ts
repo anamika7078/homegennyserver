@@ -176,6 +176,7 @@ export class PlacementController {
         wage_config: WAGE_CONFIG_SCHEMA,
         shift_start: { type: 'string', example: '08:00', description: 'HH:MM (IST) the shift starts; "" clears it. Used for "late" on the staff snapshot.' },
         shift_hours: { type: 'number', example: 24, description: '1–24. 24 is a live-in (24×7) duty.' },
+        weekly_off_day: { type: 'integer', example: 0, description: '0 = Sunday … 6 = Saturday (or a day name). The muster roll marks it WO. "" or null clears it.' },
         rate_basis: { type: 'string', enum: ['MONTHLY', 'HOURLY', 'PER_DUTY'], description: 'PER_DUTY bills duties × duty_billing_rate; null = default for the placement type' },
         duty_rate: { type: 'number', example: 517, description: 'PER_DUTY: what the staff earns per duty' },
         duty_billing_rate: { type: 'number', example: 585, description: 'PER_DUTY: what the client is billed per duty, before GST (all-in)' },
@@ -199,7 +200,7 @@ export class PlacementController {
     @Req() req: { user: { id: string } },
     @Param('id') id: string,
     @Body() body: {
-      staff_salary?: number; management_fee?: number; wage_config?: WageConfigInput; shift_start?: string;
+      staff_salary?: number; management_fee?: number; wage_config?: WageConfigInput; shift_start?: string; weekly_off_day?: number | string | null;
       shift_hours?: number; rate_basis?: string | null; duty_rate?: number | null; duty_billing_rate?: number | null;
       esic_applicable?: boolean; pf_applicable?: boolean; covers_placement_id?: string | null;
       hourly_rate?: number; hourly_fee?: number; effective_from?: string; reason?: string;
