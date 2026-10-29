@@ -5,6 +5,7 @@ import { PayrollService } from '../../payroll/payroll.service';
 import { ConsolidatedInvoiceService } from './consolidated-invoice.service';
 import { FinanceInvoiceService } from './invoice.service';
 import { formatPeriod, isoDate } from '../../../common/finance/period.util';
+import { unlockMusterRollForInvoice } from '../../muster-roll/muster-roll-lock';
 
 type VoidSource = 'REJECT' | 'CANCEL' | 'RERUN';
 
@@ -211,6 +212,7 @@ export class InvoiceCorrectionService {
           `${opts.flagForReview ? 'rejected' : 'cancelled'}: ${text.slice(0, 80)}`],
       );
       const voided = await this.voidRows(m, payrollIds, source, `${inv.invoice_number}: ${text}`, actorId);
+      await unlockMusterRollForInvoice(m, inv.id);
 
       if (opts.flagForReview && placements.length) {
         await m.query(

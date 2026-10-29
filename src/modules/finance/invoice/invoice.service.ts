@@ -7,6 +7,8 @@ import { readSupplierSettings } from '../../../common/finance/supplier-settings'
 import { formatPeriod, isoDate, monthBounds, type Period } from '../../../common/finance/period.util';
 import { designationFor } from '../../../common/finance/service-lines.util';
 import { NotificationsService } from '../../notifications/notifications.service';
+import { lockMusterRollForInvoice } from '../../muster-roll/muster-roll-lock';
+import { MusterRollService } from '../../muster-roll/muster-roll.service';
 import {
   monthLabel, releaseInvoicePayroll, unreleaseInvoicePayroll, type ReleasedRow,
 } from '../../../common/finance/payroll-release';
@@ -47,6 +49,7 @@ export class FinanceInvoiceService {
   constructor(
     private readonly dataSource: DataSource,
     private readonly notifications: NotificationsService,
+    private readonly musterRolls: MusterRollService,
   ) {}
 
   async listInvoices(params: { status?: string; page?: number; limit?: number } = {}) {
@@ -177,7 +180,7 @@ export class FinanceInvoiceService {
 
   async getInvoice(
     id: string,
-  ): Promise<InvoiceRow & { line_items: object; reconciles?: boolean; line_items_total?: number; rate_notes?: unknown[] }> {
+  ): Promise<InvoiceRow & { line_items: object; reconciles?: boolean; line_items_total?: number; rate_notes?: unknown[]; attendance_proof?: unknown }> {
     // 1. Try to get from client_invoices
     //
     // Joined to `finance_customers`, not the legacy `clients` table:
@@ -263,6 +266,7 @@ export class FinanceInvoiceService {
         reconciles: Math.abs(itemsTotal - total) <= 0.01,
         line_items_total: itemsTotal,
         rate_notes: await this.rateNotes(id),
+        attendance_proof: inv.is_consolidated ? await this.attendanceProof(id) : null,
       };
     }
 
@@ -856,7 +860,9 @@ export class FinanceInvoiceService {
           WHERE id IN (SELECT placement_id FROM payroll_records WHERE client_invoice_id = $1)`,
         [id, actorId ?? null],
       );
-      return { from: inv.status, invoice_number: inv.invoice_number, released };
+      // The signed muster roll this was approved on is frozen under it.
+      const rollsLocked = await lockMusterRollForInvoice(m, id);
+      return { from: inv.status, invoice_number: inv.invoice_number, released, rollsLocked };
     });
     // Not a client invoice: an HR employee_payrolls row shown alongside them.
     if (!out) return this.transition(id, 'APPROVED', 'Invoice approved successfully');
@@ -869,6 +875,79 @@ export class FinanceInvoiceService {
       id, from: out.from, status: 'APPROVED' as const,
       message: 'Invoice approved successfully',
       payslips_released: out.released.length,
+      muster_roll_locked: out.rollsLocked > 0,
+    };
+  }
+
+  /**
+   * The proof behind the days on a client invoice: how the staff-app days of
+   * its period stand with the client, and the month's muster roll — signed in
+   * the app, on paper, or not at all. Finance approves anyway if it chooses;
+   * these are warnings, not a gate. Disputed days are already left off the bill.
+   */
+  async attendanceProof(invoiceId: string) {
+    const [inv] = await this.dataSource.query(
+      `SELECT ci.client_id, ci.period_month, ci.period_year,
+              COALESCE(ci.period_from, make_date(ci.period_year, ci.period_month, 1))::text AS period_from,
+              COALESCE(ci.period_to, (make_date(ci.period_year, ci.period_month, 1) + INTERVAL '1 month - 1 day')::date)::text AS period_to,
+              fc.attendance_proof_mode
+         FROM client_invoices ci LEFT JOIN finance_customers fc ON fc.id = ci.client_id
+        WHERE ci.id = $1`,
+      [invoiceId],
+    ).catch(() => []) as { client_id: string; period_month: number; period_year: number; period_from: string; period_to: string; attendance_proof_mode: string | null }[];
+    if (!inv?.client_id) return null;
+
+    const counts = await this.dataSource.query(
+      `SELECT sda.source, sda.client_status, COUNT(*)::int AS n
+         FROM staff_daily_attendance sda
+         JOIN placements p ON p.id = sda.placement_id
+        WHERE p.client_id = $1 AND sda.attendance_date BETWEEN $2::date AND $3::date
+        GROUP BY 1, 2`,
+      [inv.client_id, inv.period_from, inv.period_to],
+    ).catch(() => []) as { source: string; client_status: string; n: number }[];
+    const by_source: Record<string, number> = {};
+    const app_days: Record<string, number> = {};
+    for (const c of counts) {
+      by_source[c.source] = (by_source[c.source] ?? 0) + c.n;
+      if (c.source === 'STAFF_APP') app_days[c.client_status] = (app_days[c.client_status] ?? 0) + c.n;
+    }
+
+    let roll: Awaited<ReturnType<MusterRollService['view']>> | null = null;
+    try {
+      roll = await this.musterRolls.view(inv.client_id, inv.period_month, inv.period_year);
+    } catch (e) {
+      this.logger.warn(`attendanceProof ${invoiceId}: muster roll unavailable — ${(e as Error).message}`);
+    }
+    const mode = inv.attendance_proof_mode ?? 'APP';
+    const signed = roll?.signed ?? null;
+
+    const warnings: string[] = [];
+    if (app_days.PENDING) warnings.push(`${app_days.PENDING} staff-app day(s) not yet confirmed by the client.`);
+    if (app_days.DISPUTED) warnings.push(`${app_days.DISPUTED} day(s) disputed by the client — not billed until the RM resolves them.`);
+    if (!signed && (mode !== 'APP' || (by_source.RM ?? 0) > 0)) {
+      warnings.push('The month\'s muster roll is not signed — get the paper roll signed and uploaded.');
+    }
+    if (signed && roll!.changed_since_signed.length) {
+      warnings.push(`Attendance changed in ${roll!.changed_since_signed.length} place(s) after the client signed the muster roll.`);
+    }
+
+    return {
+      client_id: inv.client_id,
+      period_month: inv.period_month,
+      period_year: inv.period_year,
+      period_from: inv.period_from,
+      period_to: inv.period_to,
+      proof_mode: mode,
+      days_by_source: by_source,
+      staff_app_days: app_days,
+      muster_roll: signed
+        ? {
+            version: signed.version, sign_method: signed.sign_method, signed_at: signed.signed_at,
+            signed_name: signed.signed_name, has_scan: signed.has_scan, scan_id: signed.has_scan ? signed.id : null,
+            locked: signed.locked, changed_since_signed: roll!.changed_since_signed.length,
+          }
+        : null,
+      warnings,
     };
   }
 

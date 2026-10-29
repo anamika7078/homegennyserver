@@ -27,7 +27,7 @@ export class FinanceOversightService {
         return [] as T[];
       }) as Promise<T[]>;
 
-    const [draftInvoices, heldSlips, rateReviews, sentRateChanged, arrears, readyToReinvoice] = await Promise.all([
+    const [draftInvoices, heldSlips, rateReviews, sentRateChanged, arrears, readyToReinvoice, oldDisputes, unsignedRolls] = await Promise.all([
       // Salary waits on these: every day one sits in DRAFT is a day staff go unpaid.
       q<Record<string, unknown>>(
         `SELECT ci.id, ci.invoice_number, fc.customer_name, ci.total_amount, ci.created_at,
@@ -103,6 +103,38 @@ export class FinanceOversightService {
                                AND n.period_year = ci.period_year AND n.period_to >= ci.period_to)
           ORDER BY ci.rejected_at DESC`,
       ),
+      // Days the client disputed that the RM has not resolved in two days —
+      // neither billed nor paid while they wait.
+      q<Record<string, unknown>>(
+        `SELECT sda.id, sda.attendance_date::text AS date, sa.full_name AS staff_name, sa.staff_code,
+                fc.customer_name, sda.client_note, sda.client_action_at, u.full_name AS rm_name,
+                (CURRENT_DATE - sda.client_action_at::date) AS days_waiting
+           FROM staff_daily_attendance sda
+           JOIN placements p ON p.id = sda.placement_id
+           JOIN staff_applicants sa ON sa.id = sda.staff_id
+           LEFT JOIN finance_customers fc ON fc.id = p.client_id
+           LEFT JOIN users u ON u.id = COALESCE(p.rm_id, sa.assigned_rm_id)
+          WHERE sda.client_status = 'DISPUTED' AND sda.client_action_at < NOW() - INTERVAL '48 hours'
+          ORDER BY sda.client_action_at`,
+      ),
+      // Last month is over and the client's muster roll is not signed, where a
+      // signed roll is the proof: paper clients, or days the RM marked by hand.
+      q<Record<string, unknown>>(
+        `WITH m AS (SELECT date_trunc('month', (NOW() AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 month')::date AS d)
+         SELECT fc.id AS client_id, fc.customer_name, fc.attendance_proof_mode,
+                EXTRACT(MONTH FROM m.d)::int AS period_month, EXTRACT(YEAR FROM m.d)::int AS period_year,
+                COUNT(*)::int AS days, COUNT(*) FILTER (WHERE sda.source = 'RM')::int AS rm_days
+           FROM m, staff_daily_attendance sda
+           JOIN placements p ON p.id = sda.placement_id
+           JOIN finance_customers fc ON fc.id = p.client_id
+          WHERE sda.attendance_date >= m.d AND sda.attendance_date < (m.d + INTERVAL '1 month')
+            AND NOT EXISTS (SELECT 1 FROM muster_rolls mr
+                             WHERE mr.client_id = fc.id AND mr.status <> 'SUPERSEDED'
+                               AND mr.period_month = EXTRACT(MONTH FROM m.d) AND mr.period_year = EXTRACT(YEAR FROM m.d))
+          GROUP BY fc.id, fc.customer_name, fc.attendance_proof_mode, m.d
+         HAVING fc.attendance_proof_mode IN ('PAPER', 'BOTH') OR COUNT(*) FILTER (WHERE sda.source = 'RM') > 0
+          ORDER BY fc.customer_name`,
+      ),
     ]);
 
     return {
@@ -113,6 +145,8 @@ export class FinanceOversightService {
       sent_invoices_needing_correction: sentRateChanged,
       arrears_pending: arrears,
       ready_to_reinvoice: readyToReinvoice,
+      disputes_unresolved: oldDisputes,
+      muster_rolls_unsigned: unsignedRolls,
       counts: {
         draft_invoices_waiting: draftInvoices.length,
         slips_held: heldSlips.length,
@@ -120,6 +154,8 @@ export class FinanceOversightService {
         sent_invoices_needing_correction: sentRateChanged.length,
         arrears_pending: arrears.length,
         ready_to_reinvoice: readyToReinvoice.length,
+        disputes_unresolved: oldDisputes.length,
+        muster_rolls_unsigned: unsignedRolls.length,
       },
     };
   }
@@ -138,6 +174,8 @@ export class FinanceOversightService {
       c.sent_invoices_needing_correction ? `${c.sent_invoices_needing_correction} sent invoice(s) with a rate changed since — correct them` : null,
       c.arrears_pending ? `${c.arrears_pending} arrears waiting for the next payroll` : null,
       c.ready_to_reinvoice ? `${c.ready_to_reinvoice} rejected invoice(s) ready to raise again — the RM has answered` : null,
+      c.disputes_unresolved ? `${c.disputes_unresolved} disputed attendance day(s) unresolved for over 48 hours — neither billed nor paid` : null,
+      c.muster_rolls_unsigned ? `${c.muster_rolls_unsigned} client(s) without a signed muster roll for last month` : null,
     ].filter(Boolean) as string[];
 
     let financeNotes = 0;
