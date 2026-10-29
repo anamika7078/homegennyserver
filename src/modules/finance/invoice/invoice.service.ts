@@ -546,8 +546,11 @@ export class FinanceInvoiceService {
 <html><head><meta charset="utf-8"><title>${esc(title)} ${esc(inv.invoice_number)}</title>
 <style>
   *{box-sizing:border-box}
+  @page{size:A4;margin:12mm}
   body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;max-width:820px;margin:32px auto;
-       padding:32px;color:#0f172a;font-size:13px;line-height:1.5}
+       padding:32px;color:#0f172a;font-size:13px;line-height:1.5;
+       -webkit-print-color-adjust:exact;print-color-adjust:exact}
+  @media print{body{margin:0 auto;padding:0;font-size:12px;line-height:1.4}}
   h1{margin:0;font-size:24px;letter-spacing:-.01em}
   .doc{margin:2px 0 0;font-size:15px;font-weight:600;color:#334155;
        text-transform:uppercase;letter-spacing:.06em}
