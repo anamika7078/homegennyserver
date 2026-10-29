@@ -56,6 +56,7 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
 import { HealthModule } from './modules/health/health.module';
 import { RmModule } from './modules/rm/rm.module';
 import { AttendanceApprovalModule } from './modules/attendance-approval/attendance-approval.module';
+import { MusterRollModule } from './modules/muster-roll/muster-roll.module';
 import { TrainingModule } from './modules/training/training.module';
 import { FinanceModule } from './modules/finance/finance.module';
 // ClientMobileController is registered here, not in a module of its own, so the
@@ -179,6 +180,8 @@ function parseRedisUrl(url: string): { host: string; port: number; password?: st
     RmModule,
     // The client confirming staff-app attendance; the RM resolving disputes.
     AttendanceApprovalModule,
+    // Form XVI muster roll: built from attendance, signed by the client.
+    MusterRollModule,
     TrainingModule,
     FinanceModule,
     InvoiceModule,

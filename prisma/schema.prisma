@@ -672,6 +672,34 @@ model PayrollRecord {
   @@map("payroll_records")
 }
 
+/// A Form XVI muster roll as the client signed it — in the app (SIGNED_DIGITAL) or on
+/// paper, scan uploaded by the RM (SIGNED_PAPER). Re-signed after a correction → new
+/// version, the old one SUPERSEDED. Unsigned months are built live from attendance.
+/// scratch/_muster_roll_migration.js
+model MusterRoll {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  clientId    String    @map("client_id") @db.Uuid
+  periodMonth Int       @map("period_month")
+  periodYear  Int       @map("period_year")
+  version     Int       @default(1)
+  status      String    @db.VarChar(20)
+  snapshot    Json
+  signMethod  String    @map("sign_method") @db.VarChar(20)
+  signedAt    DateTime  @default(now()) @map("signed_at") @db.Timestamptz(6)
+  signedBy    String?   @map("signed_by") @db.Uuid
+  signedName  String?   @map("signed_name")
+  scanKey     String?   @map("scan_key")
+  scanMime    String?   @map("scan_mime") @db.VarChar(100)
+  note        String?
+  invoiceId   String?   @map("invoice_id") @db.Uuid
+  lockedAt    DateTime? @map("locked_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([clientId, periodYear, periodMonth, version], map: "muster_rolls_version_uniq")
+  @@index([clientId, periodYear, periodMonth], map: "idx_muster_rolls_client_month")
+  @@map("muster_rolls")
+}
+
 /// Every change to a placement's rates: what applied before and after, from
 /// which date, who and why. Active rows (superseded_at null) form one timeline;
 /// payroll reads the rate in force on each day. scratch/_rate_history_migration.js
